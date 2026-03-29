@@ -1,0 +1,38 @@
+import { pgTable, bigint, text, integer, varchar, timestamp, boolean, pgEnum } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod/v4";
+
+export const genderEnum = pgEnum("gender", ["male", "female", "other"]);
+export const lookingForEnum = pgEnum("looking_for", ["male", "female", "any"]);
+export const botStateEnum = pgEnum("bot_state", [
+  "idle",
+  "setup_name",
+  "setup_age",
+  "setup_gender",
+  "setup_looking_for",
+  "setup_bio",
+  "setup_country",
+  "chatting",
+]);
+
+export const usersTable = pgTable("users", {
+  id: bigint("id", { mode: "number" }).primaryKey(), // Telegram user ID
+  telegramUsername: varchar("telegram_username", { length: 100 }),
+  firstName: varchar("first_name", { length: 100 }),
+  name: varchar("name", { length: 100 }),
+  age: integer("age"),
+  gender: genderEnum("gender"),
+  lookingFor: lookingForEnum("looking_for"),
+  bio: text("bio"),
+  country: varchar("country", { length: 100 }),
+  isProfileComplete: boolean("is_profile_complete").default(false).notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  state: botStateEnum("state").default("idle").notNull(),
+  chattingWith: bigint("chatting_with", { mode: "number" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertUserSchema = createInsertSchema(usersTable).omit({ createdAt: true, updatedAt: true });
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof usersTable.$inferSelect;
