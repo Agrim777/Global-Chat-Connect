@@ -110,6 +110,7 @@ bot.onText(/\/help/, async (msg) => {
       "/match — Find a match\n" +
       "/stop — Stop current chat\n" +
       "/pay — Support us via Razorpay\n" +
+      "/paid — Activate premium after payment\n" +
       "/help — Show this help",
     { parse_mode: "Markdown" }
   );
@@ -139,6 +140,24 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
   await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
 }
 
+// ── Payment gate ────────────────────────────────────────────────────────────
+
+async function sendPayGate(chatId: number) {
+  await bot.sendMessage(
+    chatId,
+    `🔒 *Premium Required*\n\n` +
+    `Your first chat was *free* 🎉\n\n` +
+    `To keep connecting with people around the world 🌍, please support us with a small payment.\n\n` +
+    `After paying, send /paid to unlock unlimited matching! 💘`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[{ text: "💳 Pay Now to Unlock", url: PAY_LINK }]],
+      },
+    }
+  );
+}
+
 // ── Find match ─────────────────────────────────────────────────────────────
 
 async function findMatch(chatId: number, userId: number) {
@@ -149,6 +168,12 @@ async function findMatch(chatId: number, userId: number) {
   }
   if (me.state === "chatting") {
     await bot.sendMessage(chatId, "You're already in a chat! Send /stop to end it first.");
+    return;
+  }
+
+  // First chat is free; subsequent chats require payment
+  if (me.chatCount >= 1 && !me.hasPaid) {
+    await sendPayGate(chatId);
     return;
   }
 
@@ -173,7 +198,7 @@ async function findMatch(chatId: number, userId: number) {
     await bot.sendMessage(
       chatId,
       "😔 No matches available right now.\nCheck back later or /match again!",
-      { reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }]], resize_keyboard: true } }
+      { reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }], [{ text: "💳 Support Us" }]], resize_keyboard: true } }
     );
     return;
   }
@@ -181,18 +206,25 @@ async function findMatch(chatId: number, userId: number) {
   // Pick random candidate
   const match = eligible[Math.floor(Math.random() * eligible.length)];
 
-  // Set both users to chatting
-  await db.update(usersTable).set({ state: "chatting", chattingWith: match.id, updatedAt: new Date() }).where(eq(usersTable.id, userId));
-  await db.update(usersTable).set({ state: "chatting", chattingWith: userId, updatedAt: new Date() }).where(eq(usersTable.id, match.id));
+  // Increment chat count for the user initiating the match, then set both to chatting
+  await db.update(usersTable)
+    .set({ state: "chatting", chattingWith: match.id, chatCount: (me.chatCount ?? 0) + 1, updatedAt: new Date() })
+    .where(eq(usersTable.id, userId));
+  await db.update(usersTable)
+    .set({ state: "chatting", chattingWith: userId, updatedAt: new Date() })
+    .where(eq(usersTable.id, match.id));
 
   const stopKeyboard = {
     keyboard: [[{ text: "🛑 Stop Chat" }]],
     resize_keyboard: true,
   };
 
+  // Show free badge on first match
+  const freeLabel = me.chatCount === 0 ? " _(Free chat!)_ " : "";
+
   await bot.sendMessage(
     chatId,
-    `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} from ${match.country} 🌍\n\n_Say hello!_ 👋`,
+    `🎉 *Match found!*${freeLabel}\n\nYou're now chatting with *${match.name}*, ${match.age} from ${match.country} 🌍\n\n_Say hello!_ 👋`,
     { parse_mode: "Markdown", reply_markup: stopKeyboard }
   );
   await bot.sendMessage(
@@ -422,6 +454,29 @@ bot.onText(/\/stop/, async (msg) => {
 
 bot.onText(/\/pay/, async (msg) => {
   await sendPayLink(msg.chat.id);
+});
+
+bot.onText(/\/paid/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from!.id;
+  const user = await getUser(userId);
+  if (!user) {
+    await bot.sendMessage(chatId, "Please send /start first.");
+    return;
+  }
+  if (user.hasPaid) {
+    await bot.sendMessage(chatId, "✅ You already have premium access! Tap *Find Match* to connect. 💘", { parse_mode: "Markdown" });
+    return;
+  }
+  // Mark as paid and unlock
+  await db.update(usersTable).set({ hasPaid: true, updatedAt: new Date() }).where(eq(usersTable.id, userId));
+  await bot.sendMessage(
+    chatId,
+    `🎉 *Thank you for your support!*\n\nYour premium access is now *unlocked* 💘\n\nYou can now connect with people worldwide without limits! Tap *Find Match* to get started.`,
+    { parse_mode: "Markdown" }
+  );
+  const updated = await getUser(userId);
+  await sendMain(chatId, updated!);
 });
 
 logger.info("Telegram bot polling started");

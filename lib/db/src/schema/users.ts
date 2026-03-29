@@ -27,6 +27,8 @@ export const usersTable = pgTable("users", {
   country: varchar("country", { length: 100 }),
   isProfileComplete: boolean("is_profile_complete").default(false).notNull(),
   isActive: boolean("is_active").default(true).notNull(),
+  hasPaid: boolean("has_paid").default(false).notNull(),
+  chatCount: integer("chat_count").default(0).notNull(),
   state: botStateEnum("state").default("idle").notNull(),
   chattingWith: bigint("chatting_with", { mode: "number" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
