@@ -8,6 +8,8 @@ if (!TOKEN) {
   throw new Error("TELEGRAM_BOT_TOKEN environment variable is required");
 }
 
+const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
+
 export const bot = new TelegramBot(TOKEN, { polling: true });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -34,12 +36,16 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
         keyboard: [
           [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
           [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }],
+          [{ text: "💳 Support Us" }],
         ],
         resize_keyboard: true,
         one_time_keyboard: false,
       }
     : {
-        keyboard: [[{ text: "🚀 Setup Profile" }]],
+        keyboard: [
+          [{ text: "🚀 Setup Profile" }],
+          [{ text: "💳 Support Us" }],
+        ],
         resize_keyboard: true,
         one_time_keyboard: false,
       };
@@ -50,6 +56,21 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
       ? `Welcome back, *${name}* 💖\nWhat would you like to do?`
       : `Hi *${name}*! 👋\nYou haven't set up your profile yet.\nTap below to get started!`,
     { parse_mode: "Markdown", reply_markup: keyboard }
+  );
+}
+
+async function sendPayLink(chatId: number) {
+  await bot.sendMessage(
+    chatId,
+    `💳 *Support WorldMatch*\n\n` +
+    `Your support keeps this bot running and helps us connect more people worldwide! 🌍💕\n\n` +
+    `Tap the button below to make a payment:\n${PAY_LINK}`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[{ text: "💳 Pay Now", url: PAY_LINK }]],
+      },
+    }
   );
 }
 
@@ -88,6 +109,7 @@ bot.onText(/\/help/, async (msg) => {
       "/edit — Edit your profile\n" +
       "/match — Find a match\n" +
       "/stop — Stop current chat\n" +
+      "/pay — Support us via Razorpay\n" +
       "/help — Show this help",
     { parse_mode: "Markdown" }
   );
@@ -323,6 +345,7 @@ bot.on("message", async (msg) => {
       await bot.sendMessage(chatId, "✅ *Profile complete!* You're all set to find matches! 🎉", { parse_mode: "Markdown" });
       await showProfile(chatId, updated!);
       await sendMain(chatId, updated!);
+      await sendPayLink(chatId);
       return;
     }
 
@@ -361,6 +384,11 @@ bot.on("message", async (msg) => {
       return;
     }
 
+    if (text === "💳 Support Us") {
+      await sendPayLink(chatId);
+      return;
+    }
+
     // Fallback
     await sendMain(chatId, user);
   } catch (err) {
@@ -390,6 +418,10 @@ bot.onText(/\/match/, async (msg) => {
 
 bot.onText(/\/stop/, async (msg) => {
   await stopChat(msg.chat.id, msg.from!.id);
+});
+
+bot.onText(/\/pay/, async (msg) => {
+  await sendPayLink(msg.chat.id);
 });
 
 logger.info("Telegram bot polling started");
