@@ -2,6 +2,9 @@ import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
@@ -489,5 +492,55 @@ bot.onText(/\/users/, async (msg) => {
   const lines = users.map((u) => `• ${u.name ?? "?"} (${u.age ?? "?"}) | ID: ${u.id} | Paid: ${u.hasPaid ? "✅" : "❌"} | Chats: ${u.chatCount}`);
   await bot.sendMessage(msg.chat.id, `👥 *All Users (${users.length})*\n\n${lines.join("\n") || "None"}`, { parse_mode: "Markdown" });
 });
+
+// ── Bot profile setup (runs once at startup) ──────────────────────────────
+
+async function setupBotProfile() {
+  try {
+    const base = `https://api.telegram.org/bot${TOKEN}`;
+
+    // Set full description (shown on first open)
+    await fetch(`${base}/setMyDescription`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        description:
+          "💕 WorldMatch — Meet. Chat. Connect.\n\n" +
+          "🌍 Connect with singles from every corner of the world\n" +
+          "💬 Start chatting instantly with real matches\n" +
+          "🔒 Safe, private & fun\n\n" +
+          "✨ Your first chat is FREE — find your match right now!\n\n" +
+          "Tap START to begin your journey 👇",
+      }),
+    });
+
+    // Set short description (shown in search results)
+    await fetch(`${base}/setMyShortDescription`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        short_description: "💕 Meet & chat with singles worldwide. Your first match is FREE! 🌍",
+      }),
+    });
+
+    // Upload profile photo
+    const imgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "profile.png");
+    if (fs.existsSync(imgPath)) {
+      const formData = new FormData();
+      const blob = new Blob([fs.readFileSync(imgPath)], { type: "image/png" });
+      formData.append("photo", blob, "profile.png");
+      const res = await fetch(`${base}/setMyPhoto`, { method: "POST", body: formData });
+      const json = await res.json() as { ok: boolean };
+      if (json.ok) logger.info("Bot profile photo set successfully");
+      else logger.warn({ json }, "Could not set bot profile photo");
+    }
+
+    logger.info("Bot profile description set");
+  } catch (err) {
+    logger.warn({ err }, "Failed to set bot profile (non-fatal)");
+  }
+}
+
+setupBotProfile();
 
 logger.info("Telegram bot polling started");

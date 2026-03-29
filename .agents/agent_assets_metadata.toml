@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "7yD4pyPc54zONYo2WHkA3"
+uri = "file://artifacts/api-server/src/bot/profile.png"
+type = "image"
+title = "Bot Profile Photo (Premium)"
