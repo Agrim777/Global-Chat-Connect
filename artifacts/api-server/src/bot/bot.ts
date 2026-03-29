@@ -12,7 +12,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FAKE_CHAT_DURATION_MS = 2 * 60 * 1000; // 2 minutes
+const FAKE_CHAT_DURATION_MS = 1 * 60 * 1000; // 1 minute
 
 export const bot = new TelegramBot(TOKEN, { polling: true });
 
@@ -75,35 +75,140 @@ const FLIRTY_OPENERS_M = [
   "Hey there! Finally someone I wanna talk to 😏 How are you?",
 ];
 
-const FLIRTY_REPLIES = [
-  "Omg you're so sweet 😍 I love talking to you already",
-  "Hehe you make me blush 🙈💕",
-  "Wow really? You seem so exciting to talk to 😏",
-  "You sound exactly like my type tbh 😘",
-  "Hahaha stop it 😄 you're making me smile so hard!",
-  "I wish we could talk all night 🌙✨",
-  "Tell me more... I'm getting very curious about you 👀",
-  "You're honestly so attractive from your words alone 😍",
-  "Hehe I like where this conversation is going 😏💋",
-  "Omg same! I feel like we have such a strong connection 💘",
-  "Soo... what are you wearing right now? 😜 Just kidding... or am I? 😏",
-  "You make me feel so comfortable already 🥰",
-  "Honestly I'd love to get to know you better... much better 😈",
-  "You're too cute, stop it 😂💕",
-  "I can't stop smiling 😊 You're so fun!",
-  "Hmm I'm curious... what's your idea of a perfect night? 🌙",
-  "You're giving me butterflies and we just started talking 🦋💘",
-  "Okay I think I really like you 😍",
-  "Tell me a secret... I promise I'll keep it 🤫",
-  "You're so easy to talk to, I love it 💕",
-];
+// ── Smart context-aware fake replies ─────────────────────────────────────────
+
+function buildSmartReply(text: string, persona: FakePersona): string {
+  const t = text.toLowerCase().trim();
+
+  // Greetings
+  if (/^(hi|hey|hello|hii+|heyy+|howdy|sup|yo|hola|namaste)[\s!?]*$/.test(t))
+    return persona.isFemale
+      ? "Heyy! 😊 Finally someone interesting! How are you doing?"
+      : "Hey! 😄 Glad we matched. How's your day going?";
+
+  // How are you / what's up
+  if (/how are you|how r u|how's it going|what'?s? up|wassup|wya|how do you do/.test(t))
+    return persona.isFemale
+      ? "I'm great, thanks for asking! 😊 Was waiting for a good conversation. What about you?"
+      : "Doing well! Chilling at home right now 😄 You?";
+
+  // Asking name
+  if (/your name|who are you|what'?s? your name|call you/.test(t))
+    return `My name is ${persona.name} 😊 What about you?`;
+
+  // Asking age
+  if (/how old|your age|age\??|years old/.test(t))
+    return `I'm ${persona.age} 😊 And you?`;
+
+  // Asking location / country / where from / where are you
+  if (/where are you|where do you live|which country|location|city|where from|ur from/.test(t))
+    return persona.isFemale
+      ? "I'm from India 🇮🇳 But I love connecting with people from all over the world! Where are you from?"
+      : "Based in India 🇮🇳 You?";
+
+  // Job / work / what do you do
+  if (/what do you do|your job|profession|work|student|college|office/.test(t))
+    return persona.isFemale
+      ? "I'm a graphic designer 🎨 Working from home mostly. What about you?"
+      : "I'm in software — pretty laid back job honestly 😄 What about you?";
+
+  // Hobbies / interests
+  if (/hobby|hobbies|interest|like to do|free time|pass time|fun|pastime/.test(t))
+    return persona.isFemale
+      ? "I love music, travel and trying new food 🍜🎶 What about you?"
+      : "I'm into gaming, music and long drives 🎮🎵 You?";
+
+  // Favourite music / movies / shows
+  if (/music|song|movie|film|show|series|watch|listen|favourite/.test(t))
+    return persona.isFemale
+      ? "Ooh I'm obsessed with Bollywood and some K-dramas lately 😂 What do you watch?"
+      : "Big fan of action movies and classic rock 🎸 You into any good shows?";
+
+  // Food
+  if (/food|eat|hungry|cuisine|restaurant|cook/.test(t))
+    return persona.isFemale
+      ? "I love biryani honestly, could eat it every day 😍 Are you a foodie too?"
+      : "Chicken biryani is life 🍗 What's your go-to food?";
+
+  // Compliments (you're cute / beautiful / hot / nice / sweet)
+  if (/you'?re? (cute|beautiful|gorgeous|hot|pretty|nice|sweet|amazing|lovely|attractive)/.test(t))
+    return persona.isFemale
+      ? "Aww that's really sweet of you 🥰 You seem really nice too!"
+      : "Thanks man 😄 That's kind of you to say!";
+
+  // Flirty / naughty
+  if (/sexy|love you|kiss|hug|date|meet|boyfriend|girlfriend|relationship|together|crush/.test(t))
+    return persona.isFemale
+      ? "Haha you're moving fast 😄💕 But I like confidence! Tell me more about yourself first~"
+      : "Ha, slow down 😄 Let's get to know each other first! What do you want to know about me?";
+
+  // Good morning / good night / afternoon
+  if (/good morning|good night|gm|gn|good afternoon|good evening/.test(t))
+    return persona.isFemale
+      ? "Aww same to you 😊🌸 Hope your day is as lovely as you are!"
+      : "Thanks! 😄 Hope your day's going well!";
+
+  // Asking for photo / pic
+  if (/photo|pic|picture|selfie|send pic|your pic/.test(t))
+    return persona.isFemale
+      ? "Haha maybe later 😏 Let's talk a bit first! What do you look like? 😊"
+      : "Ha not yet 😄 Tell me something interesting about yourself first!";
+
+  // Yes / no / okay / sure / ok
+  if (/^(yes|yep|yeah|yup|no|nope|nah|okay|ok|sure|fine|alright|haha|lol|hehe|😄|😂|😊)[\s!?]*$/.test(t))
+    return persona.isFemale
+      ? "Hehe 😊 So tell me — what made you download a dating app? Looking for something serious?"
+      : "Ha nice 😄 So what are you looking for here? Serious relationship or just chatting?";
+
+  // Why / what / how (open-ended single words)
+  if (/^(why|what|how|really|seriously|wow|omg|oh|ah)[\s!?]*$/.test(t))
+    return persona.isFemale
+      ? "Haha tell me more! 😊 I'm curious about you."
+      : "Yeah! 😄 What made you say that?";
+
+  // Thank you
+  if (/thank|thanks|ty|tq/.test(t))
+    return persona.isFemale
+      ? "Aww of course! 😊 You're really sweet you know that?"
+      : "No problem! 😄 You seem like a cool person honestly.";
+
+  // Sad / not good / bad
+  if (/sad|not good|bad|tired|bored|depressed|stressed|upset|anxious/.test(t))
+    return persona.isFemale
+      ? "Aww I'm sorry to hear that 😢 Want to talk about it? I'm here 💕"
+      : "Ah man, that sucks 😕 What happened? I'm listening.";
+
+  // Bye / goodbye / leaving
+  if (/bye|goodbye|ttyl|cya|see you|gotta go|leaving|gtg/.test(t))
+    return persona.isFemale
+      ? "Aww already? 😢 It was so nice talking to you 💕 Come back soon!"
+      : "Ah okay! Take care 😄 Was nice chatting!";
+
+  // Default — reflect back on what they said naturally
+  const defaults = persona.isFemale
+    ? [
+        "Ohh interesting! Tell me more about that 😊",
+        "Really? I didn't expect that haha 😄 What else?",
+        "Hmm that's actually cool 😍 I feel like we have a lot in common!",
+        "Haha I love how you think 😊 Keep going...",
+        "That's so interesting! 👀 What made you say that?",
+      ]
+    : [
+        "Nice, that's interesting! 😄 Tell me more.",
+        "Oh really? Ha didn't think of it that way 😄",
+        "I get you honestly 😊 What else is on your mind?",
+        "Cool cool 😄 So what else are you into?",
+        "Haha fair point! 😄 What are you thinking about?",
+      ];
+  return pickRandom(defaults);
+}
 
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
 async function sendPayGate(chatId: number) {
   await bot.sendMessage(
     chatId,
-    `⏰ *Your 2-minute free chat is over!*\n\n` +
+    `⏰ *Your 1-minute free chat is over!*\n\n` +
     `Hope you enjoyed it 😊💕\n\n` +
     `🔒 To keep chatting and connect with real people worldwide, upgrade to *Premium*!\n\n` +
     `👉 Tap the button below to pay, then *send a screenshot* of your payment here so we can unlock your account! 📸`,
@@ -129,7 +234,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
   await bot.sendMessage(
     chatId,
-    `🎉 *Match found!*\n\nYou're now connected with someone special 💞\n\n⏳ *You have 2 minutes of free chat!*\n_Say hello!_ 👋`,
+    `🎉 *Match found!*\n\nYou're now connected with someone special 💞\n\n⏳ *You have 1 minute of free chat!*\n_Say hello!_ 👋`,
     { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
@@ -150,7 +255,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
         .where(eq(usersTable.id, userId));
       fakePersonaMap.delete(userId);
-      await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 2-minute chat has ended.", { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 1-minute chat has ended.", { parse_mode: "Markdown" });
       await sendMain(chatId, u);
       await delay(500);
       await sendPayGate(chatId);
@@ -162,11 +267,13 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
-async function fakeAutoReply(chatId: number, userId: number) {
-  await delay(1200 + Math.random() * 2500);
+async function fakeAutoReply(chatId: number, userId: number, userText: string) {
+  await delay(1000 + Math.random() * 2000);
   const u = await getUser(userId);
   if (u?.state === "chatting" && u.chattingWith === FAKE_CHAT_ID) {
-    await bot.sendMessage(chatId, pickRandom(FLIRTY_REPLIES));
+    const persona = fakePersonaMap.get(userId);
+    const reply = persona ? buildSmartReply(userText, persona) : "Haha tell me more! 😊";
+    await bot.sendMessage(chatId, reply);
   }
 }
 
@@ -393,7 +500,7 @@ bot.on("message", async (msg) => {
           await bot.sendMessage(chatId, "Thanks for sharing! Our team will verify your payment and unlock your account shortly 🔓💕");
           return;
         }
-        await fakeAutoReply(chatId, id);
+        await fakeAutoReply(chatId, id, text ?? "");
         return;
       }
 
