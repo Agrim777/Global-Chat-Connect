@@ -74,10 +74,29 @@ async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInse
   return getUser(id);
 }
 
-async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean }) {
-  const kb = user.isProfileComplete
-    ? { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }], [{ text: "💳 Support Us" }]], resize_keyboard: true }
-    : { keyboard: [[{ text: "🚀 Setup Profile" }], [{ text: "💳 Support Us" }]], resize_keyboard: true };
+async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean }) {
+  let kb: object;
+  if (user.isProfileComplete) {
+    const bottomRow = user.hasPaid
+      ? [{ text: "✅ Premium" }]
+      : [{ text: "💎 Go Premium" }];
+    kb = {
+      keyboard: [
+        [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
+        [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }],
+        bottomRow,
+      ],
+      resize_keyboard: true,
+    };
+  } else {
+    kb = {
+      keyboard: [
+        [{ text: "🚀 Setup Profile" }],
+        [{ text: "💎 Go Premium" }],
+      ],
+      resize_keyboard: true,
+    };
+  }
   await bot.sendMessage(
     chatId,
     user.isProfileComplete
@@ -362,9 +381,24 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
 async function sendPayGate(chatId: number) {
   await bot.sendMessage(
     chatId,
-    `Unlock to continue. Payment required to get matched.\n\nTap below to pay, then send a screenshot here so we can unlock your account.`,
+    `💎 *Go Premium — Unlock Full Access*\n\n` +
+    `What you get:\n` +
+    `✅ Unlimited real matches\n` +
+    `✅ Chat with real people, not AI\n` +
+    `✅ Your profile shown to more users\n` +
+    `✅ Priority in matching queue\n` +
+    `✅ One-time payment — no subscription\n\n` +
+    `*How to upgrade:*\n` +
+    `1️⃣ Tap the button below to pay\n` +
+    `2️⃣ Take a screenshot of the payment confirmation\n` +
+    `3️⃣ Send the screenshot here\n` +
+    `4️⃣ We'll unlock your account within minutes 🔓\n\n` +
+    `_Your free trial lets you try one AI chat. Premium unlocks real connections._`,
     {
-      reply_markup: { inline_keyboard: [[{ text: "Pay Now to Unlock", url: PAY_LINK }]] },
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[{ text: "💎 Pay & Upgrade Now", url: PAY_LINK }]],
+      },
     }
   );
 }
@@ -744,7 +778,7 @@ async function findMatch(chatId: number, userId: number) {
   if (me.hasPaid) {
     // Paid user — no one online right now
     await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-      reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "💳 Support Us" }]], resize_keyboard: true },
+      reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }], [{ text: "✅ Premium" }]], resize_keyboard: true },
     });
     return;
   }
@@ -776,6 +810,7 @@ bot.onText(/\/help/, async (msg) => {
     "/edit — Edit your profile\n" +
     "/match — Find a match\n" +
     "/stop — End current chat\n" +
+    "/premium — Upgrade to Premium 💎\n" +
     "/pay — Payment info\n" +
     "/help — Show this help",
     { parse_mode: "Markdown" }
@@ -931,7 +966,7 @@ bot.on("message", async (msg) => {
       // Allow "skip" during edit to keep current value
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
       const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat",
-        "🛑 Stop Matching", "💳 Support Us", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
+        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
       if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text) || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text)) {
         await bot.sendMessage(chatId, "Please type your real name (letters only, 2–50 chars).", { reply_markup: { remove_keyboard: true } });
         return;
@@ -1106,6 +1141,18 @@ bot.on("message", async (msg) => {
     if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
     if (text === "👤 My Profile") { await showProfile(chatId, user); return; }
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
+    if (text === "💎 Go Premium") {
+      if (user.hasPaid) {
+        await bot.sendMessage(chatId, "✅ You're already a *Premium* member! Enjoy unlimited matches 💖", { parse_mode: "Markdown" });
+        return;
+      }
+      await sendPayGate(chatId);
+      return;
+    }
+    if (text === "✅ Premium") {
+      await bot.sendMessage(chatId, "✅ You're a *Premium* member — unlimited real matches enabled! 💎", { parse_mode: "Markdown" });
+      return;
+    }
     if (text === "💳 Support Us") { await sendPayGate(chatId); return; }
 
     await sendMain(chatId, user);
@@ -1132,6 +1179,15 @@ bot.onText(/\/match/, async (msg) => { await findMatch(msg.chat.id, msg.from!.id
 bot.onText(/\/stop/, async (msg) => { await stopChat(msg.chat.id, msg.from!.id); });
 
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
+
+bot.onText(/\/premium/, async (msg) => {
+  const u = await getUser(msg.from!.id);
+  if (u?.hasPaid) {
+    await bot.sendMessage(msg.chat.id, "✅ You're already a *Premium* member! Enjoy unlimited matches 💎", { parse_mode: "Markdown" });
+    return;
+  }
+  await sendPayGate(msg.chat.id);
+});
 
 // ── Admin-only: /grant <userId> ───────────────────────────────────────────────
 
