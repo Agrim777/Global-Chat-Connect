@@ -496,9 +496,7 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
   const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
   return candidates.filter((c) => {
     if (c.id === userId || !c.isActive || c.state === "chatting") return false;
-    // Paid users only match with paid users; unpaid users only match with unpaid users
-    if (!!c.hasPaid !== !!me.hasPaid) return false;
-    // Exclude unpaid users who have already used their free trial
+    // Exclude unpaid users who have already used their free trial — they must pay first
     if ((c.chatCount ?? 0) > 0 && !c.hasPaid) return false;
     return (me.lookingFor === "any" || me.lookingFor === c.gender) &&
            (c.lookingFor === "any" || c.lookingFor === me.gender);
