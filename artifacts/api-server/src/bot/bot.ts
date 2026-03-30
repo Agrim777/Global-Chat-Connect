@@ -47,6 +47,7 @@ interface FakePersona {
   callbackUsed: boolean;     // already done a callback this convo
 }
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
+const editModeMap   = new Map<number, string>();          // userId → edit field ("choosing"|"name"|"age"|"gender"|"looking_for"|"bio"|"country")
 const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat timer
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -781,25 +782,68 @@ bot.onText(/\/help/, async (msg) => {
   );
 });
 
-// ── Profile setup helpers ─────────────────────────────────────────────────────
+// ── Profile helpers ──────────────────────────────────────────────────────────
 
-async function startSetup(chatId: number, id: number) {
-  await upsertUser(id, { state: "setup_name" });
-  await bot.sendMessage(chatId, "Let's set up your profile! 🎉\n\n📝 What's your *name*?", { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } });
-}
+const EDIT_FIELD_LABELS = [
+  "📝 Change Name", "🎂 Change Age", "⚤ Change Gender",
+  "💞 Change Looking For", "📖 Change Bio", "🌍 Change Country", "❌ Cancel",
+];
 
 async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<typeof getUser>>>) {
-  const gE: Record<string, string> = { male: "👨", female: "👩", other: "🧑" };
+  const gLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", other: "🧑 Other" };
+  const lfLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", any: "💞 Any" };
   await bot.sendMessage(chatId,
     `👤 *Your Profile*\n\n` +
-    `🏷️ Name: *${user.name ?? "-"}*\n` +
-    `🎂 Age: *${user.age ?? "-"}*\n` +
-    `${gE[user.gender ?? "other"] ?? "🧑"} Gender: *${user.gender ?? "-"}*\n` +
-    `💞 Looking for: *${user.lookingFor ?? "-"}*\n` +
-    `🌍 Country: *${user.country ?? "-"}*\n` +
-    `📖 Bio: _${user.bio ?? "-"}_`,
+    `🏷 Name: *${user.name ?? "—"}*\n` +
+    `🎂 Age: *${user.age ?? "—"}*\n` +
+    `⚤ Gender: *${gLabel[user.gender ?? ""] ?? "—"}*\n` +
+    `💞 Looking for: *${lfLabel[user.lookingFor ?? ""] ?? "—"}*\n` +
+    `🌍 Country: *${user.country ?? "—"}*\n` +
+    `📖 Bio: _${(user.bio ?? "—").replace(/_/g, "\\_")}_\n\n` +
+    (user.hasPaid ? `✅ *Premium member*` : `🔒 Free account — tap 💳 Support Us to unlock`),
     { parse_mode: "Markdown" }
   );
+}
+
+// First-time profile setup (only called when no profile exists)
+async function startSetup(chatId: number, id: number) {
+  editModeMap.delete(id); // ensure we're NOT in edit mode
+  await upsertUser(id, { state: "setup_name" });
+  await bot.sendMessage(chatId,
+    "Let's build your profile! 🎉\n\n*Step 1 of 6* — 📝 What should we call you?\n\n_Type your first name only._",
+    { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
+  );
+}
+
+// Edit an existing profile — shows field picker
+async function startEditProfile(chatId: number, id: number) {
+  editModeMap.set(id, "choosing");
+  await bot.sendMessage(chatId,
+    "✏️ *Edit Profile*\n\nWhich field do you want to change?",
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        keyboard: [
+          [{ text: "📝 Change Name" }, { text: "🎂 Change Age" }],
+          [{ text: "⚤ Change Gender" }, { text: "💞 Change Looking For" }],
+          [{ text: "📖 Change Bio" }, { text: "🌍 Change Country" }],
+          [{ text: "❌ Cancel" }],
+        ],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    }
+  );
+}
+
+// Finish an edit-mode update — return user to idle with their profile shown
+async function finishEditField(chatId: number, id: number) {
+  editModeMap.delete(id);
+  await upsertUser(id, { state: "idle" });
+  const updated = await getUser(id);
+  await bot.sendMessage(chatId, "✅ Updated!", { reply_markup: { remove_keyboard: true } });
+  await showProfile(chatId, updated!);
+  await sendMain(chatId, updated!);
 }
 
 // ── Message router ────────────────────────────────────────────────────────────
@@ -820,57 +864,158 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // ── Setup flow ─────────────────────────────────────────────────────
+    // ── Edit-mode cancel ────────────────────────────────────────────────
+    if (text === "❌ Cancel" && editModeMap.has(id)) {
+      editModeMap.delete(id);
+      await upsertUser(id, { state: "idle" });
+      const fresh = await getUser(id);
+      await bot.sendMessage(chatId, "Cancelled.", { reply_markup: { remove_keyboard: true } });
+      await sendMain(chatId, fresh!);
+      return;
+    }
+
+    // ── Edit field picker (idle + editModeMap = "choosing") ─────────────
+    if (user.state === "idle" && editModeMap.get(id) === "choosing") {
+      if (text === "📝 Change Name") {
+        editModeMap.set(id, "name");
+        await upsertUser(id, { state: "setup_name" });
+        await bot.sendMessage(chatId,
+          `📝 *Change Name*\n\nCurrent: *${user.name ?? "—"}*\n\nType your new name, or type "skip" to keep it.`,
+          { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
+        );
+      } else if (text === "🎂 Change Age") {
+        editModeMap.set(id, "age");
+        await upsertUser(id, { state: "setup_age" });
+        await bot.sendMessage(chatId,
+          `🎂 *Change Age*\n\nCurrent: *${user.age ?? "—"}*\n\nType your new age, or "skip".`,
+          { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
+        );
+      } else if (text === "⚤ Change Gender") {
+        editModeMap.set(id, "gender");
+        await upsertUser(id, { state: "setup_gender" });
+        await bot.sendMessage(chatId,
+          `⚤ *Change Gender*\n\nCurrent: *${user.gender ?? "—"}*`,
+          { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
+        );
+      } else if (text === "💞 Change Looking For") {
+        editModeMap.set(id, "looking_for");
+        await upsertUser(id, { state: "setup_looking_for" });
+        await bot.sendMessage(chatId,
+          `💞 *Change Looking For*\n\nCurrent: *${user.lookingFor ?? "—"}*`,
+          { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
+        );
+      } else if (text === "📖 Change Bio") {
+        editModeMap.set(id, "bio");
+        await upsertUser(id, { state: "setup_bio" });
+        await bot.sendMessage(chatId,
+          `📖 *Change Bio*\n\nCurrent: _${user.bio ?? "—"}_\n\nType your new bio (max 300 chars), or "skip".`,
+          { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
+        );
+      } else if (text === "🌍 Change Country") {
+        editModeMap.set(id, "country");
+        await upsertUser(id, { state: "setup_country" });
+        await bot.sendMessage(chatId,
+          `🌍 *Change Country*\n\nCurrent: *${user.country ?? "—"}*\n\nType your country, or "skip".`,
+          { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
+        );
+      } else {
+        await startEditProfile(chatId, id); // unrecognised input — show picker again
+      }
+      return;
+    }
+
+    // ── Setup / edit steps ──────────────────────────────────────────────
 
     if (user.state === "setup_name") {
-      const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat", "🛑 Stop Matching", "💳 Support Us", "🚀 Setup Profile"];
-      if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text)) {
-        await bot.sendMessage(chatId, "Please type your actual name.", { reply_markup: { remove_keyboard: true } });
+      const isEdit = editModeMap.get(id) === "name";
+      // Allow "skip" during edit to keep current value
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat",
+        "🛑 Stop Matching", "💳 Support Us", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
+      if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text) || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text)) {
+        await bot.sendMessage(chatId, "Please type your real name (letters only, 2–50 chars).", { reply_markup: { remove_keyboard: true } });
         return;
       }
-      await upsertUser(id, { name: text, state: "setup_age" });
-      await bot.sendMessage(chatId, `Nice to meet you, *${text}*!\n\nHow old are you?`, { parse_mode: "Markdown" });
+      const capitalized = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+      await upsertUser(id, { name: capitalized, state: isEdit ? "idle" : "setup_age" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 🎉\n\n*Step 2 of 6* — 🎂 How old are you?`, { parse_mode: "Markdown" });
       return;
     }
 
     if (user.state === "setup_age") {
+      const isEdit = editModeMap.get(id) === "age";
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
       const age = parseInt(text, 10);
-      if (isNaN(age) || age < 18 || age > 100) { await bot.sendMessage(chatId, "Please enter a valid age (18–100)."); return; }
-      await upsertUser(id, { age, state: "setup_gender" });
-      await bot.sendMessage(chatId, "What's your *gender*?", { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true } });
+      if (isNaN(age) || age < 18 || age > 80) {
+        await bot.sendMessage(chatId, "Please enter a valid age between 18 and 80.");
+        return;
+      }
+      await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      await bot.sendMessage(chatId, `*Step 3 of 6* — ⚤ What's your *gender*?`, {
+        parse_mode: "Markdown",
+        reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true },
+      });
       return;
     }
 
     if (user.state === "setup_gender") {
+      const isEdit = editModeMap.get(id) === "gender";
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
       const gMap: Record<string, "male"|"female"|"other"> = { male:"male", female:"female", other:"other" };
       const g = gMap[text.toLowerCase()];
-      if (!g) { await bot.sendMessage(chatId, "Please choose Male, Female, or Other."); return; }
-      await upsertUser(id, { gender: g, state: "setup_looking_for" });
-      await bot.sendMessage(chatId, "💞 Who are you *looking for*?", { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }]], resize_keyboard: true, one_time_keyboard: true } });
+      if (!g) { await bot.sendMessage(chatId, "Please tap Male, Female, or Other."); return; }
+      await upsertUser(id, { gender: g, state: isEdit ? "idle" : "setup_looking_for" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      await bot.sendMessage(chatId, `*Step 4 of 6* — 💞 Who are you *looking for*?`, {
+        parse_mode: "Markdown",
+        reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }]], resize_keyboard: true, one_time_keyboard: true },
+      });
       return;
     }
 
     if (user.state === "setup_looking_for") {
+      const isEdit = editModeMap.get(id) === "looking_for";
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
       const lfMap: Record<string, "male"|"female"|"any"> = { male:"male", female:"female", any:"any" };
       const lf = lfMap[text.toLowerCase()];
-      if (!lf) { await bot.sendMessage(chatId, "Please choose Male, Female, or Any."); return; }
-      await upsertUser(id, { lookingFor: lf, state: "setup_bio" });
-      await bot.sendMessage(chatId, "📖 Write a short *bio* (max 300 chars):", { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } });
+      if (!lf) { await bot.sendMessage(chatId, "Please tap Male, Female, or Any."); return; }
+      await upsertUser(id, { lookingFor: lf, state: isEdit ? "idle" : "setup_bio" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      await bot.sendMessage(chatId, `*Step 5 of 6* — 📖 Write a short *bio* about yourself (max 300 chars):`, {
+        parse_mode: "Markdown",
+        reply_markup: { remove_keyboard: true },
+      });
       return;
     }
 
     if (user.state === "setup_bio") {
+      const isEdit = editModeMap.get(id) === "bio";
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      if (!text || text.trim().length < 3) { await bot.sendMessage(chatId, "Bio must be at least 3 characters."); return; }
       if (text.length > 300) { await bot.sendMessage(chatId, "Too long! Keep it under 300 characters."); return; }
-      await upsertUser(id, { bio: text, state: "setup_country" });
-      await bot.sendMessage(chatId, "🌍 Which *country* are you from?", { parse_mode: "Markdown" });
+      await upsertUser(id, { bio: text.trim(), state: isEdit ? "idle" : "setup_country" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      await bot.sendMessage(chatId, `*Step 6 of 6* — 🌍 Which *country* are you from?`, {
+        parse_mode: "Markdown",
+        reply_markup: { remove_keyboard: true },
+      });
       return;
     }
 
     if (user.state === "setup_country") {
-      if (text.length < 2 || text.length > 60) { await bot.sendMessage(chatId, "Please enter a valid country name."); return; }
-      await upsertUser(id, { country: text, state: "idle", isProfileComplete: true });
+      const isEdit = editModeMap.get(id) === "country";
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      if (!text || text.trim().length < 2 || text.length > 60 || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text.trim())) {
+        await bot.sendMessage(chatId, "Please enter a valid country name (letters only).");
+        return;
+      }
+      const country = text.trim().charAt(0).toUpperCase() + text.trim().slice(1);
+      await upsertUser(id, { country, state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
-      await bot.sendMessage(chatId, "✅ *Profile complete!* You're all set! 🎉", { parse_mode: "Markdown" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      await bot.sendMessage(chatId, "🎉 *Profile complete!* You're all set!", { parse_mode: "Markdown" });
       await showProfile(chatId, updated!);
       await sendMain(chatId, updated!);
       return;
@@ -943,7 +1088,21 @@ bot.on("message", async (msg) => {
 
     // ── Menu buttons ────────────────────────────────────────────────────
 
-    if (text === "🚀 Setup Profile" || text === "✏️ Edit Profile") { await startSetup(chatId, id); return; }
+    if (text === "🚀 Setup Profile") {
+      if (user.isProfileComplete) {
+        // Profile already exists — send them to edit instead
+        await startEditProfile(chatId, id);
+      } else {
+        await startSetup(chatId, id);
+      }
+      return;
+    }
+    if (text === "✏️ Edit Profile") {
+      if (user.state === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before editing your profile."); return; }
+      if (!user.isProfileComplete) { await startSetup(chatId, id); return; }
+      await startEditProfile(chatId, id);
+      return;
+    }
     if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
     if (text === "👤 My Profile") { await showProfile(chatId, user); return; }
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
@@ -964,7 +1123,11 @@ bot.onText(/\/profile/, async (msg) => {
   await showProfile(msg.chat.id, u);
 });
 
-bot.onText(/\/edit/, async (msg) => { await startSetup(msg.chat.id, msg.from!.id); });
+bot.onText(/\/edit/, async (msg) => {
+  const u = await getUser(msg.from!.id);
+  if (u?.isProfileComplete) { await startEditProfile(msg.chat.id, msg.from!.id); return; }
+  await startSetup(msg.chat.id, msg.from!.id);
+});
 bot.onText(/\/match/, async (msg) => { await findMatch(msg.chat.id, msg.from!.id); });
 bot.onText(/\/stop/, async (msg) => { await stopChat(msg.chat.id, msg.from!.id); });
 
