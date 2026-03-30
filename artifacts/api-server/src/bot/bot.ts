@@ -676,9 +676,13 @@ bot.on("message", async (msg) => {
     // ── Setup flow ─────────────────────────────────────────────────────
 
     if (user.state === "setup_name") {
-      if (!text || text.length < 2 || text.length > 50) { await bot.sendMessage(chatId, "Please enter a valid name (2–50 characters)."); return; }
+      const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat", "🛑 Stop Matching", "💳 Support Us", "🚀 Setup Profile"];
+      if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text)) {
+        await bot.sendMessage(chatId, "Please type your actual name.", { reply_markup: { remove_keyboard: true } });
+        return;
+      }
       await upsertUser(id, { name: text, state: "setup_age" });
-      await bot.sendMessage(chatId, `Nice to meet you, *${text}*! 😊\n\n🎂 How old are you?`, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, `Nice to meet you, *${text}*!\n\nHow old are you?`, { parse_mode: "Markdown" });
       return;
     }
 
@@ -748,13 +752,33 @@ bot.on("message", async (msg) => {
         return;
       }
 
-      // Real chat relay
-      if (user.chattingWith && msg.photo) {
-        await bot.forwardMessage(user.chattingWith, chatId, msg.message_id);
-        return;
-      }
-      if (user.chattingWith && text) {
-        await bot.sendMessage(user.chattingWith, `💬 *${user.name ?? "Match"}*: ${text}`, { parse_mode: "Markdown" });
+      // Real chat relay — verify recipient is still connected and both users are paid
+      const recipientId = user.chattingWith;
+      if (recipientId) {
+        const recipient = await getUser(recipientId);
+        // Only forward if recipient is still in a chat with this exact user AND both are paid
+        if (
+          recipient?.state === "chatting" &&
+          recipient.chattingWith === id &&
+          user.hasPaid &&
+          recipient.hasPaid
+        ) {
+          if (msg.photo) {
+            await bot.forwardMessage(recipientId, chatId, msg.message_id);
+            return;
+          }
+          if (text) {
+            await bot.sendMessage(recipientId, `💬 *${user.name ?? "Match"}*: ${text}`, { parse_mode: "Markdown" });
+          }
+        } else if (!recipient || recipient.state !== "chatting" || recipient.chattingWith !== id) {
+          // Stale connection — clean it up silently
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, id));
+          const fresh = await getUser(id);
+          await bot.sendMessage(chatId, "Your match is no longer available.");
+          if (fresh) await sendMain(chatId, fresh);
+        }
       }
       return;
     }
