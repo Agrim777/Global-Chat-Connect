@@ -12,7 +12,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FAKE_CHAT_DURATION_MS = 1 * 60 * 1000; // 1 minute
+const FREE_CHAT_DURATION_MS = 15 * 1000; // 15 seconds free for all users
 
 export const bot = new TelegramBot(TOKEN, { polling: true });
 
@@ -20,7 +20,7 @@ export const bot = new TelegramBot(TOKEN, { polling: true });
 
 interface FakePersona { name: string; age: number; isFemale: boolean; lastAsked: string }
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
-const fakeTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → 2-min timer
+const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat timer
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -335,7 +335,7 @@ function buildSmartReply(userText: string, persona: FakePersona): string {
 async function sendPayGate(chatId: number) {
   await bot.sendMessage(
     chatId,
-    `⏰ *Your 1-minute free chat is over!*\n\n` +
+    `⏰ *Your 15-second free chat is over!*\n\n` +
     `Hope you enjoyed it 😊💕\n\n` +
     `🔒 To keep chatting and connect with real people worldwide, upgrade to *Premium*!\n\n` +
     `👉 Tap the button below to pay, then *send a screenshot* of your payment here so we can unlock your account! 📸`,
@@ -362,7 +362,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
   await bot.sendMessage(
     chatId,
-    `🎉 *Match found!*\n\nYou're now connected with someone special 💞\n\n⏳ *You have 1 minute of free chat!*\n_Say hello!_ 👋`,
+    `🎉 *Match found!*\n\nYou're now connected with someone special 💞\n\n⏳ *You have 15 seconds of free chat!*\n_Say hello!_ 👋`,
     { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
@@ -373,23 +373,23 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     await bot.sendMessage(chatId, openerObj.text);
   }
 
-  // 2-minute auto-end timer
+  // 15-second free chat timer
   const timer = setTimeout(async () => {
-    fakeTimerMap.delete(userId);
+    chatTimerMap.delete(userId);
     const u = await getUser(userId);
     if (u?.state === "chatting" && u.chattingWith === FAKE_CHAT_ID) {
       await db.update(usersTable)
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
         .where(eq(usersTable.id, userId));
       fakePersonaMap.delete(userId);
-      await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 1-minute chat has ended.", { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 15-second chat has ended.", { parse_mode: "Markdown" });
       await sendMain(chatId, u);
       await delay(500);
       await sendPayGate(chatId);
     }
-  }, FAKE_CHAT_DURATION_MS);
+  }, FREE_CHAT_DURATION_MS);
 
-  fakeTimerMap.set(userId, timer);
+  chatTimerMap.set(userId, timer);
 }
 
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
@@ -416,9 +416,9 @@ async function stopChat(chatId: number, userId: number) {
 
   const partnerId = me.chattingWith;
 
-  // Clear fake chat timer if present
-  const timer = fakeTimerMap.get(userId);
-  if (timer) { clearTimeout(timer); fakeTimerMap.delete(userId); }
+  // Clear free-chat timer if present
+  const timer = chatTimerMap.get(userId);
+  if (timer) { clearTimeout(timer); chatTimerMap.delete(userId); }
   fakePersonaMap.delete(userId);
 
   await db.update(usersTable)
@@ -458,16 +458,13 @@ async function findMatch(chatId: number, userId: number) {
     await bot.sendMessage(chatId, "You're already in a chat! Send /stop to end it first.");
     return;
   }
+  // First-ever match → fake chat (with 15-second free timer)
   if (me.chatCount === 0) {
     await startFakeChat(chatId, userId, me.lookingFor);
     return;
   }
-  if (!me.hasPaid) {
-    await sendPayGate(chatId);
-    return;
-  }
 
-  // Paid: real match
+  // Subsequent matches → real people
   const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
   const eligible = candidates.filter((c) => {
     if (c.id === userId || !c.isActive || c.state === "chatting") return false;
@@ -476,7 +473,7 @@ async function findMatch(chatId: number, userId: number) {
   });
 
   if (eligible.length === 0) {
-    await bot.sendMessage(chatId, "😔 No matches available right now. Try again soon!", {
+    await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
       reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "💳 Support Us" }]], resize_keyboard: true },
     });
     return;
@@ -492,8 +489,53 @@ async function findMatch(chatId: number, userId: number) {
     .where(eq(usersTable.id, match.id));
 
   const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
-  await bot.sendMessage(chatId, `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n_Say hello!_ 👋`, { parse_mode: "Markdown", reply_markup: stopKb });
-  await bot.sendMessage(match.id, `🎉 *Match found!*\n\nYou're now chatting with *${me.name}*, ${me.age} 🌍\n\n_Say hello!_ 👋`, { parse_mode: "Markdown", reply_markup: stopKb });
+
+  if (!me.hasPaid) {
+    // Non-paid user: show 15-second warning
+    await bot.sendMessage(chatId,
+      `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n⏳ *Free preview — 15 seconds only!*\n_Say hello fast!_ 👋`,
+      { parse_mode: "Markdown", reply_markup: stopKb }
+    );
+  } else {
+    await bot.sendMessage(chatId,
+      `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n_Say hello!_ 👋`,
+      { parse_mode: "Markdown", reply_markup: stopKb }
+    );
+  }
+  await bot.sendMessage(match.id,
+    `🎉 *Match found!*\n\nYou're now chatting with *${me.name}*, ${me.age} 🌍\n\n_Say hello!_ 👋`,
+    { parse_mode: "Markdown", reply_markup: stopKb }
+  );
+
+  // Apply 15-second timer for unpaid users on real chats
+  if (!me.hasPaid) {
+    const matchId = match.id;
+    const realTimer = setTimeout(async () => {
+      chatTimerMap.delete(userId);
+      const u = await getUser(userId);
+      if (u?.state === "chatting" && u.chattingWith === matchId) {
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, userId));
+        const partner = await getUser(matchId);
+        if (partner?.state === "chatting" && partner.chattingWith === userId) {
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, matchId));
+          await bot.sendMessage(matchId,
+            "💔 Your match's free time ran out. They need to upgrade to keep chatting.\n\nTap *Find Match* to meet someone new! 💕",
+            { parse_mode: "Markdown" }
+          );
+          await sendMain(matchId, partner);
+        }
+        await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 15-second chat has ended.", { parse_mode: "Markdown" });
+        await sendMain(chatId, u);
+        await delay(500);
+        await sendPayGate(chatId);
+      }
+    }, FREE_CHAT_DURATION_MS);
+    chatTimerMap.set(userId, realTimer);
+  }
 }
 
 // ── /start ───────────────────────────────────────────────────────────────────
