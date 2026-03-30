@@ -550,34 +550,35 @@ async function findMatch(chatId: number, userId: number) {
       { reply_markup: stopKb }
     );
 
-    // Apply 15-second timer for unpaid first-time users on real chats too
-    if (!me.hasPaid) {
+    // If either side is unpaid, enforce the free trial timer
+    const unpaidUserId   = !me.hasPaid    ? userId   : (!match.hasPaid ? match.id : null);
+    const unpaidChatId   = !me.hasPaid    ? chatId   : (!match.hasPaid ? match.id : null);
+    const paidPartnerId  = !me.hasPaid    ? match.id : (!match.hasPaid ? userId   : null);
+
+    if (unpaidUserId !== null && unpaidChatId !== null) {
       const timer = setTimeout(async () => {
-        chatTimerMap.delete(userId);
-        const u = await getUser(userId);
+        chatTimerMap.delete(unpaidUserId);
+        const u = await getUser(unpaidUserId);
         if (u?.state === "chatting" && !u.hasPaid) {
           // Disconnect both users
           await db.update(usersTable)
             .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-            .where(eq(usersTable.id, userId));
-          await db.update(usersTable)
-            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-            .where(eq(usersTable.id, match.id));
-          await bot.sendMessage(chatId, "That's the end of your free trial.");
-          await bot.sendMessage(match.id, "Your free trial ended.");
-          const matchUpdated = await getUser(match.id);
-          await sendMain(match.id, matchUpdated!);
-          // Show pay gate to partner too if they're unpaid
-          if (!matchUpdated?.hasPaid && (matchUpdated?.chatCount ?? 0) > 0) {
-            await delay(600);
-            await sendPayGate(match.id);
+            .where(eq(usersTable.id, unpaidUserId));
+          if (paidPartnerId) {
+            await db.update(usersTable)
+              .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+              .where(eq(usersTable.id, paidPartnerId));
+            await bot.sendMessage(paidPartnerId, "Your match's free trial ended. Finding you a new match soon.");
+            const paidPartnerUpdated = await getUser(paidPartnerId);
+            if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated);
           }
-          await sendPayGate(chatId);
+          await bot.sendMessage(unpaidChatId, "That's the end of your free trial.");
+          await sendPayGate(unpaidChatId);
         } else if (u && !u.hasPaid) {
-          await sendPayGate(chatId);
+          await sendPayGate(unpaidChatId);
         }
       }, FREE_CHAT_DURATION_MS);
-      chatTimerMap.set(userId, timer);
+      chatTimerMap.set(unpaidUserId, timer);
     }
     return;
   }
