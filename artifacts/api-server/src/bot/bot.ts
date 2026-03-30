@@ -14,7 +14,17 @@ const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
 const FREE_CHAT_DURATION_MS = 60 * 1000; // 60 seconds free for all users
 
-export const bot = new TelegramBot(TOKEN, { polling: true });
+// Init without polling first — steal session from any stale instance, then start clean
+export const bot = new TelegramBot(TOKEN, { polling: false });
+
+(async () => {
+  try {
+    // Calling getUpdates with timeout=0 boots any previous polling session off Telegram's server
+    await bot.getUpdates({ offset: -1, timeout: 0, limit: 1 });
+    await new Promise(r => setTimeout(r, 1500));
+  } catch (_) { /* ignore */ }
+  bot.startPolling({ restart: false });
+})();
 
 // ── In-memory state for fake chats ──────────────────────────────────────────
 
