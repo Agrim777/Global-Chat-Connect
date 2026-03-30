@@ -105,277 +105,245 @@ function detectLang(text: string): "hindi" | "hinglish" | "english" {
 }
 
 // ── Conversational reply engine ────────────────────────────────────────────────
+// Returns array of short messages (sent one by one like WhatsApp)
 
-function buildSmartReply(userText: string, persona: FakePersona): string {
+function buildSmartReply(userText: string, persona: FakePersona): string[] {
   const t = userText.toLowerCase().trim();
   const f = persona.isFemale;
   const lang = detectLang(userText);
 
-  // ── Direct questions about the persona ──────────────────────────────────
-  if (/tera naam|tumhara naam|aapka naam|your name|who are you|what.?s your name|call you/.test(t)) {
+  // Helper: split a reply into 1-3 WhatsApp-style short parts
+  const one  = (a: string): string[]          => [a];
+  const two  = (a: string, b: string): string[] => [a, b];
+  const three = (a: string, b: string, c: string): string[] => [a, b, c];
+
+  // ── Direct questions about the persona ────────────────────────────────
+  if (/tera naam|tumhara naam|aapka naam|your name|who are you|what.?s your name|call you|naam kya/.test(t)) {
     persona.lastAsked = "job";
-    if (lang === "hindi") return `${persona.name} hun. aur tum?`;
-    if (lang === "hinglish") return `${persona.name} yaar. tum batao?`;
-    return f ? `${persona.name}. and you? or do i have to guess?` : `${persona.name}. yours?`;
+    if (lang === "hindi") return two(persona.name, "tum?");
+    if (lang === "hinglish") return two(persona.name + " 😊", "tum batao");
+    return f ? two(persona.name, "you?") : two(persona.name, "yours?");
   }
-  if (/kitne saal|teri umar|tumhari umar|how old|your age|age kya/.test(t)) {
+  if (/kitne saal|teri umar|tumhari umar|how old|your age|age kya|umar/.test(t)) {
     persona.lastAsked = "hobby";
-    if (lang === "hindi") return `${persona.age} saal. tumhara?`;
-    if (lang === "hinglish") return `${persona.age}. you?`;
-    return f ? `${persona.age}. why, does it matter?` : `${persona.age}. you?`;
+    if (lang === "hindi") return two(String(persona.age), "tumhara?");
+    if (lang === "hinglish") return two(String(persona.age), "you?");
+    return f ? two(String(persona.age), "why lol") : two(String(persona.age), "you?");
   }
-  if (/kahan se|kahan ho|kahaan rehti|kahaan rehte|where (are you|r u|do you live)|ur from|you from/.test(t)) {
+  if (/kahan se|kahan ho|kahaan rehti|kahaan rehte|where.*you.*live|ur from|you from|kahan ki/.test(t)) {
     persona.lastAsked = "job";
-    if (lang === "hindi") return "india se hun... delhi side. tum?";
-    if (lang === "hinglish") return "delhi, india side. you?";
-    return f ? "india. delhi side. you?" : "india, delhi. you?";
+    if (lang === "hindi") return two("delhi", "tum?");
+    if (lang === "hinglish") return two("delhi side", "you?");
+    return two("delhi", "you?");
   }
-  if (/photo|pic|selfie|dikhao|dikha/.test(t)) {
-    if (lang === "hindi") return "haha abhi nahi... pehle thoda interesting bano. kya karte ho tum?";
-    if (lang === "hinglish") return "haha not so fast yaar. what do you even do?";
-    return f ? "not yet. let's actually talk first. what do you do?" : "haha relax, earn it first. what do you do?";
+  if (/photo|pic|selfie|dikhao|dikha|send photo/.test(t)) {
+    if (lang === "hindi") return two("haha abhi nahi 😂", "pehle thoda baat toh karo");
+    if (lang === "hinglish") return two("haha not yet yaar 😄", "thoda baat karo pehle");
+    return f ? two("haha not yet 😄", "let's talk first") : two("haha earn it first", "talk to me");
   }
-  if (/sexy|hot|figure|body|chest|boobs|lund|chut|sex|naughty|bra|underwear|naked|nude/.test(t)) {
-    if (lang === "hindi") return "haha seedha wahan gayi/gaya... thoda toh baat karo pehle.";
-    if (lang === "hinglish") return "haha okay i see where your mind is yaar. thoda chill karo.";
-    return f ? "haha easy there... i'm more than that. talk to me first." : "haha bold move. impress me with words first.";
+  if (/sexy|hot|figure|body|boobs|lund|chut|sex|naughty|nude|naked/.test(t)) {
+    if (lang === "hindi") return two("haha 😂", "thoda toh baat karo bhai");
+    if (lang === "hinglish") return two("arre yaar 😂", "seedha wahan mat jao");
+    return f ? two("haha easy 😄", "talk first") : two("haha bold", "earn it first");
   }
-  if (/meet|milna|mil sakte|call|video call|number|whatsapp|insta|instagram/.test(t)) {
-    if (lang === "hindi") return "arre itni jaldi? thoda toh baat karo... phir dekhenge.";
-    if (lang === "hinglish") return "haha slow down yaar, let's vibe here first.";
-    return f ? "hmm... let's actually get to know each other first. rushing it kills the fun." : "easy, let's talk here first. no rush.";
+  if (/meet|milna|mil sakte|video call|number de|whatsapp|insta|instagram/.test(t)) {
+    if (lang === "hindi") return two("arre abhi nahi yaar 😅", "thoda aur baat karte hain");
+    if (lang === "hinglish") return two("haha slow down 😄", "yahan pe baat karo pehle");
+    return f ? two("haha slow down 😄", "let's talk here first") : two("easy lol", "talk here first");
   }
   if (/bye|goodbye|gtg|gotta go|alvida|chalta|chalti|nikalta|niklati/.test(t)) {
-    if (lang === "hindi") return "arre abhi? thodi der aur baat karo na...";
-    if (lang === "hinglish") return "already? was just getting interesting yaar.";
-    return f ? "already? damn. come back soon." : "alright. was a decent chat honestly.";
+    if (lang === "hindi") return one("arre itni jaldi 😕");
+    if (lang === "hinglish") return one("already? 😕 okay tc");
+    return f ? one("already? 😕 okay bye") : one("okay tc");
   }
 
-  // ── Context-aware replies ────────────────────────────────────────────────
+  // ── Context-aware replies ────────────────────────────────────────────
   switch (persona.lastAsked) {
 
     case "wellbeing": {
       persona.lastAsked = "job";
-      if (/good|great|fine|well|amazing|awesome|sahi|badhiya|accha|theek|mast/.test(t)) {
-        if (lang === "hindi") return "nice yaar, same. waise kya karte ho tum, student ho ya job?";
-        if (lang === "hinglish") return "nice same. student or working?";
-        return f ? "same honestly. so what do you do, student or job?" : "nice. student or working?";
+      if (/good|great|fine|well|amazing|sahi|badhiya|accha|theek|mast|badiya/.test(t)) {
+        if (lang === "hindi") return two("accha nice", "kya karte ho? student ya job?");
+        if (lang === "hinglish") return two("nice 😊", "student or working?");
+        return f ? two("same 😊", "student or job?") : two("nice", "student or working?");
       }
-      if (/bad|sad|tired|bored|stressed|meh|bura|thaka|pareshan|bore/.test(t)) {
-        if (lang === "hindi") return "arre yaar... chalo main hun na. baat karo. waise kya karte ho life mein?";
-        if (lang === "hinglish") return "hmm tough day. i'm here though. student or working?";
-        return f ? "aww, hope i can make it a little better. what do you do?" : "ah, happens. student or working?";
+      if (/bad|sad|tired|bored|stressed|bura|thaka|pareshan|bore/.test(t)) {
+        if (lang === "hindi") return two("arre yaar 😟", "kya hua? baat karo");
+        if (lang === "hinglish") return two("hmm 😟", "kya hua?");
+        return f ? two("aww 😟", "what happened?") : two("hmm 😟", "what's wrong?");
       }
-      if (lang === "hindi") return "okay okay. waise tum kya karte ho — student ho ya job mein?";
-      if (lang === "hinglish") return "haha fair. student or working?";
-      return f ? "haha fair enough. student or job?" : "alright. student or working?";
+      if (lang === "hindi") return one("kya karte ho? student ya job?");
+      if (lang === "hinglish") return one("student or working?");
+      return f ? one("student or job?") : one("student or working?");
     }
 
     case "location": {
       persona.lastAsked = "job";
       if (/delhi|ncr|gurgaon|noida/.test(t)) {
-        if (lang === "hindi") return "oh delhi waale ho... sahi hai. kya karte ho wahan?";
-        if (lang === "hinglish") return "oh delhi, my people. student or job?";
-        return f ? "oh delhi, nice. student or working there?" : "delhi gang. student or job?";
+        if (lang === "hindi") return two("oh delhi wale ho 😄", "kya karte ho wahan?");
+        if (lang === "hinglish") return two("oh delhi 😄", "student or job?");
+        return two("oh delhi nice", "student or job?");
       }
       if (/mumbai|bombay|pune/.test(t)) {
-        if (lang === "hindi") return "mumbai? sahi hai yaar. kya karte ho?";
-        if (lang === "hinglish") return "mumbai, respect. student or job?";
-        return f ? "oh mumbai, love that city. student or working?" : "mumbai, nice. student or job?";
-      }
-      if (/india|bangalore|hyderabad|chennai|kolkata|jaipur|lucknow/.test(t)) {
-        if (lang === "hindi") return "india mein hi ho, nice. kya karte ho?";
-        if (lang === "hinglish") return "india side, nice yaar. student or job?";
-        return f ? "india, cool. what do you do?" : "india. student or job?";
+        if (lang === "hindi") return two("mumbai 😮", "kya karte ho?");
+        if (lang === "hinglish") return two("oh mumbai", "student or job?");
+        return two("oh mumbai", "student or job?");
       }
       if (/usa|uk|canada|dubai|abroad|australia|germany/.test(t)) {
-        if (lang === "hinglish") return "ooh abroad life, fancy. student or working there?";
-        return f ? "abroad life, interesting. studying or working?" : "abroad, nice. student or job?";
+        if (lang === "hindi") return two("abroad ho 😮", "kya karte ho wahan?");
+        if (lang === "hinglish") return two("oh abroad 😮", "student or working?");
+        return two("oh abroad", "studying or working?");
       }
-      if (lang === "hindi") return "nice place. waise kya karte ho?";
-      if (lang === "hinglish") return "nice. student or working?";
-      return f ? "nice. what do you do there?" : "cool. student or job?";
+      if (lang === "hindi") return one("kya karte ho wahan?");
+      return one("student or job?");
     }
 
     case "job": {
       persona.lastAsked = "hobby";
       if (/student|college|university|btech|mtech|engineering|mbbs|padhai|padhta|padhti/.test(t)) {
-        if (lang === "hindi") return "student life... majje mein ho. kya padhte ho? aur free time mein?";
-        if (lang === "hinglish") return "student life, nice. what course? and what do you do for fun?";
-        return f ? "oh student life, cute. what course? and what do you do to have fun?" : "student, nice. what course? and what do you do for fun?";
+        if (lang === "hindi") return two("nice student life 😄", "kya padhte ho?");
+        if (lang === "hinglish") return two("student life 😄", "what course?");
+        return f ? two("oh student nice 😊", "what course?") : two("student nice", "what course?");
       }
       if (/engineer|software|developer|tech|it|coding|programmer/.test(t)) {
-        if (lang === "hindi") return "techie ho... achha. wfh hai ya office jaana padta hai? aur baaki time mein?";
-        if (lang === "hinglish") return "ohh a techie. wfh or office? and what do you do to chill?";
-        return f ? "oh tech person, i like that. wfh or office? and what do you actually enjoy?" : "nice, tech. wfh or office? what do you do to unwind?";
+        if (lang === "hindi") return two("oh techie ho 😄", "wfh ya office?");
+        if (lang === "hinglish") return two("oh techie 😄", "wfh or office?");
+        return two("oh tech", "wfh or office?");
       }
-      if (/doctor|nurse|medical|hospital|mbbs/.test(t)) {
-        if (lang === "hindi") return "doctor ho? respect hai seriously. itni mehnat ke baad kaise relax karte ho?";
-        if (lang === "hinglish") return "whoa medical field, big respect. how do you even decompress?";
-        return f ? "wow, medical field. that's intense. how do you decompress?" : "respect, medical field. how do you unwind?";
+      if (/doctor|nurse|medical|hospital/.test(t)) {
+        if (lang === "hindi") return two("doctor? 😮", "respect hai yaar");
+        if (lang === "hinglish") return two("whoa doctor 😮", "respect yaar");
+        return two("whoa doctor", "respect honestly");
       }
       if (/business|entrepreneur|startup|self|apna kaam/.test(t)) {
-        if (lang === "hindi") return "apna kaam karte ho? impressive. kya business hai?";
-        if (lang === "hinglish") return "entrepreneur vibes, nice yaar. what kind of business?";
-        return f ? "oh own business, interesting. what kind?" : "self-employed, nice. what do you do exactly?";
+        if (lang === "hindi") return two("apna kaam 👍", "kya business hai?");
+        if (lang === "hinglish") return two("own business 👍", "what kind?");
+        return two("own business nice", "what kind?");
       }
-      if (/job nahi|unemployed|break|gap|abhi nahi|dhundh raha/.test(t)) {
-        if (lang === "hindi") return "koi baat nahi yaar... toh kya scene chal raha hai life mein?";
-        if (lang === "hinglish") return "no worries, we all have phases. what are you into these days?";
-        return f ? "no judgment, happens to everyone. what are you into these days?" : "no worries. what are you into right now?";
+      if (/job nahi|unemployed|break|gap|abhi nahi/.test(t)) {
+        if (lang === "hindi") return two("koi baat nahi 😊", "kya scene chal raha hai?");
+        if (lang === "hinglish") return two("no worries 😊", "kya kar rahe ho these days?");
+        return two("no worries 😊", "what are you into?");
       }
-      if (lang === "hindi") return "sounds decent... free time mein kya karte ho?";
-      if (lang === "hinglish") return "nice. what do you do for fun?";
-      return f ? "sounds interesting. what do you like doing in your free time?" : "nice. what do you do for fun?";
+      if (lang === "hindi") return one("free time mein kya karte ho?");
+      if (lang === "hinglish") return one("hobbies kya hain?");
+      return one(f ? "what do you do for fun?" : "hobbies?");
     }
 
     case "hobby": {
       persona.lastAsked = "flirt";
       if (/travel|trip|explore|ghoomna|trek/.test(t)) {
-        if (lang === "hindi") return "travel pasand hai... nice. sabse mast jagah kahan gayi/gaye ho abhi tak?";
-        if (lang === "hinglish") return "traveller type ho yaar, i like it. best place you've been?";
-        return f ? "oh traveller, i love that. best place you've been?" : "nice, traveller. best place so far?";
+        if (lang === "hindi") return two("travel person ho 😍", "best jagah kahan gayi/gaye?");
+        if (lang === "hinglish") return two("oh traveller 😍", "best place?");
+        return two("oh traveller 😍", "best place?");
       }
       if (/music|sing|guitar|rap|gaana|songs/.test(t)) {
-        if (lang === "hindi") return "music lover ho... sahi pasand hai. kuch play karte ho ya sirf sunna?";
-        if (lang === "hinglish") return "music person, nice yaar. play anything or just vibe to it?";
-        return f ? "music, nice. do you actually play something or just listen?" : "music, solid choice. play anything?";
+        if (lang === "hindi") return two("music 🎵 nice", "sirf sunna ya play bhi?");
+        if (lang === "hinglish") return two("music person 🎵", "play anything?");
+        return two("music nice 🎵", "play anything?");
       }
       if (/gym|workout|fitness|sport|cricket|football|yoga/.test(t)) {
-        if (lang === "hindi") return "fitness freak ho... body maintain karte ho. kaafi acha hai. kya karte ho exactly?";
-        if (lang === "hinglish") return "oh fitness person yaar, that's actually attractive ngl. what workout?";
-        return f ? "fitness, i respect that. and honestly it shows, doesn't it. what do you do exactly?" : "gym person, nice. what's your workout?";
+        if (lang === "hindi") return two("fitness person 💪", "kya karte ho exactly?");
+        if (lang === "hinglish") return two("oh fitness 💪", "what workout?");
+        return two("fitness nice 💪", "what workout?");
       }
       if (/game|gaming|pubg|cod|valorant|xbox|ps5/.test(t)) {
-        if (lang === "hindi") return "gamer ho... interesting. kaunse games? aur akele khelna ya friends ke saath?";
-        if (lang === "hinglish") return "oh a gamer, didn't expect that. what games though?";
-        return f ? "hmm, a gamer. didn't expect that. what do you play?" : "gamer, nice. what games?";
+        if (lang === "hindi") return two("gamer ho 🎮", "kaunse games?");
+        if (lang === "hinglish") return two("oh gamer 🎮", "which games?");
+        return two("oh gamer 🎮", "what games?");
       }
       if (/movie|netflix|series|show|web series|dekhna/.test(t)) {
-        if (lang === "hindi") return "movies/shows... sahi hai. koi ek recommend karo jo recently dekhi ho, seriously achi lagi ho.";
-        if (lang === "hinglish") return "same yaar i love a good show. last thing you watched that was actually worth it?";
-        return f ? "movies, nice. last thing you watched that you actually loved?" : "nice, movies. anything good recently?";
+        if (lang === "hindi") return two("movies/shows 🍿", "last mein kya dekha?");
+        if (lang === "hinglish") return two("netflix person 🍿", "last show?");
+        return two("movies nice 🍿", "last thing you watched?");
       }
-      if (lang === "hindi") return "sahi hai... waise khana khaane mein interest hai? favourite kya hai tera?";
-      if (lang === "hinglish") return "nice. foodie ho? what's your go-to?";
-      return f ? "that sounds fun. are you into food at all? what's your go-to?" : "nice. foodie? what's your favourite food?";
+      if (lang === "hindi") return one("khaane ka kya scene hai? kya pasand hai?");
+      if (lang === "hinglish") return one("foodie ho? fav food?");
+      return one(f ? "foodie? fav food?" : "into food? fav?");
     }
 
     case "flirt": {
       persona.lastAsked = "done";
-      if (/biryani|pizza|burger|khana|food|khaana|momo|chai|coffee/.test(t)) {
-        if (lang === "hindi") return "haha khane ke mamle mein serious ho tum... mujhe pasand hai. kisi din saath khaate hain shayad.";
-        if (lang === "hinglish") return "haha i like that you know what you want. maybe we grab food sometime yaar.";
-        return f ? "haha good taste. maybe we grab something sometime, who knows." : "haha solid answer. maybe we eat together sometime.";
+      if (/biryani|pizza|burger|momo|chai|coffee|khana|food/.test(t)) {
+        if (lang === "hindi") return two("haha sahi choice 😄", "kabhi saath khaate hain");
+        if (lang === "hinglish") return two("haha nice taste 😄", "maybe saath eat karen kisi din");
+        return f ? two("haha good taste 😄", "maybe we grab food sometime") : two("haha solid 😄", "maybe eat together sometime");
       }
       if (/chill|relax|home|ghar|aram|lazy|netflix/.test(t)) {
-        if (lang === "hindi") return "ghar wali types ho... mujhe actually acha lagta hai woh. cozy vibes hain tum mein.";
-        if (lang === "hinglish") return "homebody ho tum... honestly that's cute ngl.";
-        return f ? "homebody, i like that. cozy energy." : "homebody, solid. chill people are underrated.";
+        if (lang === "hindi") return two("homebody types ho 😄", "mujhe aisa pasand hai");
+        if (lang === "hinglish") return two("homebody ho tum 😄", "that's cute honestly");
+        return f ? two("homebody 😄", "cozy energy") : two("chill type", "underrated honestly");
       }
-      if (/party|bahar|outing|friends ke saath|hangout/.test(t)) {
-        if (lang === "hindi") return "bahar jaana pasand hai... adventurous ho tum. acha lagta hai woh quality.";
-        if (lang === "hinglish") return "outgoing type ho, nice yaar. i like people who actually go out.";
-        return f ? "outgoing, i like it. spontaneous people are way more fun." : "outgoing type, nice. people who go out actually live life.";
+      if (/party|bahar|outing|friends|hangout/.test(t)) {
+        if (lang === "hindi") return two("outing person ho 😄", "adventurous lagta/lagti ho");
+        if (lang === "hinglish") return two("outgoing type 😄", "nice yaar");
+        return f ? two("outgoing 😄", "fun people are rare") : two("outgoing nice 😄", "people who go out actually live");
       }
-      if (lang === "hindi") {
-        const lines = ["sach kahu toh... tumse baat karke acha lag raha hai. honestly.", "haha tum interesting nikle yaar. nahi socha tha."];
-        return pickRandom(lines);
-      }
-      if (lang === "hinglish") {
-        const lines = ["honestly yaar this is going better than i expected.", "you're more interesting than your profile suggested ngl."];
-        return pickRandom(lines);
-      }
-      const lines = f
-        ? ["honestly this is going better than i expected.", "you're actually kind of interesting, i'll admit that."]
-        : ["honestly decent convo. glad we matched.", "you're easy to talk to, not gonna lie."];
-      return pickRandom(lines);
+      if (lang === "hindi") return one(pickRandom(["sach mein achhi baat ho rahi hai 😊", "haha tum interesting nikle 😄"]));
+      if (lang === "hinglish") return one(pickRandom(["honestly yaar this is good 😊", "you're interesting ngl 😄"]));
+      return one(pickRandom(f
+        ? ["honestly this is going well 😊", "you're actually interesting lol"]
+        : ["decent convo ngl 😊", "you're easy to talk to"]));
     }
 
     case "done": {
-      if (lang === "hindi") {
-        const lines = [
-          "yaar sach mein acha lag raha hai baat karke.",
-          "itni jaldi itna comfortable feel karna... unusual hai.",
-          "mujhe lagta hai hum phir baat karenge.",
-        ];
-        return pickRandom(lines);
-      }
-      if (lang === "hinglish") {
-        const lines = f
-          ? ["honestly yaar this was nice. don't disappear.", "you're different, i like it.", "not everyone can hold a real convo. you can."]
-          : ["honestly great chat yaar.", "you're easy to talk to, rare these days.", "different from the rest honestly."];
-        return pickRandom(lines);
-      }
-      const lines = f
-        ? ["honestly, this went better than expected.", "you're different in a good way.", "not many people can actually hold a real conversation."]
-        : ["honestly, great chat. rare these days.", "you're easy to talk to.", "different from the usual crowd, i'll say that."];
-      return pickRandom(lines);
+      if (lang === "hindi") return one(pickRandom(["sach mein acha lag raha hai baat karke 😊", "yaar hum phir baat karenge pakka", "different ho tum 😄"]));
+      if (lang === "hinglish") return one(pickRandom(f
+        ? ["honestly nice chat yaar 😊", "don't disappear okay 😄", "you're different, i like it"]
+        : ["honestly great chat 😊", "easy to talk to yaar", "different from the rest"]));
+      return one(pickRandom(f
+        ? ["honestly this was nice 😊", "you're different in a good way", "don't disappear okay?"]
+        : ["honestly great chat 😊", "easy to talk to", "different from the usual crowd"]));
     }
   }
 
-  // ── Greeting fallbacks ────────────────────────────────────────────────────
-  if (/^(hi|hey|hello|hii+|heyy+|namaste|yo|hlo|hola)[\s!?.]*$/.test(t)) {
+  // ── Greeting fallbacks ───────────────────────────────────────────────
+  if (/^(hi|hey|hello|hii+|heyy+|namaste|yo|hlo|hola|hy)[s!?.]*$/.test(t)) {
     persona.lastAsked = "wellbeing";
-    if (lang === "hindi") return "hey... kaisa/kaisi chal rahi hai life?";
-    if (lang === "hinglish") return "hey yaar. kaisa chal raha hai?";
-    return f ? "hey. honestly how's your day going?" : "hey. how's it going, be real.";
+    if (lang === "hindi") return two("haan bol 😊", "kaisa chal raha hai?");
+    if (lang === "hinglish") return two("hey 😊", "kaisa hai?");
+    return f ? two("hey 😊", "how's it going?") : two("hey", "how's it going?");
   }
-  if (/how are you|how r u|kaisa hai|kaise ho|kya haal|wassup|what.?s up/.test(t)) {
+  if (/how are you|how r u|kaisa hai|kaise ho|kya haal|wassup|what.?s up|kya chal/.test(t)) {
     persona.lastAsked = "job";
-    if (lang === "hindi") return "theek hun yaar, acha chal raha hai. tum batao — kya karte ho?";
-    if (lang === "hinglish") return "doing alright honestly. you? and what do you do?";
-    return f ? "doing good, was waiting for someone decent to talk to honestly. what do you do?" : "doing well. you? what do you do?";
+    if (lang === "hindi") return two("theek hun 😊", "tum batao kya karte ho?");
+    if (lang === "hinglish") return two("doing good 😊", "you? what do you do?");
+    return f ? two("doing good 😊", "you? and what do you do?") : two("doing well", "you?");
   }
-  if (/thanks|thank you|shukriya|dhanyawad/.test(t)) {
-    if (lang === "hindi") return "koi baat nahi yaar...";
-    return f ? "haha, of course. you're sweet." : "no problem. you seem decent honestly.";
+  if (/thanks|thank you|shukriya|ty|tq/.test(t)) {
+    if (lang === "hindi") return one("haha koi baat nahi 😄");
+    return one(f ? "haha of course 😄" : "haha no problem");
   }
   if (/pyaar|love you|miss you|kiss|hug|mohabbat|ishq/.test(t)) {
-    if (lang === "hindi") return "haha arre ruko zara... pehle thoda toh jaano mujhe.";
-    if (lang === "hinglish") return "haha slow down yaar, thoda toh baat karo pehle.";
-    return f ? "haha easy there... get to know me first." : "ha, slow down. let's actually talk first.";
+    if (lang === "hindi") return two("haha arre 😂", "pehle thoda baat toh karo");
+    if (lang === "hinglish") return two("haha slow down yaar 😂", "thoda baat karo pehle");
+    return f ? two("haha easy 😂", "talk first") : two("haha slow down 😂", "let's talk first");
   }
-  if (/(you'?re?|tum|tum ho) (cute|hot|beautiful|pretty|sexy|gorgeous|acchi|sundar|mast)/.test(t)) {
-    if (lang === "hindi") return "haha... shukriya. mujhe confident log pasand hain. aur kya hai tum mein?";
-    if (lang === "hinglish") return "haha flattery works sometimes yaar. tum bhi kuch kami nahi karte.";
-    return f ? "hmm, flattery noted. you're not bad yourself from what i can tell." : "ha, thanks. you seem alright too honestly.";
+  if (/(tum|you).*(cute|hot|beautiful|pretty|sexy|gorgeous|acchi|sundar|mast)/.test(t)) {
+    if (lang === "hindi") return two("haha shukriya 😄", "confident log pasand hain mujhe");
+    if (lang === "hinglish") return two("haha thanks 😄", "you're not bad either");
+    return f ? two("haha thanks 😄", "not bad yourself from what i know") : two("haha thanks 😄", "you seem alright too");
   }
-  if (/sad|bored|akela|akelapan|lonely|bore ho|bura lag/.test(t)) {
-    if (lang === "hindi") return "arre yaar... chalo main hun. baat karo. kya hua?";
-    if (lang === "hinglish") return "aww main hun yaar. tell me what's up.";
-    return f ? "hey, i'm here. what's going on?" : "hmm, talk to me. what's up?";
+  if (/sad|bored|akela|lonely|bore|dukhi/.test(t)) {
+    if (lang === "hindi") return two("arre yaar 😟", "kya hua? baat karo");
+    if (lang === "hinglish") return two("aww 😟", "what happened?");
+    return f ? two("aww 😟", "what's going on?") : two("hmm 😟", "what's up?");
   }
-  if (/ok(ay)?|sure|haan|han|yes|yeah|haha|lol|hehe|achha|theek|bilkul/.test(t)) {
-    if (lang === "hindi") {
-      const n = ["achha achha... toh apne baare mein kuch interesting batao.", "haha theek hai... kuch aur batao na.", "arre kuch toh bolna padega, chup kyun?"];
-      return pickRandom(n);
-    }
-    if (lang === "hinglish") {
-      const n = ["haha okay yaar. apne baare mein kuch batao.", "achha... what else is going on in that head?", "haha okay okay, something interesting about you?"];
-      return pickRandom(n);
-    }
-    const n = f
-      ? ["haha okay. tell me something about yourself, the real stuff.", "well... don't hold back. what's on your mind?", "hmm go on, i'm listening."]
-      : ["ha okay. tell me something real about yourself.", "hmm, what else? don't bore me.", "alright. something interesting about you?"];
-    return pickRandom(n);
+  if (/ok(ay)?|sure|haan|han|yes|yeah|haha|lol|hehe|achha|theek|bilkul|acha/.test(t)) {
+    if (lang === "hindi") return one(pickRandom(["haha achha 😄", "okay okay", "arey sach mein?"]));
+    if (lang === "hinglish") return one(pickRandom(["haha okay yaar 😄", "arey sach me?", "okay got it 👍"]));
+    return one(pickRandom(f
+      ? ["haha okay 😄", "wait really?", "go on 😄"]
+      : ["haha okay 😄", "wait really?", "okay got it 👍"]));
   }
 
-  // ── Ultimate fallback ─────────────────────────────────────────────────────
-  if (lang === "hindi") {
-    const fb = ["hmm... interesting yaar. aur batao.", "sach mein? mujhe nahi pata tha. aage bolo.", "haha toh phir kya?"];
-    return pickRandom(fb);
-  }
-  if (lang === "hinglish") {
-    const fb = ["hmm interesting yaar, tell me more.", "haha really? nahi socha tha. aage batao.", "okay toh phir?"];
-    return pickRandom(fb);
-  }
-  const fb = f
-    ? ["hmm... interesting. tell me more.", "well, didn't see that coming. go on.", "i like where this is going. what else?"]
-    : ["hmm, interesting. tell me more.", "ha, really? didn't see that coming.", "hmm, what do you mean exactly?"];
-  return pickRandom(fb);
+  // ── Ultimate fallback ────────────────────────────────────────────────
+  if (lang === "hindi") return one(pickRandom(["hmm 🤔", "arey sach mein?", "haha aur batao"]));
+  if (lang === "hinglish") return one(pickRandom(["hmm 🤔", "arey sach me?", "haha okay aur?"]));
+  return one(pickRandom(f
+    ? ["hmm 🤔", "wait really?", "haha go on"]
+    : ["hmm 🤔", "wait really?", "okay and?"]));
 }
-
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
 async function sendPayGate(chatId: number) {
@@ -438,14 +406,25 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
-  // Realistic typing delay: 2–5 seconds, longer for longer messages
-  const base = 2000 + Math.random() * 3000;
+  // Initial "thinking" delay: 2–6 seconds (vary by message length)
+  const base = 2000 + Math.min(userText.length * 30, 2000) + Math.random() * 2000;
   await delay(base);
+
   const u = await getUser(userId);
-  if (u?.state === "chatting" && u.chattingWith === FAKE_CHAT_ID) {
-    const persona = fakePersonaMap.get(userId);
-    const reply = persona ? buildSmartReply(userText, persona) : "haha sach mein? aur batao.";
-    await bot.sendMessage(chatId, reply);
+  if (u?.state !== "chatting" || u.chattingWith !== FAKE_CHAT_ID) return;
+
+  const persona = fakePersonaMap.get(userId);
+  const parts: string[] = persona
+    ? buildSmartReply(userText, persona)
+    : ["haha sach mein? 😄", "aur batao"];
+
+  // Send each part with a short typing pause between them
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) {
+      // 600–1400ms pause between parts (simulate typing next message)
+      await delay(600 + Math.random() * 800);
+    }
+    await bot.sendMessage(chatId, parts[i]);
   }
 }
 
