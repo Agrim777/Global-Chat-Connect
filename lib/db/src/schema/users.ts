@@ -31,6 +31,11 @@ export const usersTable = pgTable("users", {
   chatCount: integer("chat_count").default(0).notNull(),
   state: botStateEnum("state").default("idle").notNull(),
   chattingWith: bigint("chatting_with", { mode: "number" }),
+  // ── Referral system ───────────────────────────────────────────────────────
+  referralCode: varchar("referral_code", { length: 20 }).unique(),
+  referredBy: bigint("referred_by", { mode: "number" }),
+  referralCount: integer("referral_count").default(0).notNull(),
+  bonusChats: integer("bonus_chats").default(0).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

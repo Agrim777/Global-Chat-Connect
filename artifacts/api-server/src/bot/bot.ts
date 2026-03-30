@@ -74,17 +74,73 @@ async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInse
   return getUser(id);
 }
 
+// Generate a unique 6-char alphanumeric referral code for a user
+function makeCode(userId: number): string {
+  // Base36 of userId + timestamp salt, padded to 6 chars, uppercased
+  const raw = (userId % 46656).toString(36).toUpperCase().padStart(4, '0');
+  const salt = Math.floor(Math.random() * 36 * 36).toString(36).toUpperCase().padStart(2, '0');
+  return (raw + salt).slice(0, 6);
+}
+
+async function ensureReferralCode(userId: number): Promise<string> {
+  const u = await getUser(userId);
+  if (u?.referralCode) return u.referralCode;
+  // Generate until unique (extremely rare collision at this scale)
+  let code = makeCode(userId);
+  let attempts = 0;
+  while (attempts < 10) {
+    const existing = await db.select().from(usersTable)
+      .where(eq(usersTable.referralCode, code));
+    if (existing.length === 0) break;
+    code = makeCode(userId + attempts + Date.now());
+    attempts++;
+  }
+  await db.update(usersTable).set({ referralCode: code, updatedAt: new Date() })
+    .where(eq(usersTable.id, userId));
+  return code;
+}
+
+async function showReferralStats(chatId: number, userId: number) {
+  const u = await getUser(userId);
+  if (!u) return;
+  const code = await ensureReferralCode(userId);
+  const BOT_USERNAME = "Mydatingbabybot";
+  const link = `https://t.me/${BOT_USERNAME}?start=ref_${code}`;
+  const referred = u.referralCount ?? 0;
+  const bonus    = u.bonusChats    ?? 0;
+  const progress = referred % 10;
+  const bar = "🟩".repeat(progress) + "⬜".repeat(10 - progress);
+  await bot.sendMessage(chatId,
+    `📨 *Refer Friends — Get Free Chats*
+
+` +
+    `Share your link with friends. When *10 friends join*, you earn *1 free chat* with a real person! No payment needed.
+
+` +
+    `🔗 *Your link:*
+` + `\`${link}\`
+
+` +
+    `📊 Progress: ${progress}/10
+${bar}
+
+` +
+    `👥 Total friends referred: *${referred}*
+` +
+    `🎁 Free chats available: *${bonus}*`,
+    { parse_mode: "Markdown" }
+  );
+}
+
 async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean }) {
-  let kb: object;
+  let kb: TelegramBot.ReplyKeyboardMarkup;
   if (user.isProfileComplete) {
-    const bottomRow = user.hasPaid
-      ? [{ text: "✅ Premium" }]
-      : [{ text: "💎 Go Premium" }];
+    const premiumBtn = user.hasPaid ? { text: "✅ Premium" } : { text: "💎 Go Premium" };
     kb = {
       keyboard: [
         [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
         [{ text: "✏️ Edit Profile" }, { text: "🛑 Stop Matching" }],
-        bottomRow,
+        [{ text: "📨 Refer Friends" }, premiumBtn],
       ],
       resize_keyboard: true,
     };
@@ -92,7 +148,7 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
     kb = {
       keyboard: [
         [{ text: "🚀 Setup Profile" }],
-        [{ text: "💎 Go Premium" }],
+        [{ text: "📨 Refer Friends" }, { text: "💎 Go Premium" }],
       ],
       resize_keyboard: true,
     };
@@ -707,13 +763,24 @@ async function findMatch(chatId: number, userId: number) {
     return;
   }
 
-  // After first free trial, block until payment
-  if (me.chatCount > 0 && !me.hasPaid) {
+  // After first free trial, check for bonus chats before paywall
+  const hasBonusChat = (me.bonusChats ?? 0) > 0;
+  if (me.chatCount > 0 && !me.hasPaid && !hasBonusChat) {
     await sendPayGate(chatId);
     return;
   }
 
-  // ── First-ever chat OR paid user: try real match first ────────────────────
+  // Decrement bonus chat before starting (consume it now)
+  if (me.chatCount > 0 && !me.hasPaid && hasBonusChat) {
+    await db.update(usersTable)
+      .set({ bonusChats: (me.bonusChats ?? 1) - 1, updatedAt: new Date() })
+      .where(eq(usersTable.id, userId));
+    await bot.sendMessage(chatId,
+      `🎁 Using 1 referral bonus chat! ${((me.bonusChats ?? 1) - 1)} remaining after this.`
+    );
+  }
+
+  // ── First-ever chat OR paid user OR bonus chat: try real match first ───────
   const eligible = await findEligibleUsers(me, userId);
 
   if (eligible.length > 0) {
@@ -789,7 +856,59 @@ async function findMatch(chatId: number, userId: number) {
 
 // ── /start ───────────────────────────────────────────────────────────────────
 
-bot.onText(/\/start/, async (msg) => {
+bot.onText(/\/start (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const id = msg.from!.id;
+  const param = (match?.[1] ?? "").trim();
+  try {
+    let user = await getUser(id);
+    const isNew = !user;
+    if (!user) user = await upsertUser(id, { firstName: msg.from!.first_name ?? "", telegramUsername: msg.from!.username ?? null, state: "idle" });
+
+    // Handle referral deep link: /start ref_XXXXXX
+    if (param.startsWith("ref_") && isNew) {
+      const refCode = param.slice(4).toUpperCase();
+      const referrers = await db.select().from(usersTable)
+        .where(eq(usersTable.referralCode, refCode));
+      const referrer = referrers[0];
+      if (referrer && referrer.id !== id) {
+        // Mark this user as referred
+        await db.update(usersTable)
+          .set({ referredBy: referrer.id, updatedAt: new Date() })
+          .where(eq(usersTable.id, id));
+
+        // Increment referrer's count and award bonus chat every 10 referrals
+        const newCount = (referrer.referralCount ?? 0) + 1;
+        const bonusEarned = newCount % 10 === 0 ? 1 : 0;
+        await db.update(usersTable)
+          .set({
+            referralCount: newCount,
+            bonusChats: (referrer.bonusChats ?? 0) + bonusEarned,
+            updatedAt: new Date(),
+          })
+          .where(eq(usersTable.id, referrer.id));
+
+        // Notify referrer
+        if (bonusEarned > 0) {
+          await bot.sendMessage(referrer.id,
+            `🎉 You referred 10 friends! You've earned *1 free chat*. Keep inviting to earn more! 🎁`,
+            { parse_mode: "Markdown" }
+          ).catch(() => {});
+        } else {
+          await bot.sendMessage(referrer.id,
+            `👋 A friend joined using your referral link! (${newCount % 10}/10 towards your next free chat)`,
+            { parse_mode: "Markdown" }
+          ).catch(() => {});
+        }
+      }
+    }
+
+    await bot.sendMessage(chatId, "💕 *Welcome to WorldMatch Dating Bot!*\n\nConnect with people from all over the world.\nFind your perfect match and start chatting! 🌍", { parse_mode: "Markdown" });
+    await sendMain(chatId, user!);
+  } catch (err) { logger.error({ err }, "/start referral error"); }
+});
+
+bot.onText(/\/start$/, async (msg) => {
   const chatId = msg.chat.id;
   const id = msg.from!.id;
   try {
@@ -811,6 +930,7 @@ bot.onText(/\/help/, async (msg) => {
     "/match — Find a match\n" +
     "/stop — End current chat\n" +
     "/premium — Upgrade to Premium 💎\n" +
+    "/refer — Referral link & stats\n" +
     "/pay — Payment info\n" +
     "/help — Show this help",
     { parse_mode: "Markdown" }
@@ -966,7 +1086,7 @@ bot.on("message", async (msg) => {
       // Allow "skip" during edit to keep current value
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
       const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat",
-        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
+        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "📨 Refer Friends", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
       if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text) || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text)) {
         await bot.sendMessage(chatId, "Please type your real name (letters only, 2–50 chars).", { reply_markup: { remove_keyboard: true } });
         return;
@@ -1133,7 +1253,7 @@ bot.on("message", async (msg) => {
       return;
     }
     if (text === "✏️ Edit Profile") {
-      if (user.state === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before editing your profile."); return; }
+      if ((user.state as string) === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before editing your profile."); return; }
       if (!user.isProfileComplete) { await startSetup(chatId, id); return; }
       await startEditProfile(chatId, id);
       return;
@@ -1141,7 +1261,11 @@ bot.on("message", async (msg) => {
     if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
     if (text === "👤 My Profile") { await showProfile(chatId, user); return; }
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
-    if (text === "💎 Go Premium") {
+    if (text === "📨 Refer Friends") {
+      await showReferralStats(chatId, id);
+      return;
+    }
+        if (text === "💎 Go Premium") {
       if (user.hasPaid) {
         await bot.sendMessage(chatId, "✅ You're already a *Premium* member! Enjoy unlimited matches 💖", { parse_mode: "Markdown" });
         return;
@@ -1179,6 +1303,10 @@ bot.onText(/\/match/, async (msg) => { await findMatch(msg.chat.id, msg.from!.id
 bot.onText(/\/stop/, async (msg) => { await stopChat(msg.chat.id, msg.from!.id); });
 
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
+
+bot.onText(/\/(refer|referral|invite)/, async (msg) => {
+  await showReferralStats(msg.chat.id, msg.from!.id);
+});
 
 bot.onText(/\/premium/, async (msg) => {
   const u = await getUser(msg.from!.id);
