@@ -18,12 +18,17 @@ const FREE_CHAT_DURATION_MS = 60 * 1000; // 60 seconds free for all users
 export const bot = new TelegramBot(TOKEN, { polling: false });
 
 (async () => {
-  try {
-    // Calling getUpdates with timeout=0 boots any previous polling session off Telegram's server
-    await bot.getUpdates({ offset: -1, timeout: 0, limit: 1 });
-    await new Promise(r => setTimeout(r, 1500));
-  } catch (_) { /* ignore */ }
+  // Call getUpdates multiple times to boot any stale polling session off Telegram's server
+  for (let i = 0; i < 3; i++) {
+    try { await bot.getUpdates({ offset: -1, timeout: 0, limit: 1 }); } catch (_) { /* ignore */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
   bot.startPolling({ restart: false });
+  // Suppress 409 errors that may still appear during the brief overlap window
+  bot.on("polling_error", (err: Error & { code?: string }) => {
+    if (err.code === "ETELEGRAM" && err.message?.includes("409")) return;
+    logger.error({ err }, "Bot polling error");
+  });
 })();
 
 // ── In-memory state for fake chats ──────────────────────────────────────────
@@ -464,16 +469,22 @@ async function stopChat(chatId: number, userId: number) {
       await db.update(usersTable)
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
         .where(eq(usersTable.id, partnerId));
-      await bot.sendMessage(partnerId, "💔 Your match ended the chat.\n\nTap *Find Match* to meet someone new!", { parse_mode: "Markdown" });
+      await bot.sendMessage(partnerId, "Your match ended the chat.");
       await sendMain(partnerId, partner);
+      // Show pay gate to partner too if they're unpaid and used their trial
+      if (!partner.hasPaid && (partner.chatCount ?? 0) > 0) {
+        await delay(600);
+        await sendPayGate(partnerId);
+      }
     }
   }
 
   const updated = await getUser(userId);
-  await bot.sendMessage(chatId, "Chat ended. Hope you had a great time! 💕");
+  await bot.sendMessage(chatId, "Chat ended.");
   await sendMain(chatId, updated!);
 
-  if (partnerId === FAKE_CHAT_ID) {
+  // Show pay gate to unpaid users who have used their free trial (fake or real)
+  if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
     await delay(600);
     await sendPayGate(chatId);
   }
@@ -517,11 +528,12 @@ async function findMatch(chatId: number, userId: number) {
     const match = pickRandom(eligible);
     const newCount = (me.chatCount ?? 0) + 1;
 
+    const matchNewCount = (match.chatCount ?? 0) + 1;
     await db.update(usersTable)
       .set({ state: "chatting", chattingWith: match.id, chatCount: newCount, updatedAt: new Date() })
       .where(eq(usersTable.id, userId));
     await db.update(usersTable)
-      .set({ state: "chatting", chattingWith: userId, updatedAt: new Date() })
+      .set({ state: "chatting", chattingWith: userId, chatCount: matchNewCount, updatedAt: new Date() })
       .where(eq(usersTable.id, match.id));
 
     const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
@@ -550,8 +562,14 @@ async function findMatch(chatId: number, userId: number) {
             .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
             .where(eq(usersTable.id, match.id));
           await bot.sendMessage(chatId, "That's the end of your free trial.");
-          await bot.sendMessage(match.id, "The other user's free trial ended. Try finding another match.");
-          await sendMain(match.id, (await getUser(match.id))!);
+          await bot.sendMessage(match.id, "Your free trial ended.");
+          const matchUpdated = await getUser(match.id);
+          await sendMain(match.id, matchUpdated!);
+          // Show pay gate to partner too if they're unpaid
+          if (!matchUpdated?.hasPaid && (matchUpdated?.chatCount ?? 0) > 0) {
+            await delay(600);
+            await sendPayGate(match.id);
+          }
           await sendPayGate(chatId);
         } else if (u && !u.hasPaid) {
           await sendPayGate(chatId);
