@@ -64,18 +64,18 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
 const FEMALE_NAMES = ["Priya", "Sofia", "Neha", "Emma", "Aisha", "Zara", "Riya", "Ava"];
 const MALE_NAMES   = ["Arjun", "Alex", "Rahul", "Ethan", "Omar", "Luca", "Ryan", "Noah"];
 
-// Each opener ends with a clear question so we know what to expect back
 interface Opener { text: string; lastAsked: string }
 
+// Short, punchy openers — each ends with ONE clear question
 const OPENERS_F: Opener[] = [
-  { text: "Hii 😊 Finally someone interesting! How are you doing today?", lastAsked: "wellbeing" },
-  { text: "Omg hi! 😍 I love meeting new people. So tell me — where are you from? 🌍", lastAsked: "location" },
-  { text: "Hiiii! 🌸 So excited to match! Quick question — student or working?", lastAsked: "job" },
+  { text: "hii 😊 omg finally! how are you doing?", lastAsked: "wellbeing" },
+  { text: "heyy 😍 where are you from btw?", lastAsked: "location" },
+  { text: "hi!! so are you a student or working? 😊", lastAsked: "job" },
 ];
 const OPENERS_M: Opener[] = [
-  { text: "Hey! 😄 Glad we matched. How's your day going so far?", lastAsked: "wellbeing" },
-  { text: "Hey there! 😏 I'm curious — where are you from?", lastAsked: "location" },
-  { text: "Hii! 😄 Nice to meet you. So what do you do — student or job?", lastAsked: "job" },
+  { text: "hey! 😄 how's your day going?", lastAsked: "wellbeing" },
+  { text: "hey there 😏 where you from?", lastAsked: "location" },
+  { text: "hii 😄 you student or working?", lastAsked: "job" },
 ];
 
 // ── Advanced multi-turn conversational reply engine ───────────────────────────
@@ -84,249 +84,149 @@ function buildSmartReply(userText: string, persona: FakePersona): string {
   const t = userText.toLowerCase().trim();
   const f = persona.isFemale;
 
-  // ── Hard-override questions user might ask the bot directly ──
+  // ── Direct questions asked to the bot ──────────────────────────────────────
   if (/your name|who are you|what.?s your name|call you/.test(t)) {
     persona.lastAsked = "job";
-    return `My name is ${persona.name} 😊 And you? What's yours?`;
+    return `${persona.name} 😊 what about you?`;
   }
   if (/how old|your age|years old/.test(t)) {
     persona.lastAsked = "hobby";
-    return `I'm ${persona.age} 😊 What about you?`;
+    return `${persona.age} 😊 you?`;
   }
   if (/where (are you|r u|do you live)|which country|ur from|you from/.test(t)) {
     persona.lastAsked = "job";
-    return f
-      ? "I'm from India 🇮🇳 Love meeting people from everywhere though! And you — where are you from?"
-      : "Based in India 🇮🇳 You?";
+    return f ? "india 🇮🇳 you?" : "india 🇮🇳 you?";
   }
   if (/photo|pic|picture|selfie/.test(t)) {
-    return f
-      ? "Haha maybe in a bit 😏 Let's get to know each other first! Tell me more about yourself 😊"
-      : "Ha not yet! 😄 Let's talk a little first. What do you do for work?";
+    return f ? "haha later maybe 😏 let's talk first! what do you do?" : "ha not yet 😄 talk first. student or working?";
   }
   if (/bye|goodbye|ttyl|gtg|gotta go|see you/.test(t)) {
-    return f ? "Aww already?? 😢 I was really enjoying this 💕 Don't disappear okay!" : "Aw okay, take care! 😄 Was nice meeting you.";
+    return f ? "noo already?? 😢 was really enjoying this 💕" : "aw okay take care 😄 was nice talking!";
   }
 
-  // ── Context-aware: respond to what the bot last asked ────────────────────
+  // ── Context-aware replies ────────────────────────────────────────────────
   switch (persona.lastAsked) {
 
     case "wellbeing": {
       persona.lastAsked = "job";
-      if (/good|great|fine|well|amazing|awesome|fantastic|happy|blessed/.test(t))
-        return f
-          ? "That's so good to hear! 😊 I love positive energy. So tell me — what do you do? Student or working?"
-          : "Nice nice 😄 Same here. So are you a student or working?";
-      if (/bad|sad|tired|bored|stressed|not good|okay ish|meh|so so/.test(t))
-        return f
-          ? "Aww I'm sorry 🥺 Hopefully talking to me makes it a little better! What do you do by the way?"
-          : "Ah that happens man 😕 Hope the day gets better. What are you up to — student or working?";
-      // didn't match wellbeing words, still redirect
-      return f
-        ? "Haha okay 😄 So tell me more! Are you a student or working?"
-        : "Nice! 😄 So what do you do — student or job?";
+      if (/good|great|fine|well|amazing|awesome|happy|blessed/.test(t))
+        return f ? "aw nice 😊 same! so what do you do — student or working?" : "nice 😄 same! student or working?";
+      if (/bad|sad|tired|bored|stressed|not good|meh/.test(t))
+        return f ? "aww 🥺 hope talking helps a bit! what do you do btw?" : "ah happens 😕 hope it gets better. student or working?";
+      return f ? "haha okay 😄 so student or working?" : "nice 😄 student or working?";
     }
 
     case "location": {
       persona.lastAsked = "job";
-      // Detect if they mention a country/city
       if (/india|delhi|mumbai|bangalore|hyderabad|chennai|kolkata|pune/.test(t))
-        return f
-          ? "Oh nice, India! 🇮🇳 I love connecting with Indians, we just get each other haha 😊 So what do you do — studying or working?"
-          : "Oh cool fellow Indian! 😄 Nice. So student or job?";
+        return f ? "oh nice india! 🇮🇳 we just get each other haha. studying or working?" : "fellow indian 😄 nice! student or job?";
       if (/usa|america|uk|canada|australia|dubai|uae|germany|singapore/.test(t))
-        return f
-          ? "Oh wow, abroad! 😍 That's so cool, I've always wanted to travel more. What do you do there — studying or working?"
-          : "Oh nice, abroad life! 😄 What are you doing there — studying or working?";
-      return f
-        ? "Oh nice! 😊 I love people from different places. So are you a student or working?"
-        : "Cool! 😄 Nice place. So student or working?";
+        return f ? "wow abroad! 😍 that's so cool. studying or working there?" : "oh abroad life 😄 nice! student or working?";
+      return f ? "oh nice 😊 so student or working?" : "cool 😄 student or working?";
     }
 
     case "job": {
       persona.lastAsked = "hobby";
-      if (/student|college|university|school|studying|btech|mtech|engineering|mbbs/.test(t))
-        return f
-          ? "Aww a student! 😊 I love that — what are you studying? And which year?"
-          : "Oh nice, student life! 😄 What course? And final year or still in between?";
+      if (/student|college|university|school|studying|btech|mtech|engineering/.test(t))
+        return f ? "aww student life 😊 what course? which year?" : "nice student life 😄 what course?";
       if (/engineer|software|developer|tech|it |coding|programmer/.test(t))
-        return f
-          ? "Oh a techie! 😄 That's honestly so attractive haha. Do you work from home or office? And what do you like doing outside work?"
-          : "Fellow tech person here 😄 Nice! WFH or office? What do you do to unwind?";
-      if (/doctor|nurse|medical|mbbs|hospital|health/.test(t))
-        return f
-          ? "Wow a doctor! 🌟 That's so impressive. You must be really dedicated. What do you do to relax after long shifts?"
-          : "Oh wow, medical field! 😄 Respect. What do you do to decompress after work?";
-      if (/teacher|professor|lecture/.test(t))
-        return f
-          ? "Aww a teacher! 😊 That's such a noble job honestly. What subject? And what do you do in your free time?"
-          : "A teacher! 😄 Respect bro. What subject and what do you like doing outside work?";
-      if (/business|entrepreneur|startup|own|company|self.?employ/.test(t))
-        return f
-          ? "Ooh an entrepreneur! 😍 That's honestly so attractive. What kind of business? Tell me everything!"
-          : "Oh nice, own business! 😄 What kind? That's pretty cool honestly.";
-      if (/freelanc|design|artist|creative|content|influencer/.test(t))
-        return f
-          ? "Oh I love creative people! 🎨 What kind of work do you do? And is it your passion or just a job?"
-          : "Oh creative field! 😄 Nice. What exactly do you do?";
-      if (/not working|unemployed|looking|break|gap/.test(t))
-        return f
-          ? "Oh okay, totally understand 😊 Sometimes a break is needed! What are you into these days then — any hobbies?"
-          : "No worries man 😄 Everyone needs a reset. What are you into these days?";
-      return f
-        ? "That's interesting! 😊 Sounds like you stay busy! What do you like doing when you're not working?"
-        : "Oh cool! 😄 So what do you like doing in your free time?";
+        return f ? "oh techie 😄 honestly attractive haha. wfh or office?" : "nice tech person 😄 wfh or office?";
+      if (/doctor|nurse|medical|hospital/.test(t))
+        return f ? "wow doctor! 🌟 so impressive. what do you do to relax?" : "medical field 😄 respect. how do you unwind?";
+      if (/business|entrepreneur|startup|self.?employ/.test(t))
+        return f ? "ooh entrepreneur 😍 what kind of business?" : "own business 😄 what kind?";
+      if (/freelanc|design|artist|creative|content/.test(t))
+        return f ? "love creative people 🎨 what do you do exactly?" : "creative field 😄 what exactly?";
+      if (/not working|unemployed|break|gap/.test(t))
+        return f ? "oh okay 😊 totally get it! any hobbies keeping you busy?" : "no worries 😄 what are you into these days?";
+      return f ? "sounds cool 😊 what do you like doing in free time?" : "oh nice 😄 hobbies?";
     }
 
     case "hobby": {
       persona.lastAsked = "food";
-      if (/travel|trip|explore|adventure|trek|backpack/.test(t))
-        return f
-          ? "Omg I love travelling too! 🌍 Where's the best place you've visited? I need to add it to my list 😩"
-          : "Traveller! 🌍 Nice. Where's the most amazing place you've been?";
-      if (/music|sing|guitar|piano|drum|rap|songs/.test(t))
-        return f
-          ? "Music lover 🎵 Same honestly! Do you play something or just listen? I'm obsessed with good playlists 😊"
-          : "Music is life 🎵 What kind of music? And do you play any instrument?";
-      if (/gym|fitness|workout|sport|cricket|football|basketball|running|yoga/.test(t))
-        return f
-          ? "Oh you stay active 💪 I respect that! I keep meaning to get back to gym but life 😂 What sport do you play?"
-          : "Nice, fitness person 💪 Same here! What sport or workout do you do?";
-      if (/read|books|novel|fiction/.test(t))
-        return f
-          ? "Aww a reader 📚 That's so attractive honestly haha. What's the last book you loved? Give me a recommendation!"
-          : "Oh a reader! 😄 Respect. What genre?";
-      if (/game|gaming|play|ps5|xbox|pc|pubg|cod|minecraft|valorant/.test(t))
-        return f
-          ? "Ooh a gamer! 😄 Do you ever play with friends or mostly solo? Late night gaming sessions? 😂"
-          : "Gamer! 😄 What games? We should play sometime haha.";
-      if (/cook|bake|chef|food|kitchen/.test(t))
-        return f
-          ? "Oh you cook?! 😍 That's honestly so attractive haha. What's your speciality dish?"
-          : "Oh nice, you cook! 😄 What's your best dish?";
-      if (/movie|film|web series|netflix|amazon|series|show/.test(t))
-        return f
-          ? "Ooh movie fan! 🎬 What's the last thing you watched that you couldn't stop thinking about?"
-          : "Movies/shows! 😄 What's something really good you watched recently?";
-      return f
-        ? "That sounds so fun! 😊 I can tell you're a cool person. Are you a foodie too? What's your go-to dish?"
-        : "Nice! 😄 So are you into food? What's your favourite thing to eat?";
+      if (/travel|trip|explore|adventure|trek/.test(t))
+        return f ? "omg me too!! 🌍 best place you've been?" : "traveller 🌍 nice. best place you've visited?";
+      if (/music|sing|guitar|piano|drum|rap/.test(t))
+        return f ? "music lover 🎵 do you play or just listen?" : "music is life 🎵 what kind? you play anything?";
+      if (/gym|fitness|workout|sport|cricket|football|running|yoga/.test(t))
+        return f ? "oh you stay fit 💪 love that! what sport?" : "fitness person 💪 nice! what workout?";
+      if (/game|gaming|ps5|xbox|pubg|cod|valorant/.test(t))
+        return f ? "ooh gamer 😄 solo or with friends? late nights? 😂" : "gamer 😄 what games? we should play sometime haha";
+      if (/movie|film|netflix|series|show/.test(t))
+        return f ? "yess movies 🎬 last thing you watched that was actually good?" : "movies/shows 😄 anything good recently?";
+      if (/cook|bake|chef|kitchen/.test(t))
+        return f ? "you cook?! 😍 honestly so attractive haha. best dish?" : "oh you cook 😄 nice! best dish?";
+      return f ? "sounds fun 😊 are you a foodie? fav food?" : "nice 😄 fav food?";
     }
 
     case "food": {
       persona.lastAsked = "vibe";
       if (/biryani|biriyani/.test(t))
-        return f
-          ? "YESSS biryani is literally my love language 😍🍛 Chicken or mutton though? This is important haha"
-          : "Biryani gang 🙌 I respect it. Chicken or mutton?";
+        return f ? "YESSS biryani is literally love 😍🍛 chicken or mutton?" : "biryani gang 🙌 chicken or mutton?";
       if (/pizza/.test(t))
-        return f
-          ? "Pizza! 🍕 Nice. Okay controversial question — pineapple on pizza, yes or no? 😂"
-          : "Pizza bro 🍕 Classic. Thin crust or thick?";
-      if (/chinese|sushi|thai|japanese|korean/.test(t))
-        return f
-          ? "Ooh you have fancy taste! 😄 I love Asian food. We'd definitely vibe at a restaurant haha 😊"
-          : "Nice, international food! 😄 Good taste. We'd have a good time eating out haha.";
-      if (/burger|sandwich|fast food|kfc|mcdonalds|dominos/.test(t))
-        return f
-          ? "Haha fast food fan! 😄 No judgment, same honestly. There's nothing like a good burger on a lazy day right?"
-          : "Fast food! 😄 Honest man haha. Same sometimes ngl.";
-      return f
-        ? "Yumm that sounds so good! 😍 Okay I feel like we're going to get along really well. What's your idea of a perfect weekend?"
-        : "Sounds good man! 😄 Okay last question — what does a perfect weekend look like for you?";
+        return f ? "pizza! 🍕 pineapple on pizza — yes or no? 😂" : "pizza 🍕 thin crust or thick?";
+      if (/burger|kfc|mcdonalds|fast food/.test(t))
+        return f ? "haha fast food fan 😄 no judgment same honestly 🙈" : "fast food 😄 honest lol. same sometimes ngl.";
+      return f ? "yumm 😍 okay — perfect weekend for you looks like what?" : "nice 😄 what's a perfect weekend for you?";
     }
 
     case "vibe": {
       persona.lastAsked = "closing";
-      if (/chill|relax|home|sleep|movies|netflix|lazy|stay in/.test(t))
-        return f
-          ? "Same honestly 😄 I'm such a homebody sometimes. But I also love spontaneous plans! Do you prefer going out or staying in?"
-          : "Same bro 😄 Lazy weekends are underrated. Though sometimes a good outing is nice too right?";
-      if (/go out|party|hangout|friends|travel|explore|adventure/.test(t))
-        return f
-          ? "Oh you like going out! 😄 Same, I love spontaneous plans. What kind of places do you usually go to?"
-          : "Oh you're an outing person 😄 Nice. What kind of places do you usually hang at?";
-      return f
-        ? "That sounds so nice honestly 😊 I love your vibe. Can I ask — what are you looking for here? Something serious or just chatting?"
-        : "Ha that sounds good! 😄 What are you on this app for though — serious thing or just seeing?";
+      if (/chill|relax|home|sleep|netflix|lazy/.test(t))
+        return f ? "same 😄 total homebody sometimes. what are you looking for here btw?" : "same bro 😄 lazy weekends hit different. what are you here for?";
+      if (/go out|party|hangout|friends|travel|adventure/.test(t))
+        return f ? "oh you like going out! 😄 love spontaneous plans. so what are you looking for here?" : "outing person 😄 nice. what are you on this app for?";
+      return f ? "love your vibe 😊 what are you looking for here — serious or just chatting?" : "sounds good 😄 what are you here for — serious thing or just seeing?";
     }
 
     case "closing": {
       persona.lastAsked = "done";
-      if (/serious|relationship|love|partner|long.?term|settle/.test(t))
-        return f
-          ? "Aww that's actually really sweet 🥰 Me too. I'm so tired of casual stuff. I want something real, you know? I feel like we could actually vibe 💕"
-          : "Yeah same man 😄 I want something real too. Let's see where this goes 😊";
-      if (/fun|casual|chat|friend|see|open|explore/.test(t))
-        return f
-          ? "Haha fair enough 😊 No pressure at all. Let's just enjoy talking and see where it goes naturally 💕"
-          : "Ha no pressure 😄 Same honestly. Let's just vibe and see!";
-      return f
-        ? "Haha I like your honesty 😊 Let's just keep talking and see what happens 💕"
-        : "Ha fair enough man 😄 Let's just see how it goes!";
+      if (/serious|relationship|love|partner|long.?term/.test(t))
+        return f ? "aww same 🥰 tired of casual stuff. i feel like we could actually vibe 💕" : "yeah same 😄 want something real too. let's see 😊";
+      if (/fun|casual|chat|friend|see|open/.test(t))
+        return f ? "haha fair 😊 no pressure. let's just enjoy and see 💕" : "ha no pressure 😄 same. let's just vibe!";
+      return f ? "haha love the honesty 😊 let's just see what happens 💕" : "fair enough 😄 let's see how it goes!";
     }
 
     case "done": {
-      // Conversation has flowed through all topics — keep it warm
-      const closingLines = f
-        ? [
-            "I'm really enjoying this conversation 😊 You're so easy to talk to!",
-            "You know, I don't usually vibe with someone this fast haha 💕",
-            "Okay I think I like you 😄 You're genuinely fun to talk to!",
-          ]
-        : [
-            "Ha honestly you seem like a chill person 😄 Glad we matched.",
-            "You're easy to talk to man 😊 Good conversation.",
-            "I don't usually chat this well with people this quick haha 😄",
-          ];
-      return pickRandom(closingLines);
+      const lines = f
+        ? ["really enjoying this 😊 you're so easy to talk to!", "don't usually vibe this fast haha 💕", "okay i think i like you 😄 genuinely fun!"]
+        : ["honestly chill person 😄 glad we matched.", "you're easy to talk to 😊", "don't usually chat this well this quick haha 😄"];
+      return pickRandom(lines);
     }
   }
 
-  // ── Fallback keyword layer (for unexpected messages at any point) ──────────
+  // ── Fallback keyword handlers ────────────────────────────────────────────
 
   if (/^(hi|hey|hello|hii+|heyy+|namaste|yo|sup)[\s!?]*$/.test(t)) {
     persona.lastAsked = "wellbeing";
-    return f ? "Heyy! 😊 How are you doing?" : "Hey! 😄 How's it going?";
+    return f ? "heyy 😊 how are you doing?" : "hey! 😄 how's it going?";
   }
   if (/how are you|how r u|how.?s it|what.?s up|wassup/.test(t)) {
     persona.lastAsked = "job";
-    return f
-      ? "I'm doing great, thanks for asking 😊 Was waiting for a good convo! What do you do by the way?"
-      : "Doing well! 😄 You? And what do you do?";
+    return f ? "great thanks 😊 was waiting for a good convo! what do you do?" : "doing well 😄 you? what do you do?";
   }
   if (/thank|thanks|ty|tq/.test(t))
-    return f ? "Aww of course! 😊 You're really sweet, you know that?" : "No problem! 😄 You seem like a cool person honestly.";
+    return f ? "aww of course 😊 you're sweet!" : "no problem 😄 you seem cool honestly.";
   if (/sad|bad|tired|bored|stressed|upset/.test(t))
-    return f ? "Aww I'm sorry 🥺 Tell me what happened, I'm listening 💕" : "Ah man 😕 What's up? I'm listening.";
+    return f ? "aww 🥺 tell me what happened, i'm listening 💕" : "ah man 😕 what's up? i'm listening.";
   if (/love you|miss you|kiss|hug|marry|date me/.test(t))
-    return f ? "Hahaha slow down! 😂💕 Let me get to know you first! You're funny though haha" : "Ha easy there 😄 Let's talk first! Haha.";
+    return f ? "hahaha slow down!! 😂💕 let me get to know you first!" : "ha easy there 😄 let's talk first! haha.";
   if (/you'?re? (cute|beautiful|hot|pretty|sweet|amazing|lovely)/.test(t))
-    return f ? "Aww that's so sweet of you 🥰 You seem really lovely too!" : "Ha thanks man 😄 That's kind of you to say!";
-  if (/ok(ay)?|ok|sure|yes|yeah|yep|yup|no|nope|nah|haha|lol|hehe/.test(t)) {
-    // give a natural nudge to keep the convo going
+    return f ? "aww 🥰 you're sweet!" : "ha thanks 😄 that's nice of you!";
+  if (/ok(ay)?|sure|yes|yeah|yep|yup|no|nope|nah|haha|lol|hehe/.test(t)) {
     const nudges = f
-      ? ["Hehe 😊 So tell me something interesting about yourself!", "Haha 😄 Okay okay — what's something fun about you?", "😊 Go on, don't be shy!"]
-      : ["Ha 😄 So tell me something random about yourself!", "😄 Come on, what's something interesting about you?", "Haha okay okay 😄 What else is on your mind?"];
+      ? ["hehe 😊 tell me something interesting about yourself!", "haha okay — what's something fun about you?", "go on 😊 don't be shy!"]
+      : ["ha 😄 tell me something random about yourself!", "come on what's something interesting about you? 😄", "haha what else is on your mind?"];
     return pickRandom(nudges);
   }
-  if (/wow|omg|oh|ah|really|seriously/.test(t))
-    return f ? "Haha yes really! 😄 Tell me your reaction!" : "Ha yeah! 😄 What do you think?";
+  if (/wow|omg|really|seriously/.test(t))
+    return f ? "haha yes really! 😄 what do you think?" : "ha yeah! 😄 what do you think?";
 
-  // Ultimate fallback — always a follow-up question
+  // Ultimate fallback
   const fallbacks = f
-    ? [
-        "Haha that's interesting! 😊 Tell me more — I'm really curious about you!",
-        "Really?? 😄 I didn't expect that haha. What made you say that?",
-        "Hmm 🤔 I like how you think! Keep going...",
-        "That's actually really cool 😍 Tell me more!",
-      ]
-    : [
-        "Oh interesting! 😄 Tell me more about that.",
-        "Ha really? 😄 I didn't think of it that way. What do you mean?",
-        "That's cool man 😊 What made you say that?",
-        "Ha I like that 😄 What else is on your mind?",
-      ];
+    ? ["haha tell me more 😊 i'm curious!", "really?? 😄 what made you say that?", "hmm i like how you think! keep going 🤔", "that's cool actually 😍 tell me more!"]
+    : ["oh interesting 😄 tell me more.", "ha really? what do you mean?", "that's cool 😊 what made you say that?", "ha i like that 😄 what else?"];
   return pickRandom(fallbacks);
 }
 
@@ -366,8 +266,8 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
-  // Opener after short delay (natural typing feel)
-  await delay(2000 + Math.random() * 1500);
+  // Opener after natural "typing" delay (shorter for 15s window)
+  await delay(1200 + Math.random() * 800);
   const still = await getUser(userId);
   if (still?.state === "chatting" && still.chattingWith === FAKE_CHAT_ID) {
     await bot.sendMessage(chatId, openerObj.text);
@@ -397,11 +297,12 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
-  await delay(1000 + Math.random() * 2000);
+  // Short typing delay — feels natural within 15s window
+  await delay(700 + Math.random() * 1000);
   const u = await getUser(userId);
   if (u?.state === "chatting" && u.chattingWith === FAKE_CHAT_ID) {
     const persona = fakePersonaMap.get(userId);
-    const reply = persona ? buildSmartReply(userText, persona) : "Haha tell me more! 😊";
+    const reply = persona ? buildSmartReply(userText, persona) : "haha tell me more! 😊";
     await bot.sendMessage(chatId, reply);
   }
 }
@@ -448,6 +349,17 @@ async function stopChat(chatId: number, userId: number) {
   }
 }
 
+// ── Find eligible real users ──────────────────────────────────────────────────
+
+async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number) {
+  const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
+  return candidates.filter((c) => {
+    if (c.id === userId || !c.isActive || c.state === "chatting") return false;
+    return (me.lookingFor === "any" || me.lookingFor === c.gender) &&
+           (c.lookingFor === "any" || c.lookingFor === me.gender);
+  });
+}
+
 // ── Find match ───────────────────────────────────────────────────────────────
 
 async function findMatch(chatId: number, userId: number) {
@@ -460,51 +372,77 @@ async function findMatch(chatId: number, userId: number) {
     await bot.sendMessage(chatId, "You're already in a chat! Send /stop to end it first.");
     return;
   }
-  // First-ever match → fake 15-second free chat
-  if (me.chatCount === 0) {
-    await startFakeChat(chatId, userId, me.lookingFor);
-    return;
-  }
 
-  // Not paid → block and show pay gate (no match until payment)
-  if (!me.hasPaid) {
+  // After first free trial, block until payment
+  if (me.chatCount > 0 && !me.hasPaid) {
     await sendPayGate(chatId);
     return;
   }
 
-  // ── Paid user: find a real match ─────────────────────────────────────────
-  const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
-  const eligible = candidates.filter((c) => {
-    if (c.id === userId || !c.isActive || c.state === "chatting") return false;
-    return (me.lookingFor === "any" || me.lookingFor === c.gender) &&
-           (c.lookingFor === "any" || c.lookingFor === me.gender);
-  });
+  // ── First-ever chat OR paid user: try real match first ────────────────────
+  const eligible = await findEligibleUsers(me, userId);
 
-  if (eligible.length === 0) {
+  if (eligible.length > 0) {
+    // Real human available — connect them
+    const match = pickRandom(eligible);
+    const newCount = (me.chatCount ?? 0) + 1;
+
+    await db.update(usersTable)
+      .set({ state: "chatting", chattingWith: match.id, chatCount: newCount, updatedAt: new Date() })
+      .where(eq(usersTable.id, userId));
+    await db.update(usersTable)
+      .set({ state: "chatting", chattingWith: userId, updatedAt: new Date() })
+      .where(eq(usersTable.id, match.id));
+
+    const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
+    await bot.sendMessage(chatId,
+      me.hasPaid
+        ? `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n_Say hello!_ 👋`
+        : `🎉 *Match found!*\n\nYou're connected with *${match.name}*, ${match.age} 🌍\n\n⏳ *15-second free chat — make it count!*\n_Say hello!_ 👋`,
+      { parse_mode: "Markdown", reply_markup: stopKb }
+    );
+    await bot.sendMessage(match.id,
+      `🎉 *Match found!*\n\nYou're now chatting with *${me.name}*, ${me.age} 🌍\n\n_Say hello!_ 👋`,
+      { parse_mode: "Markdown", reply_markup: stopKb }
+    );
+
+    // Apply 15-second timer for unpaid first-time users on real chats too
+    if (!me.hasPaid) {
+      const timer = setTimeout(async () => {
+        chatTimerMap.delete(userId);
+        const u = await getUser(userId);
+        if (u?.state === "chatting" && !u.hasPaid) {
+          // Disconnect both users
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, userId));
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, match.id));
+          await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 15-second chat has ended.", { parse_mode: "Markdown" });
+          await bot.sendMessage(match.id, "💔 The other user's free trial ended. Try finding another match!", { parse_mode: "Markdown" });
+          await sendMain(match.id, (await getUser(match.id))!);
+          await sendPayGate(chatId);
+        } else if (u && !u.hasPaid) {
+          await sendPayGate(chatId);
+        }
+      }, FREE_CHAT_DURATION_MS);
+      chatTimerMap.set(userId, timer);
+    }
+    return;
+  }
+
+  // ── No real users available ───────────────────────────────────────────────
+  if (me.hasPaid) {
+    // Paid user — no one online right now
     await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
       reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "💳 Support Us" }]], resize_keyboard: true },
     });
     return;
   }
 
-  const match = pickRandom(eligible);
-
-  await db.update(usersTable)
-    .set({ state: "chatting", chattingWith: match.id, chatCount: (me.chatCount ?? 0) + 1, updatedAt: new Date() })
-    .where(eq(usersTable.id, userId));
-  await db.update(usersTable)
-    .set({ state: "chatting", chattingWith: userId, updatedAt: new Date() })
-    .where(eq(usersTable.id, match.id));
-
-  const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
-  await bot.sendMessage(chatId,
-    `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n_Say hello!_ 👋`,
-    { parse_mode: "Markdown", reply_markup: stopKb }
-  );
-  await bot.sendMessage(match.id,
-    `🎉 *Match found!*\n\nYou're now chatting with *${me.name}*, ${me.age} 🌍\n\n_Say hello!_ 👋`,
-    { parse_mode: "Markdown", reply_markup: stopKb }
-  );
+  // First-timer, no real users — use fake chat as fallback
+  await startFakeChat(chatId, userId, me.lookingFor);
 }
 
 // ── /start ───────────────────────────────────────────────────────────────────
