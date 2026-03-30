@@ -458,13 +458,19 @@ async function findMatch(chatId: number, userId: number) {
     await bot.sendMessage(chatId, "You're already in a chat! Send /stop to end it first.");
     return;
   }
-  // First-ever match → fake chat (with 15-second free timer)
+  // First-ever match → fake 15-second free chat
   if (me.chatCount === 0) {
     await startFakeChat(chatId, userId, me.lookingFor);
     return;
   }
 
-  // Subsequent matches → real people
+  // Not paid → block and show pay gate (no match until payment)
+  if (!me.hasPaid) {
+    await sendPayGate(chatId);
+    return;
+  }
+
+  // ── Paid user: find a real match ─────────────────────────────────────────
   const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
   const eligible = candidates.filter((c) => {
     if (c.id === userId || !c.isActive || c.state === "chatting") return false;
@@ -489,53 +495,14 @@ async function findMatch(chatId: number, userId: number) {
     .where(eq(usersTable.id, match.id));
 
   const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
-
-  if (!me.hasPaid) {
-    // Non-paid user: show 15-second warning
-    await bot.sendMessage(chatId,
-      `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n⏳ *Free preview — 15 seconds only!*\n_Say hello fast!_ 👋`,
-      { parse_mode: "Markdown", reply_markup: stopKb }
-    );
-  } else {
-    await bot.sendMessage(chatId,
-      `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n_Say hello!_ 👋`,
-      { parse_mode: "Markdown", reply_markup: stopKb }
-    );
-  }
+  await bot.sendMessage(chatId,
+    `🎉 *Match found!*\n\nYou're now chatting with *${match.name}*, ${match.age} 🌍\n\n_Say hello!_ 👋`,
+    { parse_mode: "Markdown", reply_markup: stopKb }
+  );
   await bot.sendMessage(match.id,
     `🎉 *Match found!*\n\nYou're now chatting with *${me.name}*, ${me.age} 🌍\n\n_Say hello!_ 👋`,
     { parse_mode: "Markdown", reply_markup: stopKb }
   );
-
-  // Apply 15-second timer for unpaid users on real chats
-  if (!me.hasPaid) {
-    const matchId = match.id;
-    const realTimer = setTimeout(async () => {
-      chatTimerMap.delete(userId);
-      const u = await getUser(userId);
-      if (u?.state === "chatting" && u.chattingWith === matchId) {
-        await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(eq(usersTable.id, userId));
-        const partner = await getUser(matchId);
-        if (partner?.state === "chatting" && partner.chattingWith === userId) {
-          await db.update(usersTable)
-            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-            .where(eq(usersTable.id, matchId));
-          await bot.sendMessage(matchId,
-            "💔 Your match's free time ran out. They need to upgrade to keep chatting.\n\nTap *Find Match* to meet someone new! 💕",
-            { parse_mode: "Markdown" }
-          );
-          await sendMain(matchId, partner);
-        }
-        await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 15-second chat has ended.", { parse_mode: "Markdown" });
-        await sendMain(chatId, u);
-        await delay(500);
-        await sendPayGate(chatId);
-      }
-    }, FREE_CHAT_DURATION_MS);
-    chatTimerMap.set(userId, realTimer);
-  }
 }
 
 // ── /start ───────────────────────────────────────────────────────────────────
