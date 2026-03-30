@@ -108,7 +108,23 @@ async function showReferralStats(chatId: number, userId: number) {
   const link = `https://t.me/${BOT_USERNAME}?start=ref_${code}`;
   const referred = u.referralCount ?? 0;
   const bonus    = u.bonusChats    ?? 0;
-  const alreadyEarned = referred >= 10; // bonus was granted at 10, never again
+  const alreadyEarned = referred >= 10;
+
+  // ── Share buttons (shown at all stages so user can still spread the word) ──
+  const shareText = encodeURIComponent(
+    `💕 Join me on WorldMatch Dating Bot and meet amazing people!\nClick here to join: ${link}`
+  );
+  const shareButtons: TelegramBot.InlineKeyboardButton[][] = [
+    [
+      { text: "💬 WhatsApp",  url: `https://wa.me/?text=${shareText}` },
+      { text: "📘 Facebook",  url: `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(link)}` },
+    ],
+    [
+      { text: "🐦 Twitter/X", url: `https://twitter.com/intent/tweet?text=${shareText}` },
+      { text: "✈️ Telegram",  url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("💕 Join me on WorldMatch Dating Bot!")}` },
+    ],
+  ];
+  const shareKb: TelegramBot.InlineKeyboardMarkup = { inline_keyboard: shareButtons };
 
   if (alreadyEarned && bonus === 0) {
     // Bonus already earned AND already used — must pay now
@@ -133,17 +149,18 @@ async function showReferralStats(chatId: number, userId: number) {
     return;
   }
 
-  // Still earning — show progress
+  // Still earning — show progress + share buttons
   const progress = referred % 10;
   const bar = "🟩".repeat(progress) + "⬜".repeat(10 - progress);
   await bot.sendMessage(chatId,
     `📨 *Refer Friends — Get 1 Free Chat*\n\n` +
-    `Invite friends to join. When *10 friends join* using your link, you unlock *1 free chat* — one time only.\n` +
+    `Invite 10 friends to join and unlock *1 free chat* (one time only).\n` +
     `After that, payment is required.\n\n` +
     `🔗 *Your link:*\n\`${link}\`\n\n` +
     `📊 Progress: ${progress}/10\n${bar}\n\n` +
-    `👥 Friends referred so far: *${referred}*`,
-    { parse_mode: "Markdown" }
+    `👥 Friends referred so far: *${referred}*\n\n` +
+    `👇 *Share directly to:*`,
+    { parse_mode: "Markdown", reply_markup: shareKb }
   );
 }
 
