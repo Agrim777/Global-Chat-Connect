@@ -373,18 +373,20 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     await bot.sendMessage(chatId, openerObj.text);
   }
 
-  // 15-second free chat timer
+  // 15-second free chat timer — fires regardless, ends chat and shows pay gate
   const timer = setTimeout(async () => {
     chatTimerMap.delete(userId);
+    fakePersonaMap.delete(userId);
     const u = await getUser(userId);
-    if (u?.state === "chatting" && u.chattingWith === FAKE_CHAT_ID) {
+    // End chat if still active (check state, don't rely on chattingWith === 0)
+    if (u?.state === "chatting" && !u.hasPaid) {
       await db.update(usersTable)
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
         .where(eq(usersTable.id, userId));
-      fakePersonaMap.delete(userId);
       await bot.sendMessage(chatId, "⏰ *Time's up!* Your free 15-second chat has ended.", { parse_mode: "Markdown" });
-      await sendMain(chatId, u);
-      await delay(500);
+      await sendPayGate(chatId);
+    } else if (u && !u.hasPaid) {
+      // Chat already ended somehow — still show pay gate
       await sendPayGate(chatId);
     }
   }, FREE_CHAT_DURATION_MS);
