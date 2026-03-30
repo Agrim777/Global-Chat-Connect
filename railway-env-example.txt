@@ -1,0 +1,13 @@
+Copy these variable NAMES into Railway.
+Get the VALUES from Replit → Secrets tab (lock icon on left sidebar).
+
+TELEGRAM_BOT_TOKEN       → copy value from Replit secrets
+ADMIN_TELEGRAM_ID        → 8273572245
+DATABASE_URL             → copy value from Replit secrets
+PGHOST                   → copy value from Replit secrets
+PGPORT                   → copy value from Replit secrets
+PGDATABASE               → copy value from Replit secrets
+PGUSER                   → copy value from Replit secrets
+PGPASSWORD               → copy value from Replit secrets
+SESSION_SECRET           → copy value from Replit secrets
+NODE_ENV                 → production
