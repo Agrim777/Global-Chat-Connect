@@ -108,26 +108,41 @@ async function showReferralStats(chatId: number, userId: number) {
   const link = `https://t.me/${BOT_USERNAME}?start=ref_${code}`;
   const referred = u.referralCount ?? 0;
   const bonus    = u.bonusChats    ?? 0;
+  const alreadyEarned = referred >= 10; // bonus was granted at 10, never again
+
+  if (alreadyEarned && bonus === 0) {
+    // Bonus already earned AND already used — must pay now
+    await bot.sendMessage(chatId,
+      `📨 *Referral Bonus — Already Used*\n\n` +
+      `You've already used your one-time referral free chat.\n\n` +
+      `To keep chatting, upgrade to Premium:\n${PAY_LINK}`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  if (alreadyEarned && bonus > 0) {
+    // Bonus earned, not yet used
+    await bot.sendMessage(chatId,
+      `🎁 *Referral Bonus Ready!*\n\n` +
+      `You referred 10 friends and earned your free chat.\n` +
+      `Tap *💘 Find Match* to use it now!\n\n` +
+      `_After this chat, payment will be required._`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  // Still earning — show progress
   const progress = referred % 10;
   const bar = "🟩".repeat(progress) + "⬜".repeat(10 - progress);
   await bot.sendMessage(chatId,
-    `📨 *Refer Friends — Get Free Chats*
-
-` +
-    `Share your link with friends. When *10 friends join*, you earn *1 free chat* with a real person! No payment needed.
-
-` +
-    `🔗 *Your link:*
-` + `\`${link}\`
-
-` +
-    `📊 Progress: ${progress}/10
-${bar}
-
-` +
-    `👥 Total friends referred: *${referred}*
-` +
-    `🎁 Free chats available: *${bonus}*`,
+    `📨 *Refer Friends — Get 1 Free Chat*\n\n` +
+    `Invite friends to join. When *10 friends join* using your link, you unlock *1 free chat* — one time only.\n` +
+    `After that, payment is required.\n\n` +
+    `🔗 *Your link:*\n\`${link}\`\n\n` +
+    `📊 Progress: ${progress}/10\n${bar}\n\n` +
+    `👥 Friends referred so far: *${referred}*`,
     { parse_mode: "Markdown" }
   );
 }
@@ -776,7 +791,7 @@ async function findMatch(chatId: number, userId: number) {
       .set({ bonusChats: (me.bonusChats ?? 1) - 1, updatedAt: new Date() })
       .where(eq(usersTable.id, userId));
     await bot.sendMessage(chatId,
-      `🎁 Using 1 referral bonus chat! ${((me.bonusChats ?? 1) - 1)} remaining after this.`
+      `🎁 Using your one-time referral bonus chat. After this chat ends, payment will be required to continue.`
     );
   }
 
@@ -877,29 +892,33 @@ bot.onText(/\/start (.+)/, async (msg, match) => {
           .set({ referredBy: referrer.id, updatedAt: new Date() })
           .where(eq(usersTable.id, id));
 
-        // Increment referrer's count and award bonus chat every 10 referrals
-        const newCount = (referrer.referralCount ?? 0) + 1;
-        const bonusEarned = newCount % 10 === 0 ? 1 : 0;
+        // Increment referrer's count — bonus granted ONE TIME ONLY when first hitting 10
+        const oldCount = referrer.referralCount ?? 0;
+        const newCount = oldCount + 1;
+        const bonusEarned = oldCount < 10 && newCount >= 10 ? 1 : 0;
         await db.update(usersTable)
           .set({
             referralCount: newCount,
-            bonusChats: (referrer.bonusChats ?? 0) + bonusEarned,
+            // Never accumulate more than 1 bonus chat
+            bonusChats: Math.min(1, (referrer.bonusChats ?? 0) + bonusEarned),
             updatedAt: new Date(),
           })
           .where(eq(usersTable.id, referrer.id));
 
-        // Notify referrer
+        // Notify referrer — only while they're still working toward the goal
         if (bonusEarned > 0) {
           await bot.sendMessage(referrer.id,
-            `🎉 You referred 10 friends! You've earned *1 free chat*. Keep inviting to earn more! 🎁`,
+            `🎉 *Bonus unlocked!* You referred 10 friends and earned *1 free chat*.\n\nTap 💘 Find Match to use it. After this chat, payment will be required.`,
             { parse_mode: "Markdown" }
           ).catch(() => {});
-        } else {
+        } else if (oldCount < 10) {
+          // Still making progress — notify
           await bot.sendMessage(referrer.id,
-            `👋 A friend joined using your referral link! (${newCount % 10}/10 towards your next free chat)`,
+            `👋 A friend joined using your link! (${newCount}/10 towards your free chat)`,
             { parse_mode: "Markdown" }
           ).catch(() => {});
         }
+        // If oldCount >= 10 already, they've had their bonus — no more notifications
       }
     }
 
