@@ -888,16 +888,23 @@ async function findMatch(chatId: number, userId: number) {
 
 // ── /start ───────────────────────────────────────────────────────────────────
 
-bot.onText(/\/start (.+)/, async (msg, match) => {
+// Single /start handler — covers plain /start, /start@botname, and /start ref_CODE deep links
+bot.onText(/\/start(.*)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const id = msg.from!.id;
   const param = (match?.[1] ?? "").trim();
   try {
     let user = await getUser(id);
     const isNew = !user;
-    if (!user) user = await upsertUser(id, { firstName: msg.from!.first_name ?? "", telegramUsername: msg.from!.username ?? null, state: "idle" });
+    if (!user) {
+      user = await upsertUser(id, {
+        firstName: msg.from!.first_name ?? "",
+        telegramUsername: msg.from!.username ?? null,
+        state: "idle",
+      });
+    }
 
-    // Handle referral deep link: /start ref_XXXXXX
+    // Handle referral deep link: /start ref_XXXXXX (only credit if this user is brand new)
     if (param.startsWith("ref_") && isNew) {
       const refCode = param.slice(4).toUpperCase();
       const referrers = await db.select().from(usersTable)
@@ -909,48 +916,37 @@ bot.onText(/\/start (.+)/, async (msg, match) => {
           .set({ referredBy: referrer.id, updatedAt: new Date() })
           .where(eq(usersTable.id, id));
 
-        // Increment referrer's count — bonus granted ONE TIME ONLY when first hitting 10
+        // Increment referrer count — bonus granted ONE TIME ONLY on first hitting 10
         const oldCount = referrer.referralCount ?? 0;
         const newCount = oldCount + 1;
         const bonusEarned = oldCount < 10 && newCount >= 10 ? 1 : 0;
         await db.update(usersTable)
           .set({
             referralCount: newCount,
-            // Never accumulate more than 1 bonus chat
             bonusChats: Math.min(1, (referrer.bonusChats ?? 0) + bonusEarned),
             updatedAt: new Date(),
           })
           .where(eq(usersTable.id, referrer.id));
 
-        // Notify referrer — only while they're still working toward the goal
+        // Notify referrer
         if (bonusEarned > 0) {
           await bot.sendMessage(referrer.id,
             `🎉 *Bonus unlocked!* You referred 10 friends and earned *1 free chat*.\n\nTap 💘 Find Match to use it. After this chat, payment will be required.`,
             { parse_mode: "Markdown" }
           ).catch(() => {});
         } else if (oldCount < 10) {
-          // Still making progress — notify
           await bot.sendMessage(referrer.id,
             `👋 A friend joined using your link! (${newCount}/10 towards your free chat)`,
             { parse_mode: "Markdown" }
           ).catch(() => {});
         }
-        // If oldCount >= 10 already, they've had their bonus — no more notifications
       }
     }
 
-    await bot.sendMessage(chatId, "💕 *Welcome to WorldMatch Dating Bot!*\n\nConnect with people from all over the world.\nFind your perfect match and start chatting! 🌍", { parse_mode: "Markdown" });
-    await sendMain(chatId, user!);
-  } catch (err) { logger.error({ err }, "/start referral error"); }
-});
-
-bot.onText(/\/start$/, async (msg) => {
-  const chatId = msg.chat.id;
-  const id = msg.from!.id;
-  try {
-    let user = await getUser(id);
-    if (!user) user = await upsertUser(id, { firstName: msg.from!.first_name ?? "", telegramUsername: msg.from!.username ?? null, state: "idle" });
-    await bot.sendMessage(chatId, "💕 *Welcome to WorldMatch Dating Bot!*\n\nConnect with people from all over the world.\nFind your perfect match and start chatting! 🌍", { parse_mode: "Markdown" });
+    await bot.sendMessage(chatId,
+      "💕 *Welcome to WorldMatch Dating Bot!*\n\nConnect with people from all over the world.\nFind your perfect match and start chatting! 🌍",
+      { parse_mode: "Markdown" }
+    );
     await sendMain(chatId, user!);
   } catch (err) { logger.error({ err }, "/start error"); }
 });
@@ -1315,10 +1311,18 @@ bot.on("message", async (msg) => {
     }
     if (text === "💳 Support Us") { await sendPayGate(chatId); return; }
 
+    // Unrecognised input — re-show the menu so buttons are always visible
     await sendMain(chatId, user);
   } catch (err) {
     logger.error({ err }, "Message handler error");
-    await bot.sendMessage(chatId, "Something went wrong. Try /start again.");
+    // Show the menu on error so the user is never stuck
+    try {
+      const u = await getUser(id);
+      if (u) await sendMain(chatId, u);
+      else await bot.sendMessage(chatId, "Something went wrong. Please send /start to restart.");
+    } catch (_) {
+      await bot.sendMessage(chatId, "Something went wrong. Please send /start to restart.");
+    }
   }
 });
 
