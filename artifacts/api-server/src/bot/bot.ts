@@ -33,7 +33,19 @@ export const bot = new TelegramBot(TOKEN, { polling: false });
 
 // ── In-memory state for fake chats ──────────────────────────────────────────
 
-interface FakePersona { name: string; age: number; isFemale: boolean; lastAsked: string }
+type Mood = "neutral" | "interested" | "distracted" | "playful" | "annoyed";
+
+interface FakePersona {
+  name: string;
+  age: number;
+  isFemale: boolean;
+  lastAsked: string;
+  mood: Mood;
+  msgCount: number;          // total messages received
+  pendingSkip: boolean;      // if we skipped the last message
+  lastUserMsg: string;       // last thing user said (for callbacks)
+  callbackUsed: boolean;     // already done a callback this convo
+}
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
 const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat timer
 
@@ -82,18 +94,18 @@ const MALE_NAMES   = ["Arjun", "Rahul", "Rohan", "Vikram", "Karan", "Dev", "Ayaa
 interface Opener { text: string; lastAsked: string }
 
 const OPENERS_F: Opener[] = [
-  { text: "hey... finally koi interesting mila. kaisa chal raha hai?", lastAsked: "wellbeing" },
-  { text: "hi, so you matched with me huh. i'm curious, where are you from?", lastAsked: "location" },
-  { text: "hey. okay real talk — student ho ya working? i like knowing what i'm dealing with.", lastAsked: "job" },
-  { text: "hii... not gonna lie, i was bored. glad you're here. kya karte ho tum?", lastAsked: "job" },
-  { text: "hey stranger. tell me something about yourself, the real stuff not the boring intro.", lastAsked: "job" },
+  { text: "heyy", lastAsked: "wellbeing" },
+  { text: "hi 😊\nkahan se ho?", lastAsked: "location" },
+  { text: "heyy\nstudent ho ya job?", lastAsked: "job" },
+  { text: "hii\nngl bore ho rahi thi. achha hua match hua 😄", lastAsked: "job" },
+  { text: "hey\nokay bata kuch apne baare mein. boring intro mat dena", lastAsked: "job" },
 ];
 const OPENERS_M: Opener[] = [
-  { text: "hey. kaisi hai? be honest, i can take it.", lastAsked: "wellbeing" },
-  { text: "hey there. so where are you from? and don't say 'earth'.", lastAsked: "location" },
-  { text: "hey. straight to it — student or working?", lastAsked: "job" },
-  { text: "hi. wasn't expecting to match this fast. kya scene hai tumhara?", lastAsked: "job" },
-  { text: "hey. okay tell me one thing about yourself that would actually surprise me.", lastAsked: "job" },
+  { text: "hey\nkaisi hai?", lastAsked: "wellbeing" },
+  { text: "hi\nkahan se ho?", lastAsked: "location" },
+  { text: "hey\nstudent or working?", lastAsked: "job" },
+  { text: "hi\nnahi socha itni jaldi match hoga. kya chal raha hai?", lastAsked: "job" },
+  { text: "hey\nbata kuch interesting apne baare mein", lastAsked: "job" },
 ];
 
 // ── Language detection ────────────────────────────────────────────────────────
@@ -364,7 +376,15 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
   const age = 20 + Math.floor(Math.random() * 8); // 20–27
   const openerObj = isFemale ? pickRandom(OPENERS_F) : pickRandom(OPENERS_M);
 
-  fakePersonaMap.set(userId, { name, age, isFemale, lastAsked: openerObj.lastAsked });
+  fakePersonaMap.set(userId, {
+    name, age, isFemale,
+    lastAsked: openerObj.lastAsked,
+    mood: "neutral",
+    msgCount: 0,
+    pendingSkip: false,
+    lastUserMsg: "",
+    callbackUsed: false,
+  });
 
   await db.update(usersTable)
     .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, chatCount: 1, updatedAt: new Date() })
@@ -403,29 +423,177 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
   chatTimerMap.set(userId, timer);
 }
 
+// ── Fake chat: human-behavior utilities ────────────────────────────────────
+
+// Returns current IST hour (0-23) for time-based tone
+function istHour(): number {
+  return new Date(Date.now() + 5.5 * 3600 * 1000).getUTCHours();
+}
+
+// Randomly apply light typos / lazy typing to a string
+function applyTypos(text: string): string {
+  const roll = Math.random();
+  if (roll < 0.15) {
+    return text
+      .replace(/okay/g, "okk")
+      .replace(/nahi/g, "nhi")
+      .replace(/haan/g, "hn")
+      .replace(/raha/g, "rha")
+      .replace(/karna/g, "krna")
+      .replace(/kya/g, "kya")
+      .replace(/bahut/g, "bhut");
+  }
+  if (roll < 0.25) {
+    // drop one random character
+    const i = 1 + Math.floor(Math.random() * Math.max(text.length - 2, 1));
+    return text.slice(0, i) + text.slice(i + 1);
+  }
+  if (roll < 0.35) {
+    // double a letter
+    const m = text.match(/[a-zA-Z]/);
+    if (m && m.index !== undefined) {
+      return text.slice(0, m.index) + m[0] + text.slice(m.index);
+    }
+  }
+  return text;
+}
+
+// Randomly shift mood every few messages
+function shiftMood(persona: FakePersona): void {
+  if (persona.msgCount % 5 !== 0) return;
+  const roll = Math.random();
+  if      (roll < 0.20) persona.mood = "distracted";
+  else if (roll < 0.45) persona.mood = "interested";
+  else if (roll < 0.65) persona.mood = "playful";
+  else if (roll < 0.78) persona.mood = "annoyed";
+  else                  persona.mood = "neutral";
+}
+
+// Real-life interruption message
+function interruptionMsg(lang: "hindi" | "hinglish" | "english"): string {
+  const hindi    = ["wait ek sec", "mom calling wait", "brb 2 min", "ek min", "koi aa gaya"];
+  const hinglish = ["wait brb", "ek sec yaar", "hold on", "2 min", "brb koi hai"];
+  const eng      = ["wait brb", "hold on", "2 min", "someone called", "brb real quick"];
+  if (lang === "hindi")    return pickRandom(hindi);
+  if (lang === "hinglish") return pickRandom(hinglish);
+  return pickRandom(eng);
+}
+
+// Dry low-engagement reply (annoyed / distracted mood)
+function dryReply(lang: "hindi" | "hinglish" | "english"): string[] {
+  const hindi    = [["hmm"], ["acha"], ["hm"], ["okay"], ["han"]];
+  const hinglish = [["hmm"], ["acha yaar"], ["okay"], ["lol"], ["hm okay"]];
+  const eng      = [["hmm"], ["okay"], ["lol"], ["haha"], ["k"]];
+  const pool = lang === "hindi" ? hindi : lang === "hinglish" ? hinglish : eng;
+  return pickRandom(pool);
+}
+
+// Callback that references something from earlier in the convo
+function callbackReply(lastMsg: string, lang: "hindi" | "hinglish" | "english"): string[] | null {
+  if (!lastMsg || lastMsg.length < 3) return null;
+  const short = lastMsg.slice(0, 18).trim();
+  if (lang === "hindi")    return [`btw "${short}" wala point still yaad hai mujhe 😄`];
+  if (lang === "hinglish") return [`btw yaar "${short}" — abhi bhi yaad hai mujhe 😄`];
+  return [`btw what you said earlier — "${short}" — still got me thinking lol`];
+}
+
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
-  // Initial "thinking" delay: 2–6 seconds (vary by message length)
-  const base = 2000 + Math.min(userText.length * 30, 2000) + Math.random() * 2000;
-  await delay(base);
+  const persona = fakePersonaMap.get(userId);
+  if (!persona) return;
 
+  const lang = detectLang(userText);
+  const hour = istHour();
+  const isLateNight = hour >= 23 || hour < 5; // 11pm–5am IST
+
+  // Update persona state
+  persona.msgCount++;
+  shiftMood(persona);
+
+  // ── 1. Skip this message silently (8% chance, never twice in a row) ──────
+  if (!persona.pendingSkip && Math.random() < 0.08) {
+    persona.pendingSkip = true;
+    persona.lastUserMsg = userText;
+    return; // "seen" but no reply yet
+  }
+
+  const wasSkipped = persona.pendingSkip;
+  persona.pendingSkip = false;
+
+  // ── 2. Compute realistic typing delay ────────────────────────────────────
+  let baseMs: number;
+  if (persona.mood === "distracted") {
+    baseMs = 18000 + Math.random() * 42000;   // 18–60s (busy / away)
+  } else if (wasSkipped) {
+    baseMs = 25000 + Math.random() * 65000;   // 25s–90s (finally saw it)
+  } else if (isLateNight) {
+    baseMs = 6000 + Math.random() * 10000;    // 6–16s (sleepy, slow)
+  } else {
+    baseMs = 2000 + Math.min(userText.length * 20, 2000) + Math.random() * 3000; // 2–7s
+  }
+
+  await delay(baseMs);
+
+  // Guard: user may have left during delay
   const u = await getUser(userId);
   if (u?.state !== "chatting" || u.chattingWith !== FAKE_CHAT_ID) return;
 
-  const persona = fakePersonaMap.get(userId);
-  const parts: string[] = persona
-    ? buildSmartReply(userText, persona)
-    : ["haha sach mein? 😄", "aur batao"];
+  // ── 3. Real-life interruption prefix (10% chance) ─────────────────────────
+  if (Math.random() < 0.10) {
+    await bot.sendMessage(chatId, interruptionMsg(lang));
+    await delay(5000 + Math.random() * 7000); // 5–12s "away"
+    const u2 = await getUser(userId);
+    if (u2?.state !== "chatting" || u2.chattingWith !== FAKE_CHAT_ID) return;
+  }
 
-  // Send each part with a short typing pause between them
-  for (let i = 0; i < parts.length; i++) {
-    if (i > 0) {
-      // 600–1400ms pause between parts (simulate typing next message)
-      await delay(600 + Math.random() * 800);
+  // ── 4. Callback to earlier message (5% chance, once per convo) ───────────
+  if (!persona.callbackUsed && persona.msgCount > 4 && Math.random() < 0.05) {
+    const cb = callbackReply(persona.lastUserMsg, lang);
+    if (cb) {
+      persona.callbackUsed = true;
+      await bot.sendMessage(chatId, cb[0]);
+      await delay(800 + Math.random() * 700);
     }
+  }
+
+  // ── 5. Build main reply ───────────────────────────────────────────────────
+  let parts: string[];
+
+  if (persona.mood === "annoyed" || (persona.mood === "distracted" && Math.random() < 0.55)) {
+    // Low-engagement dry reply
+    parts = dryReply(lang);
+  } else {
+    parts = buildSmartReply(userText, persona);
+  }
+
+  // ── 6. Late-night: collapse to single short reply ─────────────────────────
+  if (isLateNight && parts.length > 1 && Math.random() < 0.55) {
+    parts = [parts[0]];
+  }
+
+  // ── 7. Typo + self-correction sequence (12% chance) ──────────────────────
+  if (parts.length > 0 && Math.random() < 0.12) {
+    const typoVer = applyTypos(parts[0]);
+    if (typoVer !== parts[0]) {
+      await bot.sendMessage(chatId, typoVer);
+      await delay(900 + Math.random() * 700);
+      await bot.sendMessage(chatId, "*" + parts[0]); // WA-style correction
+      parts = parts.slice(1);
+    }
+  } else {
+    // Apply soft typos to any part (no correction, just casual)
+    parts = parts.map(p => Math.random() < 0.20 ? applyTypos(p) : p);
+  }
+
+  // ── 8. Send parts one by one with realistic inter-message gap ────────────
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) await delay(600 + Math.random() * 1000);
     await bot.sendMessage(chatId, parts[i]);
   }
+
+  // Remember last message for future callbacks
+  persona.lastUserMsg = userText;
 }
 
 // ── Stop chat ────────────────────────────────────────────────────────────────
