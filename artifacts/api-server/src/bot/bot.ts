@@ -785,6 +785,7 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
 // ── Find match ───────────────────────────────────────────────────────────────
 
 async function findMatch(chatId: number, userId: number) {
+  try {
   const me = await getUser(userId);
   if (!me?.isProfileComplete) {
     await bot.sendMessage(chatId, "Please complete your profile first! Tap *Setup Profile*.", { parse_mode: "Markdown" });
@@ -884,6 +885,17 @@ async function findMatch(chatId: number, userId: number) {
 
   // First-timer, no real users — use fake chat as fallback
   await startFakeChat(chatId, userId, me.lookingFor);
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.error({ err }, "findMatch error");
+    if (ADMIN_ID) {
+      bot.sendMessage(ADMIN_ID,
+        `⚠️ *findMatch Error*\nUser: \`${userId}\`\nError: \`${errMsg.slice(0, 300)}\``,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    }
+    await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
+  }
 }
 
 // ── /start ───────────────────────────────────────────────────────────────────
@@ -1267,7 +1279,10 @@ bot.on("message", async (msg) => {
             return;
           }
           if (text) {
-            await bot.sendMessage(recipientId, `💬 *${user.name ?? "Match"}*: ${text}`, { parse_mode: "Markdown" });
+            // Use HTML parse mode so the name can be bolded safely regardless of
+            // what special characters (* _ ` etc.) the user typed in their message.
+            const safeName = (user.name ?? "Match").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${text}`, { parse_mode: "HTML" });
           }
         } else {
           // Stale connection — clean up and return to menu
