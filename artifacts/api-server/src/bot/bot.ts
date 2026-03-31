@@ -840,8 +840,14 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         telegramUsername: msg.from!.username ?? null,
         state: "idle",
       });
-    } else if (user.state !== "idle" && user.state !== "chatting") {
-      // Existing user stuck in a setup step — /start always resets them to idle
+    } else if (user.state === "chatting") {
+      // User is in a chat — remind them and show the Stop Chat button
+      await bot.sendMessage(chatId, "You're currently in a chat! Send messages to your match, or tap the button below to stop.", {
+        reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
+      });
+      return;
+    } else if (user.state !== "idle") {
+      // Stuck in a setup step — /start always resets to idle
       await db.update(usersTable)
         .set({ state: "idle", updatedAt: new Date() })
         .where(eq(usersTable.id, id));
@@ -1163,6 +1169,19 @@ bot.on("message", async (msg) => {
 
     if (user.state === "chatting") {
       if (text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
+
+      // Block any menu button from being accidentally relayed as a chat message
+      const CHAT_BLOCKED_BUTTONS = [
+        "💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🚀 Setup Profile",
+        "💎 Go Premium", "✅ Premium", "💳 Support Us", "🛑 Stop Matching",
+        ...EDIT_FIELD_LABELS,
+      ];
+      if (CHAT_BLOCKED_BUTTONS.includes(text ?? "")) {
+        await bot.sendMessage(chatId, "You're in a chat right now! Type a message to your match, or tap 🛑 Stop Chat to end the chat.", {
+          reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
+        });
+        return;
+      }
 
       if (user.chattingWith === FAKE_CHAT_ID) {
         // If bot was restarted the in-memory persona is gone — clean up gracefully
