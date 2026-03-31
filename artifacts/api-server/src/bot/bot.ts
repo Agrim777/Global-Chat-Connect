@@ -82,12 +82,13 @@ async function getUser(id: number) {
 }
 
 async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInsert>) {
-  const existing = await getUser(id);
-  if (existing) {
-    await db.update(usersTable).set({ ...data, updatedAt: new Date() }).where(eq(usersTable.id, id));
-  } else {
-    await db.insert(usersTable).values({ id, ...data } as typeof usersTable.$inferInsert);
-  }
+  // Single atomic upsert — race-condition-safe (no duplicate-key errors on concurrent /start)
+  await db.insert(usersTable)
+    .values({ id, ...data } as typeof usersTable.$inferInsert)
+    .onConflictDoUpdate({
+      target: usersTable.id,
+      set: { ...data, updatedAt: new Date() },
+    });
   return getUser(id);
 }
 
@@ -969,33 +970,44 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 
         // Notify referrer
         if (bonusEarned > 0) {
-          await bot.sendMessage(referrer.id,
-            `🎉 *Bonus unlocked!* You referred 10 friends and earned *1 free chat*.\n\nTap 💘 Find Match to use it. After this chat, payment will be required.`,
-            { parse_mode: "Markdown" }
+          bot.sendMessage(referrer.id,
+            `🎉 Bonus unlocked! You referred 10 friends and earned 1 free chat.\n\nTap Find Match to use it. After this chat, payment will be required.`
           ).catch(() => {});
         } else if (oldCount < 10) {
-          await bot.sendMessage(referrer.id,
-            `👋 A friend joined using your link! (${newCount}/10 towards your free chat)`,
-            { parse_mode: "Markdown" }
+          bot.sendMessage(referrer.id,
+            `👋 A friend joined using your link! (${newCount}/10 towards your free chat)`
           ).catch(() => {});
         }
       }
     }
 
-    await bot.sendMessage(chatId,
-      "💕 *Welcome to WorldMatch Dating Bot!*\n\nConnect with people from all over the world.\nFind your perfect match and start chatting! 🌍",
-      { parse_mode: "Markdown" }
-    );
-    await sendMain(chatId, user!);
+    // Welcome message only for truly first-time users
+    if (isNew) {
+      await bot.sendMessage(chatId,
+        "💕 Welcome to WorldMatch Dating Bot!\n\nConnect with people from all over the world. Find your perfect match and start chatting! 🌍"
+      );
+    }
+
+    // Show menu — if user row is missing somehow, fall back to a simple prompt
+    if (!user) {
+      await bot.sendMessage(chatId, "👋 Tap the button below to get started!", {
+        reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
+      });
+      return;
+    }
+    await sendMain(chatId, user);
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger.error({ err }, "/start error");
     if (ADMIN_ID) {
       bot.sendMessage(ADMIN_ID,
-        `⚠️ /start Error\nUser: ${id}\nError: ${errMsg.slice(0, 300)}`
+        `/start Error\nUser: ${id}\nError: ${errMsg.slice(0, 300)}`
       ).catch(() => {});
     }
-    await bot.sendMessage(chatId, "Oops, couldn't start. Please try /start again.").catch(() => {});
+    // Just show the menu buttons — don't confuse the user with error text
+    bot.sendMessage(chatId, "👋 Welcome! Tap the button to get started.", {
+      reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
+    }).catch(() => {});
   }
 });
 
