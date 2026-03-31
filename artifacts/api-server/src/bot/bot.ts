@@ -52,6 +52,16 @@ const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Escape user-supplied text so it is safe inside Telegram legacy Markdown (v1). */
+function escMd(text: string | number | null | undefined): string {
+  return String(text ?? "—").replace(/[*_`[]/g, "\\$&");
+}
+
+/** Escape user-supplied text for use inside Telegram HTML messages. */
+function escHtml(text: string | number | null | undefined): string {
+  return String(text ?? "—").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function delay(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
 }
@@ -188,8 +198,8 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
   await bot.sendMessage(
     chatId,
     user.isProfileComplete
-      ? `Welcome back, *${user.name ?? "there"}* 💖\nWhat would you like to do?`
-      : `Hi *${user.name ?? "there"}*! 👋\nYou haven't set up your profile yet.\nTap below to get started!`,
+      ? `Welcome back, *${escMd(user.name ?? "there")}* 💖\nWhat would you like to do?`
+      : `Hi *${escMd(user.name ?? "there")}*! 👋\nYou haven't set up your profile yet.\nTap below to get started!`,
     { parse_mode: "Markdown", reply_markup: kb }
   );
 }
@@ -890,8 +900,7 @@ async function findMatch(chatId: number, userId: number) {
     logger.error({ err }, "findMatch error");
     if (ADMIN_ID) {
       bot.sendMessage(ADMIN_ID,
-        `⚠️ *findMatch Error*\nUser: \`${userId}\`\nError: \`${errMsg.slice(0, 300)}\``,
-        { parse_mode: "Markdown" }
+        `⚠️ findMatch Error\nUser: ${userId}\nError: ${errMsg.slice(0, 300)}`
       ).catch(() => {});
     }
     await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
@@ -966,8 +975,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
     logger.error({ err }, "/start error");
     if (ADMIN_ID) {
       bot.sendMessage(ADMIN_ID,
-        `⚠️ */start Error*\nUser: \`${id}\`\nError: \`${errMsg.slice(0, 300)}\``,
-        { parse_mode: "Markdown" }
+        `⚠️ /start Error\nUser: ${id}\nError: ${errMsg.slice(0, 300)}`
       ).catch(() => {});
     }
     await bot.sendMessage(chatId, "Oops, couldn't start. Please try /start again.").catch(() => {});
@@ -1004,12 +1012,12 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
   const lfLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", any: "💞 Any" };
   await bot.sendMessage(chatId,
     `👤 *Your Profile*\n\n` +
-    `🏷 Name: *${user.name ?? "—"}*\n` +
-    `🎂 Age: *${user.age ?? "—"}*\n` +
-    `⚤ Gender: *${gLabel[user.gender ?? ""] ?? "—"}*\n` +
-    `💞 Looking for: *${lfLabel[user.lookingFor ?? ""] ?? "—"}*\n` +
-    `🌍 Country: *${user.country ?? "—"}*\n` +
-    `📖 Bio: _${(user.bio ?? "—").replace(/_/g, "\\_")}_\n\n` +
+    `🏷 Name: *${escMd(user.name)}*\n` +
+    `🎂 Age: *${escMd(user.age)}*\n` +
+    `⚤ Gender: *${escMd(gLabel[user.gender ?? ""] ?? "—")}*\n` +
+    `💞 Looking for: *${escMd(lfLabel[user.lookingFor ?? ""] ?? "—")}*\n` +
+    `🌍 Country: *${escMd(user.country)}*\n` +
+    `📖 Bio: _${escMd(user.bio)}_\n\n` +
     (user.hasPaid ? `✅ *Premium member*` : `🔒 Free account — tap 💳 Support Us to unlock`),
     { parse_mode: "Markdown" }
   );
@@ -1091,42 +1099,42 @@ bot.on("message", async (msg) => {
         editModeMap.set(id, "name");
         await upsertUser(id, { state: "setup_name" });
         await bot.sendMessage(chatId,
-          `📝 *Change Name*\n\nCurrent: *${user.name ?? "—"}*\n\nType your new name, or type "skip" to keep it.`,
+          `📝 *Change Name*\n\nCurrent: *${escMd(user.name)}*\n\nType your new name, or type "skip" to keep it.`,
           { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
         );
       } else if (text === "🎂 Change Age") {
         editModeMap.set(id, "age");
         await upsertUser(id, { state: "setup_age" });
         await bot.sendMessage(chatId,
-          `🎂 *Change Age*\n\nCurrent: *${user.age ?? "—"}*\n\nType your new age, or "skip".`,
+          `🎂 *Change Age*\n\nCurrent: *${escMd(user.age)}*\n\nType your new age, or "skip".`,
           { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
         );
       } else if (text === "⚤ Change Gender") {
         editModeMap.set(id, "gender");
         await upsertUser(id, { state: "setup_gender" });
         await bot.sendMessage(chatId,
-          `⚤ *Change Gender*\n\nCurrent: *${user.gender ?? "—"}*`,
+          `⚤ *Change Gender*\n\nCurrent: *${escMd(user.gender)}*`,
           { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
         );
       } else if (text === "💞 Change Looking For") {
         editModeMap.set(id, "looking_for");
         await upsertUser(id, { state: "setup_looking_for" });
         await bot.sendMessage(chatId,
-          `💞 *Change Looking For*\n\nCurrent: *${user.lookingFor ?? "—"}*`,
+          `💞 *Change Looking For*\n\nCurrent: *${escMd(user.lookingFor)}*`,
           { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
         );
       } else if (text === "📖 Change Bio") {
         editModeMap.set(id, "bio");
         await upsertUser(id, { state: "setup_bio" });
         await bot.sendMessage(chatId,
-          `📖 *Change Bio*\n\nCurrent: _${user.bio ?? "—"}_\n\nType your new bio (max 300 chars), or "skip".`,
+          `📖 *Change Bio*\n\nCurrent: _${escMd(user.bio)}_\n\nType your new bio (max 300 chars), or "skip".`,
           { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
         );
       } else if (text === "🌍 Change Country") {
         editModeMap.set(id, "country");
         await upsertUser(id, { state: "setup_country" });
         await bot.sendMessage(chatId,
-          `🌍 *Change Country*\n\nCurrent: *${user.country ?? "—"}*\n\nType your country, or "skip".`,
+          `🌍 *Change Country*\n\nCurrent: *${escMd(user.country)}*\n\nType your country, or "skip".`,
           { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
         );
       } else {
@@ -1254,8 +1262,8 @@ bot.on("message", async (msg) => {
           if (ADMIN_ID) {
             const caption =
               `💰 *Payment screenshot received!*\n\n` +
-              `User: *${user.name ?? "Unknown"}* (${user.age ?? "?"})\n` +
-              `ID: \`${id}\`\nUsername: @${user.telegramUsername ?? "none"}\n\n` +
+              `User: *${escMd(user.name)}* (${escMd(user.age)})\n` +
+              `ID: \`${id}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\n\n` +
               `Run: /grant ${id}`;
             await bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, { caption, parse_mode: "Markdown" });
           }
@@ -1301,7 +1309,7 @@ bot.on("message", async (msg) => {
 
     if (msg.photo && !user.hasPaid) {
       if (ADMIN_ID) {
-        const caption = `💰 *Payment screenshot received!*\n\nUser: *${user.name ?? "Unknown"}* (${user.age ?? "?"})\nID: \`${id}\`\nUsername: @${user.telegramUsername ?? "none"}\n\nRun: /grant ${id}`;
+        const caption = `💰 *Payment screenshot received!*\n\nUser: *${escMd(user.name)}* (${escMd(user.age)})\nID: \`${id}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\n\nRun: /grant ${id}`;
         await bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, { caption, parse_mode: "Markdown" });
       }
       await bot.sendMessage(chatId, "📸 *Screenshot received!* ✅\n\nOur team will verify and unlock your account shortly.\nUsually takes just a few minutes! 💕", { parse_mode: "Markdown" });
@@ -1354,8 +1362,7 @@ bot.on("message", async (msg) => {
     // Notify admin with real error details
     if (ADMIN_ID) {
       bot.sendMessage(ADMIN_ID,
-        `⚠️ *Bot Error*\nUser: \`${id}\`\nError: \`${errMsg.slice(0, 300)}\``,
-        { parse_mode: "Markdown" }
+        `⚠️ Bot Error\nUser: ${id}\nError: ${errMsg.slice(0, 300)}`
       ).catch(() => {});
     }
     // Show the menu on error so the user is never stuck
@@ -1460,7 +1467,7 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
 bot.onText(/\/users/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const users = await db.select().from(usersTable);
-  const lines = users.map((u) => `• ${u.name ?? "?"} (${u.age ?? "?"}) | ID: ${u.id} | Paid: ${u.hasPaid ? "✅" : "❌"} | Chats: ${u.chatCount}`);
+  const lines = users.map((u) => `• ${escMd(u.name)} (${escMd(u.age)}) | ID: ${u.id} | Paid: ${u.hasPaid ? "✅" : "❌"} | Chats: ${u.chatCount}`);
   await bot.sendMessage(msg.chat.id, `👥 *All Users (${users.length})*\n\n${lines.join("\n") || "None"}`, { parse_mode: "Markdown" });
 });
 
