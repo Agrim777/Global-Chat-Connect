@@ -10,7 +10,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
-const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
+const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
 const FREE_CHAT_DURATION_MS = 60 * 1000; // 60 seconds free for all users
 
@@ -1380,27 +1380,50 @@ bot.onText(/\/premium/, async (msg) => {
 // ── Admin-only: /grant <userId> ───────────────────────────────────────────────
 
 bot.onText(/\/grant (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
   const adminId = msg.from!.id;
-  if (!ADMIN_ID || adminId !== ADMIN_ID) {
-    await bot.sendMessage(msg.chat.id, "⛔ You are not authorised to use this command.");
-    return;
+  try {
+    if (adminId !== ADMIN_ID) {
+      await bot.sendMessage(chatId, `⛔ Not authorised. Your ID: ${adminId}, Admin ID: ${ADMIN_ID}`);
+      return;
+    }
+    const targetId = parseInt(match![1].trim(), 10);
+    if (isNaN(targetId)) {
+      await bot.sendMessage(chatId, "❌ Invalid user ID. Usage: /grant 1234567890");
+      return;
+    }
+
+    let target = await getUser(targetId);
+
+    if (!target) {
+      // User hasn't started the bot yet — pre-create them as paid
+      await db.insert(usersTable).values({ id: targetId, hasPaid: true, state: "idle", isProfileComplete: false })
+        .onConflictDoUpdate({ target: usersTable.id, set: { hasPaid: true, updatedAt: new Date() } });
+      await bot.sendMessage(chatId, `✅ Premium pre-granted to user ${targetId}. They'll have access when they start the bot.`);
+      return;
+    }
+
+    if (target.hasPaid) {
+      await bot.sendMessage(chatId, `✅ User ${targetId} (${target.name ?? "Unknown"}) already has Premium.`);
+      return;
+    }
+
+    await db.update(usersTable).set({ hasPaid: true, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
+    await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})`);
+
+    // Notify the user
+    await bot.sendMessage(
+      targetId,
+      `🎉 Your premium is now active!\n\nThank you for your support 💕\nYou can now connect with real people worldwide. Tap Find Match to get started!`
+    ).catch(() => {});
+
+    const updated = await getUser(targetId);
+    if (updated) await sendMain(targetId, updated).catch(() => {});
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[GRANT ERROR] ${errMsg}`);
+    await bot.sendMessage(chatId, `❌ Grant failed: ${errMsg.slice(0, 200)}`).catch(() => {});
   }
-  const targetId = parseInt(match![1].trim(), 10);
-  if (isNaN(targetId)) { await bot.sendMessage(msg.chat.id, "Invalid user ID."); return; }
-  const target = await getUser(targetId);
-  if (!target) { await bot.sendMessage(msg.chat.id, `User ${targetId} not found.`); return; }
-  if (target.hasPaid) { await bot.sendMessage(msg.chat.id, `✅ User ${targetId} already has premium.`); return; }
-
-  await db.update(usersTable).set({ hasPaid: true, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
-
-  await bot.sendMessage(msg.chat.id, `✅ *Premium granted* to user ${targetId} (${target.name ?? "Unknown"})!`, { parse_mode: "Markdown" });
-  await bot.sendMessage(
-    targetId,
-    `🎉 *Your premium is now unlocked!*\n\nThank you for your support 💕\nYou can now connect with people worldwide! Tap *Find Match* to get started.`,
-    { parse_mode: "Markdown" }
-  );
-  const updated = await getUser(targetId);
-  if (updated) await sendMain(targetId, updated);
 });
 
 // ── Admin: /revoke <userId> ───────────────────────────────────────────────────
