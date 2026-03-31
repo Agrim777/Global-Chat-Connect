@@ -1191,7 +1191,11 @@ bot.on("message", async (msg) => {
           }
           return;
         }
-        await fakeAutoReply(chatId, id, text ?? "");
+        try {
+          await fakeAutoReply(chatId, id, text ?? "");
+        } catch (fakeErr) {
+          logger.warn({ userId: id, fakeErr }, "fakeAutoReply error — ignoring");
+        }
         return;
       }
 
@@ -1290,23 +1294,22 @@ bot.on("message", async (msg) => {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? (err.stack ?? errMsg) : errMsg;
-    // Log to server console only — do NOT message admin for every user error
     logger.error({ userId: id, text: text.slice(0, 40), err }, "Message handler error");
     console.error(`[BOT ERROR] user=${id} text="${text.slice(0, 40)}" error=${errStack.slice(0, 500)}`);
-    // Always show the user their keyboard — use plain sendMessage if sendMain fails
+    // Restore the correct keyboard based on user's CURRENT state — never show the wrong menu
     try {
       const u = await getUser(id);
-      if (u) {
+      if (u?.state === "chatting") {
+        // User is still in a chat — show Stop Chat button, not the main menu
+        await bot.sendMessage(chatId, "Something went wrong. You're still in your chat.", {
+          reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
+        });
+      } else if (u) {
         await sendMain(chatId, u);
-      } else {
-        await bot.sendMessage(chatId, "Please tap /start to begin.");
       }
-    } catch (recoveryErr: unknown) {
-      console.error(`[BOT RECOVERY ERROR] user=${id} error=${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)}`);
-      // Last-resort: show keyboard without Markdown so it can't fail on formatting
-      bot.sendMessage(chatId, "Please tap /start to continue.", {
-        reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
-      }).catch(() => {});
+      // If no user record, stay silent — they haven't started yet
+    } catch {
+      // Truly last resort — stay silent, don't send confusing messages
     }
   }
 });
