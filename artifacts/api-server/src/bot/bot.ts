@@ -92,7 +92,7 @@ async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInse
   return getUser(id);
 }
 
-async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean }) {
+async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean }, customText?: string) {
   let kb: TelegramBot.ReplyKeyboardMarkup;
   if (user.isProfileComplete) {
     const premiumBtn = user.hasPaid ? { text: "✅ Premium" } : { text: "💎 Go Premium" };
@@ -112,13 +112,10 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
       resize_keyboard: true,
     };
   }
-  await bot.sendMessage(
-    chatId,
-    user.isProfileComplete
-      ? `Welcome back, ${String(user.name ?? "there")} 💖 What would you like to do?`
-      : `Hi ${String(user.name ?? "there")} 👋 You haven't set up your profile yet. Tap below to get started!`,
-    { reply_markup: kb }
-  );
+  const defaultText = user.isProfileComplete
+    ? `What would you like to do?`
+    : `Hi ${String(user.name ?? "there")} 👋 You haven't set up your profile yet. Tap below to get started!`;
+  await bot.sendMessage(chatId, customText ?? defaultText, { reply_markup: kb });
 }
 
 // ── Fake personas ─────────────────────────────────────────────────────────────
@@ -656,8 +653,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
 async function stopChat(chatId: number, userId: number) {
   const me = await getUser(userId);
   if (!me || me.state !== "chatting") {
-    await bot.sendMessage(chatId, "You're not in a chat right now.");
-    if (me) await sendMain(chatId, me);
+    if (me) await sendMain(chatId, me, "You're not in a chat right now.");
     return;
   }
 
@@ -678,8 +674,7 @@ async function stopChat(chatId: number, userId: number) {
       await db.update(usersTable)
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
         .where(eq(usersTable.id, partnerId));
-      await bot.sendMessage(partnerId, "Your match ended the chat.");
-      await sendMain(partnerId, partner);
+      await sendMain(partnerId, partner, "Your match ended the chat.");
       // Show pay gate to partner too if they're unpaid and used their trial
       if (!partner.hasPaid && (partner.chatCount ?? 0) > 0) {
         await delay(600);
@@ -689,8 +684,7 @@ async function stopChat(chatId: number, userId: number) {
   }
 
   const updated = await getUser(userId);
-  await bot.sendMessage(chatId, "Chat ended.");
-  await sendMain(chatId, updated!);
+  await sendMain(chatId, updated!, "Chat ended.");
 
   // Show pay gate to unpaid users who have used their free trial (fake or real)
   if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
@@ -781,9 +775,8 @@ async function findMatch(chatId: number, userId: number) {
               await db.update(usersTable)
                 .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
                 .where(eq(usersTable.id, paidPartnerId));
-              await bot.sendMessage(paidPartnerId, "Your match's free trial ended. Finding you a new match soon.").catch(() => {});
               const paidPartnerUpdated = await getUser(paidPartnerId);
-              if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated).catch(() => {});
+              if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated, "Your match's free trial ended.").catch(() => {});
             }
             await bot.sendMessage(unpaidChatId, "That's the end of your free trial.").catch(() => {});
             await sendPayGate(unpaidChatId).catch(() => {});
