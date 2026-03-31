@@ -206,9 +206,9 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
   await bot.sendMessage(
     chatId,
     user.isProfileComplete
-      ? `Welcome back, *${escMd(user.name ?? "there")}* 💖\nWhat would you like to do?`
-      : `Hi *${escMd(user.name ?? "there")}*! 👋\nYou haven't set up your profile yet.\nTap below to get started!`,
-    { parse_mode: "Markdown", reply_markup: kb }
+      ? `Welcome back, ${String(user.name ?? "there")} 💖 What would you like to do?`
+      : `Hi ${String(user.name ?? "there")} 👋 You haven't set up your profile yet. Tap below to get started!`,
+    { reply_markup: kb }
   );
 }
 
@@ -1111,10 +1111,15 @@ bot.on("message", async (msg) => {
   if (text.startsWith("/")) return;
 
   try {
+    logger.info({ userId: id, text: text.slice(0, 40) }, "message received");
     let user = await getUser(id);
     if (!user) {
       user = await upsertUser(id, { firstName: msg.from.first_name ?? "", telegramUsername: msg.from.username ?? null, state: "idle" });
-      await sendMain(chatId, user!);
+      if (!user) {
+        await bot.sendMessage(chatId, "Welcome! Please tap /start to begin.");
+        return;
+      }
+      await sendMain(chatId, user);
       return;
     }
 
@@ -1425,20 +1430,29 @@ bot.on("message", async (msg) => {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? (err.stack ?? errMsg) : errMsg;
-    logger.error({ err }, "Message handler error");
-    // Notify admin with full error details (plain text — no parse_mode to avoid formatting crashes)
+    // Log to both pino and console so errors always appear in server output
+    logger.error({ userId: id, text: text.slice(0, 40), err }, "Message handler error");
+    console.error(`[BOT ERROR] user=${id} text="${text.slice(0, 40)}" error=${errStack.slice(0, 500)}`);
+    // Notify admin with full stack trace (plain text — no parse_mode)
     if (ADMIN_ID) {
       bot.sendMessage(ADMIN_ID,
         `⚠️ Bot Error\nUser: ${id}\nText: ${text.slice(0, 60)}\nError: ${errStack.slice(0, 400)}`
       ).catch(() => {});
     }
-    // Try to show the user their menu — plain text fallback if sendMain also fails
+    // Always show the user their keyboard — use plain sendMessage if sendMain fails
     try {
       const u = await getUser(id);
-      if (u) await sendMain(chatId, u);
-      else await bot.sendMessage(chatId, "Something went wrong. Tap /start to restart.");
-    } catch (_) {
-      await bot.sendMessage(chatId, "Something went wrong. Tap /start to restart.").catch(() => {});
+      if (u) {
+        await sendMain(chatId, u);
+      } else {
+        await bot.sendMessage(chatId, "Please tap /start to begin.");
+      }
+    } catch (recoveryErr: unknown) {
+      console.error(`[BOT RECOVERY ERROR] user=${id} error=${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)}`);
+      // Last-resort: show keyboard without Markdown so it can't fail on formatting
+      bot.sendMessage(chatId, "Please tap /start to continue.", {
+        reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
+      }).catch(() => {});
     }
   }
 });
@@ -1448,13 +1462,19 @@ bot.onText(/\/test/, async (msg) => {
   if (msg.from!.id !== ADMIN_ID) return;
   const chatId = msg.chat.id;
   try {
-    const u = await getUser(ADMIN_ID);
+    const u = await getUser(msg.from!.id);
+    const allUsers = await db.select({ state: usersTable.state }).from(usersTable);
+    const idleCount = allUsers.filter(x => x.state === "idle").length;
+    const chattingCount = allUsers.filter(x => x.state === "chatting").length;
+    const stuckCount = allUsers.length - idleCount - chattingCount;
     await bot.sendMessage(chatId,
-      `✅ *Bot self-test passed*\n\n` +
-      `DB: connected\n` +
-      `Your record: ${u ? `found (state: ${u.state}, paid: ${u.hasPaid})` : "not found"}\n` +
-      `Polling: active`,
-      { parse_mode: "Markdown" }
+      `✅ Bot Diagnostics\n\n` +
+      `DB: connected (${allUsers.length} users)\n` +
+      `  Idle: ${idleCount} | Chatting: ${chattingCount} | Stuck: ${stuckCount}\n` +
+      `Your state: ${u ? u.state : "NOT FOUND"}\n` +
+      `Your paid: ${u ? u.hasPaid : "—"}\n` +
+      `Polling: active\n` +
+      `Time: ${new Date().toISOString()}`
     );
   } catch (err: unknown) {
     const msg2 = err instanceof Error ? err.message : String(err);
