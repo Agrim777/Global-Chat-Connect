@@ -967,7 +967,8 @@ bot.on("message", async (msg) => {
     if (!user) {
       user = await upsertUser(id, { firstName: msg.from.first_name ?? "", telegramUsername: msg.from.username ?? null, state: "idle" });
       if (!user) {
-        await bot.sendMessage(chatId, "Welcome! Please tap /start to begin.");
+        // DB insert failed — stay silent, don't send confusing messages
+        console.error(`[BOT] upsertUser returned null for userId=${id}`);
         return;
       }
       await sendMain(chatId, user);
