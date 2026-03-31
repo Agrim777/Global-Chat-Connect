@@ -891,7 +891,8 @@ async function findMatch(chatId: number, userId: number) {
 // Single /start handler — covers plain /start, /start@botname, and /start ref_CODE deep links
 bot.onText(/\/start(.*)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const id = msg.from!.id;
+  if (!msg.from) return; // channel posts have no sender
+  const id = msg.from.id;
   const param = (match?.[1] ?? "").trim();
   try {
     let user = await getUser(id);
@@ -948,7 +949,17 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
       { parse_mode: "Markdown" }
     );
     await sendMain(chatId, user!);
-  } catch (err) { logger.error({ err }, "/start error"); }
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.error({ err }, "/start error");
+    if (ADMIN_ID) {
+      bot.sendMessage(ADMIN_ID,
+        `⚠️ */start Error*\nUser: \`${id}\`\nError: \`${errMsg.slice(0, 300)}\``,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    }
+    await bot.sendMessage(chatId, "Oops, couldn't start. Please try /start again.").catch(() => {});
+  }
 });
 
 // ── /help ────────────────────────────────────────────────────────────────────
@@ -1037,8 +1048,9 @@ async function finishEditField(chatId: number, id: number) {
 
 bot.on("message", async (msg) => {
   if (!msg.text && !msg.photo && !msg.document) return;
+  if (!msg.from) return; // ignore channel posts / anonymous senders
   const chatId = msg.chat.id;
-  const id = msg.from!.id;
+  const id = msg.from.id;
   const text = (msg.text ?? "").trim();
 
   if (text.startsWith("/")) return;
@@ -1046,7 +1058,7 @@ bot.on("message", async (msg) => {
   try {
     let user = await getUser(id);
     if (!user) {
-      user = await upsertUser(id, { firstName: msg.from!.first_name ?? "", telegramUsername: msg.from!.username ?? null, state: "idle" });
+      user = await upsertUser(id, { firstName: msg.from.first_name ?? "", telegramUsername: msg.from.username ?? null, state: "idle" });
       await sendMain(chatId, user!);
       return;
     }
@@ -1321,16 +1333,43 @@ bot.on("message", async (msg) => {
 
     // Unrecognised input — re-show the menu so buttons are always visible
     await sendMain(chatId, user);
-  } catch (err) {
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     logger.error({ err }, "Message handler error");
+    // Notify admin with real error details
+    if (ADMIN_ID) {
+      bot.sendMessage(ADMIN_ID,
+        `⚠️ *Bot Error*\nUser: \`${id}\`\nError: \`${errMsg.slice(0, 300)}\``,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    }
     // Show the menu on error so the user is never stuck
     try {
       const u = await getUser(id);
       if (u) await sendMain(chatId, u);
-      else await bot.sendMessage(chatId, "Something went wrong. Please send /start to restart.");
+      else await bot.sendMessage(chatId, "Oops, something went wrong. Please tap /start.");
     } catch (_) {
-      await bot.sendMessage(chatId, "Something went wrong. Please send /start to restart.");
+      await bot.sendMessage(chatId, "Oops, something went wrong. Please tap /start.").catch(() => {});
     }
+  }
+});
+
+// ── Admin /test command — verifies the full bot flow ─────────────────────────
+bot.onText(/\/test/, async (msg) => {
+  if (msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+  try {
+    const u = await getUser(ADMIN_ID);
+    await bot.sendMessage(chatId,
+      `✅ *Bot self-test passed*\n\n` +
+      `DB: connected\n` +
+      `Your record: ${u ? `found (state: ${u.state}, paid: ${u.hasPaid})` : "not found"}\n` +
+      `Polling: active`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err: unknown) {
+    const msg2 = err instanceof Error ? err.message : String(err);
+    await bot.sendMessage(chatId, `❌ Test FAILED: ${msg2}`);
   }
 });
 
