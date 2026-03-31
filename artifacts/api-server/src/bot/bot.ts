@@ -942,6 +942,12 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         telegramUsername: msg.from!.username ?? null,
         state: "idle",
       });
+    } else if (user.state !== "idle" && user.state !== "chatting") {
+      // Existing user stuck in a setup step — /start always resets them to idle
+      await db.update(usersTable)
+        .set({ state: "idle", updatedAt: new Date() })
+        .where(eq(usersTable.id, id));
+      user = await getUser(id) ?? user;
     }
 
     // Handle referral deep link: /start ref_XXXXXX (only credit if this user is brand new)
@@ -1112,6 +1118,21 @@ bot.on("message", async (msg) => {
       return;
     }
 
+    // ── Escape hatch: pressing any main-menu button while stuck in a setup step resets to idle ──
+    const MAIN_MENU_BUTTONS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile",
+      "🛑 Stop Matching", "🛑 Stop Chat", "📨 Refer Friends", "💎 Go Premium",
+      "✅ Premium", "💳 Support Us", "🚀 Setup Profile"];
+    if (MAIN_MENU_BUTTONS.includes(text) &&
+        user.state !== "idle" && user.state !== "chatting") {
+      editModeMap.delete(id);
+      await db.update(usersTable)
+        .set({ state: "idle", updatedAt: new Date() })
+        .where(eq(usersTable.id, id));
+      user = (await getUser(id)) ?? user;
+      user = { ...user, state: "idle" };
+      // Fall through to normal idle handling below
+    }
+
     // ── Edit-mode cancel ────────────────────────────────────────────────
     if (text === "❌ Cancel" && editModeMap.has(id)) {
       editModeMap.delete(id);
@@ -1241,6 +1262,10 @@ bot.on("message", async (msg) => {
     if (user.state === "setup_bio") {
       const isEdit = editModeMap.get(id) === "bio";
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      if (MAIN_MENU_BUTTONS.includes(text) || EDIT_FIELD_LABELS.includes(text)) {
+        await bot.sendMessage(chatId, "Please write a short bio about yourself (at least 3 characters).");
+        return;
+      }
       if (!text || text.trim().length < 3) { await bot.sendMessage(chatId, "Bio must be at least 3 characters."); return; }
       if (text.length > 300) { await bot.sendMessage(chatId, "Too long! Keep it under 300 characters."); return; }
       await upsertUser(id, { bio: text.trim(), state: isEdit ? "idle" : "setup_country" });
