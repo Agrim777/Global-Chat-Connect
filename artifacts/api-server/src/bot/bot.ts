@@ -1175,8 +1175,7 @@ bot.on("message", async (msg) => {
             .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
             .where(eq(usersTable.id, id));
           const fresh = await getUser(id);
-          await bot.sendMessage(chatId, "⚠️ The chat session ended (bot restarted). Tap 💘 Find Match to start a new one!");
-          if (fresh) await sendMain(chatId, fresh);
+          if (fresh) await sendMain(chatId, fresh, "Chat session ended. Tap 💘 Find Match to start a new one!");
           return;
         }
         // Screenshot during fake chat → forward to admin + acknowledge user
@@ -1205,16 +1204,25 @@ bot.on("message", async (msg) => {
           recipient.chattingWith === id
         ) {
           // Both still connected — relay the message
-          if (msg.photo) {
-            await bot.forwardMessage(recipientId, chatId, msg.message_id);
-            return;
-          }
-          if (text) {
-            // Use HTML parse mode — escape BOTH the name AND the message text so any
-            // character the user types (<3, &, >, etc.) is forwarded safely.
-            const safeName = escHtml(user.name ?? "Match");
-            const safeText = escHtml(text);
-            await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${safeText}`, { parse_mode: "HTML" });
+          try {
+            if (msg.photo) {
+              await bot.forwardMessage(recipientId, chatId, msg.message_id);
+            } else if (text) {
+              const safeName = escHtml(user.name ?? "Match");
+              const safeText = escHtml(text);
+              await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${safeText}`, { parse_mode: "HTML" });
+            }
+          } catch (relayErr) {
+            // Partner has blocked the bot or is unreachable — end the chat gracefully
+            logger.warn({ recipientId, relayErr }, "Relay failed — ending chat");
+            await db.update(usersTable)
+              .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+              .where(eq(usersTable.id, id));
+            await db.update(usersTable)
+              .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+              .where(eq(usersTable.id, recipientId));
+            const fresh = await getUser(id);
+            if (fresh) await sendMain(chatId, fresh, "Your match is no longer reachable. Chat ended.");
           }
         } else {
           // Stale connection — clean up and return to menu
@@ -1222,8 +1230,7 @@ bot.on("message", async (msg) => {
             .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
             .where(eq(usersTable.id, id));
           const fresh = await getUser(id);
-          await bot.sendMessage(chatId, "Your match is no longer available.");
-          if (fresh) await sendMain(chatId, fresh);
+          if (fresh) await sendMain(chatId, fresh, "Your match is no longer available.");
         }
       }
       return;
