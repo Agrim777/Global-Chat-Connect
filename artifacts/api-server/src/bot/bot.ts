@@ -1046,15 +1046,15 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
   const gLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", other: "🧑 Other" };
   const lfLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", any: "💞 Any" };
   await bot.sendMessage(chatId,
-    `👤 *Your Profile*\n\n` +
-    `🏷 Name: *${escMd(user.name)}*\n` +
-    `🎂 Age: *${escMd(user.age)}*\n` +
-    `⚤ Gender: *${escMd(gLabel[user.gender ?? ""] ?? "—")}*\n` +
-    `💞 Looking for: *${escMd(lfLabel[user.lookingFor ?? ""] ?? "—")}*\n` +
-    `🌍 Country: *${escMd(user.country)}*\n` +
-    `📖 Bio: _${escMd(user.bio)}_\n\n` +
-    (user.hasPaid ? `✅ *Premium member*` : `🔒 Free account — tap 💳 Support Us to unlock`),
-    { parse_mode: "Markdown" }
+    `👤 <b>Your Profile</b>\n\n` +
+    `🏷 Name: <b>${escHtml(user.name)}</b>\n` +
+    `🎂 Age: <b>${escHtml(user.age)}</b>\n` +
+    `⚤ Gender: <b>${escHtml(gLabel[user.gender ?? ""] ?? "—")}</b>\n` +
+    `💞 Looking for: <b>${escHtml(lfLabel[user.lookingFor ?? ""] ?? "—")}</b>\n` +
+    `🌍 Country: <b>${escHtml(user.country)}</b>\n` +
+    `📖 Bio: <i>${escHtml(user.bio)}</i>\n\n` +
+    (user.hasPaid ? `✅ <b>Premium member</b>` : `🔒 Free account — tap 💳 Support Us to unlock`),
+    { parse_mode: "HTML" }
   );
 }
 
@@ -1177,8 +1177,8 @@ bot.on("message", async (msg) => {
         editModeMap.set(id, "bio");
         await upsertUser(id, { state: "setup_bio" });
         await bot.sendMessage(chatId,
-          `📖 *Change Bio*\n\nCurrent: _${escMd(user.bio)}_\n\nType your new bio (max 300 chars), or "skip".`,
-          { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
+          `📖 <b>Change Bio</b>\n\nCurrent:\n<i>${escHtml(user.bio)}</i>\n\nType your new bio (max 300 chars), or "skip".`,
+          { parse_mode: "HTML", reply_markup: { remove_keyboard: true } }
         );
       } else if (text === "🌍 Change Country") {
         editModeMap.set(id, "country");
@@ -1389,10 +1389,21 @@ bot.on("message", async (msg) => {
       return;
     }
     if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
-    if (text === "👤 My Profile") { await showProfile(chatId, user); return; }
+    if (text === "👤 My Profile") {
+      await showProfile(chatId, user);
+      await sendMain(chatId, user);
+      return;
+    }
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
     if (text === "📨 Refer Friends") {
-      await showReferralStats(chatId, id);
+      try {
+        await showReferralStats(chatId, id);
+      } catch (refErr: unknown) {
+        const refMsg = refErr instanceof Error ? refErr.message : String(refErr);
+        logger.error({ err: refErr }, "showReferralStats error");
+        if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Referral Error\nUser: ${id}\nError: ${refMsg.slice(0, 200)}`).catch(() => {});
+        await bot.sendMessage(chatId, "Couldn't load referral stats right now. Please try again.").catch(() => {});
+      }
       return;
     }
         if (text === "💎 Go Premium") {
@@ -1413,20 +1424,21 @@ bot.on("message", async (msg) => {
     await sendMain(chatId, user);
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    const errStack = err instanceof Error ? (err.stack ?? errMsg) : errMsg;
     logger.error({ err }, "Message handler error");
-    // Notify admin with real error details
+    // Notify admin with full error details (plain text — no parse_mode to avoid formatting crashes)
     if (ADMIN_ID) {
       bot.sendMessage(ADMIN_ID,
-        `⚠️ Bot Error\nUser: ${id}\nError: ${errMsg.slice(0, 300)}`
+        `⚠️ Bot Error\nUser: ${id}\nText: ${text.slice(0, 60)}\nError: ${errStack.slice(0, 400)}`
       ).catch(() => {});
     }
-    // Show the menu on error so the user is never stuck
+    // Try to show the user their menu — plain text fallback if sendMain also fails
     try {
       const u = await getUser(id);
       if (u) await sendMain(chatId, u);
-      else await bot.sendMessage(chatId, "Oops, something went wrong. Please tap /start.");
+      else await bot.sendMessage(chatId, "Something went wrong. Tap /start to restart.");
     } catch (_) {
-      await bot.sendMessage(chatId, "Oops, something went wrong. Please tap /start.").catch(() => {});
+      await bot.sendMessage(chatId, "Something went wrong. Tap /start to restart.").catch(() => {});
     }
   }
 });
