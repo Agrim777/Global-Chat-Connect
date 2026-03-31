@@ -17,6 +17,13 @@ const FREE_CHAT_DURATION_MS = 60 * 1000; // 60 seconds free for all users
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
 
+// Global safety net — prevent any stray unhandled rejection from crashing the process
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  logger.error({ reason }, "Unhandled promise rejection");
+  if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Unhandled rejection: ${msg.slice(0, 300)}`).catch(() => {});
+});
+
 (async () => {
   // Call getUpdates multiple times to boot any stale polling session off Telegram's server
   for (let i = 0; i < 3; i++) {
@@ -538,18 +545,23 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
   // 15-second free chat timer — fires regardless, ends chat and shows pay gate
   const timer = setTimeout(async () => {
-    chatTimerMap.delete(userId);
-    fakePersonaMap.delete(userId);
-    const u = await getUser(userId);
-    // End chat if still active (check state, don't rely on chattingWith === 0)
-    if (u?.state === "chatting" && !u.hasPaid) {
-      await db.update(usersTable)
-        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(eq(usersTable.id, userId));
-      await bot.sendMessage(chatId, "That's the end of your free trial.");
-      await sendPayGate(chatId);
-    } else if (u && !u.hasPaid) {
-      await sendPayGate(chatId);
+    try {
+      chatTimerMap.delete(userId);
+      fakePersonaMap.delete(userId);
+      const u = await getUser(userId);
+      // End chat if still active (check state, don't rely on chattingWith === 0)
+      if (u?.state === "chatting" && !u.hasPaid) {
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, userId));
+        await bot.sendMessage(chatId, "That's the end of your free trial.").catch(() => {});
+        await sendPayGate(chatId).catch(() => {});
+      } else if (u && !u.hasPaid) {
+        await sendPayGate(chatId).catch(() => {});
+      }
+    } catch (err) {
+      logger.error({ err }, "Free-trial timer error (fake chat)");
+      if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Timer error: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
     }
   }, FREE_CHAT_DURATION_MS);
 
@@ -858,25 +870,30 @@ async function findMatch(chatId: number, userId: number) {
 
     if (unpaidUserId !== null && unpaidChatId !== null) {
       const timer = setTimeout(async () => {
-        chatTimerMap.delete(unpaidUserId);
-        const u = await getUser(unpaidUserId);
-        if (u?.state === "chatting" && !u.hasPaid) {
-          // Disconnect both users
-          await db.update(usersTable)
-            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-            .where(eq(usersTable.id, unpaidUserId));
-          if (paidPartnerId) {
+        try {
+          chatTimerMap.delete(unpaidUserId);
+          const u = await getUser(unpaidUserId);
+          if (u?.state === "chatting" && !u.hasPaid) {
+            // Disconnect both users
             await db.update(usersTable)
               .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-              .where(eq(usersTable.id, paidPartnerId));
-            await bot.sendMessage(paidPartnerId, "Your match's free trial ended. Finding you a new match soon.");
-            const paidPartnerUpdated = await getUser(paidPartnerId);
-            if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated);
+              .where(eq(usersTable.id, unpaidUserId));
+            if (paidPartnerId) {
+              await db.update(usersTable)
+                .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+                .where(eq(usersTable.id, paidPartnerId));
+              await bot.sendMessage(paidPartnerId, "Your match's free trial ended. Finding you a new match soon.").catch(() => {});
+              const paidPartnerUpdated = await getUser(paidPartnerId);
+              if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated).catch(() => {});
+            }
+            await bot.sendMessage(unpaidChatId, "That's the end of your free trial.").catch(() => {});
+            await sendPayGate(unpaidChatId).catch(() => {});
+          } else if (u && !u.hasPaid) {
+            await sendPayGate(unpaidChatId).catch(() => {});
           }
-          await bot.sendMessage(unpaidChatId, "That's the end of your free trial.");
-          await sendPayGate(unpaidChatId);
-        } else if (u && !u.hasPaid) {
-          await sendPayGate(unpaidChatId);
+        } catch (err) {
+          logger.error({ err }, "Free-trial timer error (real chat)");
+          if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Timer error (real chat): ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
         }
       }, FREE_CHAT_DURATION_MS);
       chatTimerMap.set(unpaidUserId, timer);
@@ -1287,10 +1304,11 @@ bot.on("message", async (msg) => {
             return;
           }
           if (text) {
-            // Use HTML parse mode so the name can be bolded safely regardless of
-            // what special characters (* _ ` etc.) the user typed in their message.
-            const safeName = (user.name ?? "Match").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${text}`, { parse_mode: "HTML" });
+            // Use HTML parse mode — escape BOTH the name AND the message text so any
+            // character the user types (<3, &, >, etc.) is forwarded safely.
+            const safeName = escHtml(user.name ?? "Match");
+            const safeText = escHtml(text);
+            await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${safeText}`, { parse_mode: "HTML" });
           }
         } else {
           // Stale connection — clean up and return to menu
