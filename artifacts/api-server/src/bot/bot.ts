@@ -1214,6 +1214,16 @@ bot.on("message", async (msg) => {
       if (text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
 
       if (user.chattingWith === FAKE_CHAT_ID) {
+        // If bot was restarted the in-memory persona is gone — clean up gracefully
+        if (!fakePersonaMap.has(id)) {
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, id));
+          const fresh = await getUser(id);
+          await bot.sendMessage(chatId, "⚠️ The chat session ended (bot restarted). Tap 💘 Find Match to start a new one!");
+          if (fresh) await sendMain(chatId, fresh);
+          return;
+        }
         // Screenshot during fake chat → forward to admin + acknowledge user
         if (msg.photo) {
           await bot.sendMessage(chatId, "✅ Payment screenshot received! Our team will verify and unlock your account within a few minutes 🔓💕");
@@ -1231,17 +1241,15 @@ bot.on("message", async (msg) => {
         return;
       }
 
-      // Real chat relay — verify recipient is still connected and both users are paid
+      // Real chat relay — allow messages whenever both sides are still connected to each other
       const recipientId = user.chattingWith;
       if (recipientId) {
         const recipient = await getUser(recipientId);
-        // Only forward if recipient is still in a chat with this exact user AND both are paid
         if (
           recipient?.state === "chatting" &&
-          recipient.chattingWith === id &&
-          user.hasPaid &&
-          recipient.hasPaid
+          recipient.chattingWith === id
         ) {
+          // Both still connected — relay the message
           if (msg.photo) {
             await bot.forwardMessage(recipientId, chatId, msg.message_id);
             return;
@@ -1249,8 +1257,8 @@ bot.on("message", async (msg) => {
           if (text) {
             await bot.sendMessage(recipientId, `💬 *${user.name ?? "Match"}*: ${text}`, { parse_mode: "Markdown" });
           }
-        } else if (!recipient || recipient.state !== "chatting" || recipient.chattingWith !== id) {
-          // Stale connection — clean it up silently
+        } else {
+          // Stale connection — clean up and return to menu
           await db.update(usersTable)
             .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
             .where(eq(usersTable.id, id));
