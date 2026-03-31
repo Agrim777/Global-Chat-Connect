@@ -471,7 +471,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
       }
     } catch (err) {
       logger.error({ err }, "Free-trial timer error (fake chat)");
-      if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Timer error: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+      console.error(`[TIMER ERROR] fake chat: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, FREE_CHAT_DURATION_MS);
 
@@ -792,7 +792,7 @@ async function findMatch(chatId: number, userId: number) {
           }
         } catch (err) {
           logger.error({ err }, "Free-trial timer error (real chat)");
-          if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Timer error (real chat): ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+          console.error(`[TIMER ERROR] real chat: ${err instanceof Error ? err.message : String(err)}`);
         }
       }, FREE_CHAT_DURATION_MS);
       chatTimerMap.set(unpaidUserId, timer);
@@ -814,11 +814,7 @@ async function findMatch(chatId: number, userId: number) {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger.error({ err }, "findMatch error");
-    if (ADMIN_ID) {
-      bot.sendMessage(ADMIN_ID,
-        `⚠️ findMatch Error\nUser: ${userId}\nError: ${errMsg.slice(0, 300)}`
-      ).catch(() => {});
-    }
+    console.error(`[FINDMATCH ERROR] user=${userId} error=${errMsg}`);
     await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
   }
 }
@@ -872,11 +868,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger.error({ err }, "/start error");
-    if (ADMIN_ID) {
-      bot.sendMessage(ADMIN_ID,
-        `/start Error\nUser: ${id}\nError: ${errMsg.slice(0, 300)}`
-      ).catch(() => {});
-    }
+    console.error(`[START ERROR] user=${id} error=${errMsg}`);
     // Just show the menu buttons — don't confuse the user with error text
     bot.sendMessage(chatId, "👋 Welcome! Tap the button to get started.", {
       reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
@@ -1298,15 +1290,9 @@ bot.on("message", async (msg) => {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? (err.stack ?? errMsg) : errMsg;
-    // Log to both pino and console so errors always appear in server output
+    // Log to server console only — do NOT message admin for every user error
     logger.error({ userId: id, text: text.slice(0, 40), err }, "Message handler error");
     console.error(`[BOT ERROR] user=${id} text="${text.slice(0, 40)}" error=${errStack.slice(0, 500)}`);
-    // Notify admin with full stack trace (plain text — no parse_mode)
-    if (ADMIN_ID) {
-      bot.sendMessage(ADMIN_ID,
-        `⚠️ Bot Error\nUser: ${id}\nText: ${text.slice(0, 60)}\nError: ${errStack.slice(0, 400)}`
-      ).catch(() => {});
-    }
     // Always show the user their keyboard — use plain sendMessage if sendMain fails
     try {
       const u = await getUser(id);
