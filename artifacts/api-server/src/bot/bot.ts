@@ -703,6 +703,7 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     if (c.id === userId || !c.isActive || c.state === "chatting") return false;
     // Only paid users can be matched with paid users
     if (!c.hasPaid) return false;
+    if (me.hasPaid) return true;
     return (me.lookingFor === "any" || me.lookingFor === c.gender) &&
            (c.lookingFor === "any" || c.lookingFor === me.gender);
   });
