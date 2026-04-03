@@ -492,22 +492,19 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     await bot.sendMessage(chatId, openerObj.text);
   }
 
-  // 15-second free chat timer — fires regardless, ends chat and shows pay gate
+  // 1-minute free chat timer — ends chat and shows pay gate when trial expires
   const timer = setTimeout(async () => {
     try {
       chatTimerMap.delete(userId);
       const persona = fakePersonaMap.get(userId);
       fakePersonaMap.delete(userId);
       const u = await getUser(userId);
-      // End chat if still active (check state, don't rely on chattingWith === 0)
+      // Only fire pay gate if user is STILL in the fake chat — stopChat already handles the case where they left manually
       if (u?.state === "chatting" && !u.hasPaid) {
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await sendPayGate(chatId, "⏰ Your free trial has ended!").catch(() => {});
-        schedulePayReminder(chatId, userId, persona?.name);
-      } else if (u && !u.hasPaid) {
-        await sendPayGate(chatId).catch(() => {});
+        await sendPayGate(chatId, "⏰ Your free 1-minute trial has ended!\n\nUnlock Premium to keep chatting with real people 💕").catch(() => {});
         schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
