@@ -648,21 +648,29 @@ async function stopChat(chatId: number, userId: number) {
 
   if (partnerId && partnerId !== FAKE_CHAT_ID) {
     const partner = await getUser(partnerId);
-    if (partner?.state === "chatting") {
-      await db.update(usersTable)
+    if (partner) {
+      // Atomic: only disconnect partner if they're STILL pointing at us.
+      // If 0 rows updated → partner already disconnected (they stopped at the same moment).
+      // In that case, skip notifying them — they already got their own "Chat ended" message.
+      const disconnected = await db.update(usersTable)
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(eq(usersTable.id, partnerId));
-      // Unpaid partner who used their trial → show pay gate directly (one message)
-      if (!partner.hasPaid && (partner.chatCount ?? 0) > 0) {
-        await sendPayGate(partnerId);
-      } else {
-        await sendMain(partnerId, partner, "Your match ended the chat.");
+        .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, userId)))
+        .returning({ id: usersTable.id });
+
+      if (disconnected.length > 0) {
+        // We were first — send the partner exactly one notification
+        if (!partner.hasPaid && (partner.chatCount ?? 0) > 0) {
+          await sendPayGate(partnerId);
+        } else {
+          await sendMain(partnerId, partner, "Your match ended the chat.");
+        }
       }
+      // else: partner already handled their own disconnect — no message needed
     }
   }
 
   const updated = await getUser(userId);
-  // Unpaid users who've used their trial → skip sendMain, show pay gate directly
+  // Unpaid users who've used their trial → show pay gate only (no menu)
   if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
     await sendPayGate(chatId);
   } else {
@@ -774,7 +782,10 @@ async function findMatch(chatId: number, userId: number) {
         connected = true;
       });
     } catch {
-      // Transaction rolled back — someone else grabbed one of the users first
+      // Transaction rolled back. Check if WE were matched by someone else in the meantime.
+      // If yes — the match message is already on its way, don't send a confusing "no matches" message.
+      const currentState = await getUser(userId);
+      if (currentState?.state === "chatting") return; // already connected — stay silent
       await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
         reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
       });
@@ -783,7 +794,7 @@ async function findMatch(chatId: number, userId: number) {
 
     if (!connected) return;
 
-    // Both claimed — send ONE match message each
+    // Both sides claimed atomically — send exactly ONE message each
     const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
     await bot.sendMessage(chatId,
       `✅ Match found! You're now connected with *${match.name}*, ${match.age}. Say hello! 👋`,
@@ -798,7 +809,11 @@ async function findMatch(chatId: number, userId: number) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger.error({ err }, "findMatch error");
     console.error(`[FINDMATCH ERROR] user=${userId} error=${errMsg}`);
-    await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
+    // Only show error if user is NOT already connected (avoid confusing them)
+    const currentState = await getUser(userId).catch(() => null);
+    if (currentState?.state !== "chatting") {
+      await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
+    }
   } finally {
     matchingSet.delete(userId);
   }
