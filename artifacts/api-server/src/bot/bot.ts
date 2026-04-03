@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, gt } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -1900,6 +1900,65 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
   if (isNaN(targetId)) { await bot.sendMessage(msg.chat.id, "Invalid user ID."); return; }
   await db.update(usersTable).set({ hasPaid: false, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
   await bot.sendMessage(msg.chat.id, `✅ Premium revoked for user ${targetId}.`);
+});
+
+// ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
+
+bot.onText(/\/broadcast/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
+
+  const GIRL_NAMES = ["Riya","Priya","Neha","Simran","Komal","Ananya","Kavya","Shreya","Pooja","Nidhi","Megha","Tanya","Ishika","Aisha","Sanya"];
+  const PAY_LINK   = "https://rzp.io/rzp/lx0R52O7";
+
+  function rndName() { return GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)]; }
+
+  function fomoMsg(name: string): string {
+    const msgs = [
+      `💌 *${name}* ab bhi soch rahi hai tumhare baare mein 🥺\n\n_"unka message padhke dil khush ho gaya"_\n\nReal log, real baat — ek baar unlock karo, phir koi limit nahi 💕\n\n👉 [Premium Unlock](${PAY_LINK})`,
+      `🔔 Yaad hai tumhara woh match?\n\n*${name}* ne poochha — _"kya woh wapas aayenge?"_ 🥺\n\nWoh abhi bhi yahan hai. Premium lo aur baat shuru karo 💕\n\n👉 [Unlock Now](${PAY_LINK})`,
+      `✨ Tumhara free preview khatam hua — *${name}* nahi gayi 🥺\n\nWoh online hai abhi. Ek payment aur real chat forever.\n\nNo timer. No limits 💕\n\n👉 [Unlock Premium](${PAY_LINK})`,
+      `💘 Woh ladki jisse tumhara match hua?\n\n*${name}* ne kaha — _"kya woh serious hain?"_ 🥺\n\nProve it. Pay once, chat unlimited 💕\n\n👉 [Unlock Now](${PAY_LINK})`,
+      `💕 *${name}* nahi bhooli tumhe.\n\n_"interesting lag rahe the, kash aur baat hoti"_ — yahi kaha usne 🥺\n\nReal conversations. One-time payment. No limits.\n\n👉 [Pay & Chat](${PAY_LINK})`,
+      `🌙 Late night thought — *${name}* abhi bhi app pe hai.\n\nWoh match kiya tha tumhare saath ek reason se 💕\n\nPremium = real chats, real people, koi timer nahi.\n\n👉 [Unlock Now](${PAY_LINK})`,
+      `💬 *${name}* ne message kiya... lekin tumhara Premium nahi hai abhi.\n\nReal connection tha. Waste mat karo.\n\nPay once. Chat forever 💕\n\n👉 [Unlock Premium](${PAY_LINK})`,
+    ];
+    return msgs[Math.floor(Math.random() * msgs.length)];
+  }
+
+  await bot.sendMessage(chatId, "📡 Fetching unpaid users...");
+
+  const targets = await db.select({ id: usersTable.id })
+    .from(usersTable)
+    .where(
+      and(
+        gt(usersTable.chatCount, 0),
+        eq(usersTable.hasPaid, false),
+        eq(usersTable.isProfileComplete, true)
+      )
+    );
+
+  await bot.sendMessage(chatId, `📤 Sending to ${targets.length} users... I'll update every 100 messages.`);
+
+  let sent = 0, failed = 0;
+
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+  for (const row of targets) {
+    const name = rndName();
+    try {
+      await bot.sendMessage(row.id, fomoMsg(name), { parse_mode: "Markdown", disable_web_page_preview: true });
+      sent++;
+    } catch {
+      failed++;
+    }
+    if ((sent + failed) % 100 === 0) {
+      await bot.sendMessage(chatId, `⏳ Progress: ${sent + failed}/${targets.length} — ✅ ${sent} sent, ❌ ${failed} failed`).catch(() => {});
+    }
+    await sleep(80);
+  }
+
+  await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`);
 });
 
 // ── Admin: /users ─────────────────────────────────────────────────────────────
