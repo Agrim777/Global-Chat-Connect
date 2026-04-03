@@ -327,6 +327,149 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     return rnd(f ? f_replies : [["hmm 😟", "what's up?"], ["that sucks", "what happened?"]]);
   }
 
+  // ── Broad content detector — fires before state switch ────────────────────
+  // Catches what the user ACTUALLY said and responds to it directly.
+  // Runs regardless of lastAsked state — so AI always reacts to real content.
+
+  // Cricket / IPL
+  if (/cricket|ipl|virat|rohit|dhoni|kohli|rcb|csk|mi |srh|kkr|dc |lsg/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg cricketer ho?? 😮", "IPL follow karte ho? konsi team?"] : ["cricket fan?", "IPL team?"],
+      f ? ["haha cricket wale 😄", "virat ya rohit? serious question 😂"] : ["virat or rohit? 😄", "who's GOAT?"],
+      f ? ["omg IPL time toh TV se nahi uthte hoge 😂", "konsi team support karti ho?"] : ["IPL time — which team?", "glued to TV?"],
+    ]);
+  }
+
+  // Football / soccer
+  if (/football|soccer|messi|ronaldo|mbappe|premier league|real madrid|barcelona|arsenal|manchester/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg football fan!! 😮", "messi ya ronaldo? don't say both 😂"] : ["messi or ronaldo?", "be honest 😂"],
+      f ? ["haha football wali? 😍", "favorite team kaunsi hai?"] : ["favorite team?", "premier league or la liga?"],
+    ]);
+  }
+
+  // Gaming
+  if (/pubg|bgmi|free fire|freefire|valorant|cod |fortnite|minecraft|gta|gaming|gamer|playstation|xbox|ps4|ps5/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg gamer?! 😮😍", "kaunsa game mostly?"] : ["gamer nice 🎮", "which game?"],
+      f ? ["haha gamer girl?! 😂", "solo ya team ke saath?"] : ["what rank?", "solo or squad?"],
+      f ? ["omg BGMI? 😮", "squad mein khelte ho?"] : ["squad or solo?", "what's your rank?"],
+    ]);
+  }
+
+  // Music / singing
+  if (/music|song|gaana|singer|playlist|rap|hiphop|lofi|arijit|atif|taylor|spotify|gaate|bajate/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg music person 🎵", "fav artist? arijit ya koi aur?"] : ["music nice 🎵", "fav artist?"],
+      f ? ["haha 🎵", "last song sunna konsa tha?"] : ["last song?", "what you listening to?"],
+      f ? ["oh music 🎵", "jo ek gaana baar baar suno bolo?"] : ["most replayed song rn?", "go on"],
+    ]);
+  }
+
+  // Movies / Netflix / shows
+  if (/movie|netflix|prime|hotstar|disney|ott|web series|series|show|dekh raha|dekh rahi|dekha|episode/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["haha binge watcher 🍿", "abhi kya dekh rahi ho?"] : ["binge watching?", "what show?"],
+      f ? ["omg kya dekha? 🍿", "recommend karo na kuch acha"] : ["recommend something good?", "what's worth watching?"],
+      f ? ["haha currently kya chal raha hai? 🍿", "movie ya series?"] : ["movie or series?", "which one?"],
+    ]);
+  }
+
+  // Studying / exam / college
+  if (/padhai|study|exam|test|assignment|college|university|class|lecture|btech|notes|result|marks/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["haha padhai wala pressure 😂", "konsa subject mushkil lagta hai?"] : ["exams?", "which subject is tough?"],
+      f ? ["omg exam? 😟", "kitna bacha hai prepare karna?"] : ["how much prep left?", "stressed?"],
+      f ? ["haha college life 😄", "hostel ya ghar se? 😄"] : ["hostel or home?", "college life?"],
+    ]);
+  }
+
+  // Job / work stress
+  if (/office|work|boss|meeting|deadline|project|salary|client|wfh|work from|job mein|kaam mein/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["haha office stress 😅", "boss strict hai kya?"] : ["boss strict?", "office life?"],
+      f ? ["omg deadline? 😅", "stress ho raha hoga yaar"] : ["deadline stress?", "how bad?"],
+      f ? ["wfh toh ghar mein bhi peace nahi 😂", "ghar wale distarb karte hai?"] : ["wfh struggles?", "family disturbances?"],
+    ]);
+  }
+
+  // Food mentioned specifically
+  if (/biryani|pizza|burger|maggi|chai|coffee|momo|butter chicken|paneer|noodles|sushi|dosa|idli|sandwich/.test(t)) {
+    persona.lastAsked = "continuation";
+    const food = t.match(/biryani|pizza|burger|maggi|chai|coffee|momo|butter chicken|paneer|noodles|sushi|dosa|idli|sandwich/)?.[0] ?? echo;
+    return rnd([
+      f ? [`omg ${food}? 😋`, "best kahan se milti hai?"] : [`${food}? solid 😋`, "where's the best?"],
+      f ? [`haha ${food} mention kiya 😄`, "kabhi saath khayenge shayad 🙈"] : [`${food} nice 😋`, "good choice"],
+      f ? [`${food}?? 😋`, "ghar pe banate ho ya bahar jaate ho?"] : [`${food} 😋`, "home or restaurant?"],
+    ]);
+  }
+
+  // Feeling tired / neend / thaka
+  if (/thaka|thaki|tired|neend|nind|so raha|so rahi|sone wala|so ja|thand|akela|bored|bore ho/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["aww 🥺", "kya hua? baat karo na mujhse"] : ["tired?", "what's up?"],
+      f ? ["haha raat ko phone pe ho 😂", "neend nahi aa rahi?"] : ["can't sleep?", "same energy sometimes"],
+      f ? ["aww yaar 🥺", "din kaisa tha?"] : ["rough day?", "what happened?"],
+    ]);
+  }
+
+  // Excited / happy / khush
+  if (/khush|happy|excited|maza|amazing|best day|badiya|great|awesome|wonderful|enjoying/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg kya hua?? 😄", "bolo bolo I love good news"] : ["what happened?", "good news?"],
+      f ? ["haha mood acha hai toh 😄", "kya special hua aaj?"] : ["what's got you in a good mood?", "good thing happened?"],
+      f ? ["aww nice 😊", "acha din tha aaj?"] : ["good day?", "what happened?"],
+    ]);
+  }
+
+  // Rain / weather / mausam
+  if (/barish|baarish|rain|raining|mausam|garmi|thand|cold|hot|weather|season/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg barish!! 🌧️", "chai pi rahi ho? 😄"] : ["rain?", "chai time?"],
+      f ? ["haha barish ka mausam 🌧️", "cozy lag raha hoga na?"] : ["rain vibes?", "cozy?"],
+      f ? ["thand mein bhi phone chal raha hai? 😂", "sweater nikalo"] : ["weather bad?", "stay warm?"],
+    ]);
+  }
+
+  // Single / relationship
+  if (/single|relationship|breakup|ex |ex-|boyfriend|girlfriend|pyaar mein|committed|dating|propose|crush/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["haha sach mein? 😊", "toh is app pe kya dhundh rahe ho? 👀"] : ["what are you looking for?", "serious or chill?"],
+      f ? ["omg interesting 😄", "last relationship kitne saal pehle tha?"] : ["how long single?", "any reason?"],
+      f ? ["haha honestly 😊", "is app pe serious ho ya timepass?"] : ["serious or timepass?", "honest answer?"],
+    ]);
+  }
+
+  // Family / ghar / parents / bhai / behen
+  if (/family|ghar mein|ghar pe|parents|papa|mama|mummy|bhai|behen|bhaiya|didi|ghar wale/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["haha ghar wale 😄", "strict hain kya?"] : ["strict parents?", "family type?"],
+      f ? ["aww family bonding 😊", "kitne log hain ghar mein?"] : ["big family?", "how many at home?"],
+      f ? ["haha sab ka yahi haal hai 😂", "sibling fights hote hain?"] : ["sibling fights?", "how many siblings?"],
+    ]);
+  }
+
+  // Travel / trip mentioned in passing
+  if (/gaya tha|gayi thi|trip gaye|travel kiya|ghumne|dekha tha|trip tha|gaya hun|gayi hun/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? ["omg trip?! 😍", "kahan gaye the?"] : ["trip?", "where?"],
+      f ? ["haha traveller types 😍", "best trip konsi rahi?"] : ["best trip so far?", "where to?"],
+    ]);
+  }
+
   // ── Context-aware replies ─────────────────────────────────────────────────
 
   switch (persona.lastAsked) {
