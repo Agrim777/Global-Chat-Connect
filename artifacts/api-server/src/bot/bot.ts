@@ -576,13 +576,13 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   // ── 2. Compute realistic typing delay ────────────────────────────────────
   let baseMs: number;
   if (persona.mood === "distracted") {
-    baseMs = 18000 + Math.random() * 42000;   // 18–60s (busy / away)
+    baseMs = 4000 + Math.random() * 4000;   // 4–8s (busy / away)
   } else if (wasSkipped) {
-    baseMs = 25000 + Math.random() * 65000;   // 25s–90s (finally saw it)
+    baseMs = 5000 + Math.random() * 7000;   // 5–12s (finally saw it)
   } else if (isLateNight) {
-    baseMs = 6000 + Math.random() * 10000;    // 6–16s (sleepy, slow)
+    baseMs = 2000 + Math.random() * 3000;   // 2–5s (sleepy, slow)
   } else {
-    baseMs = 2000 + Math.min(userText.length * 20, 2000) + Math.random() * 3000; // 2–7s
+    baseMs = 1000 + Math.min(userText.length * 10, 1500) + Math.random() * 2000; // 1–4.5s
   }
 
   await delay(baseMs);
@@ -594,7 +594,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   // ── 3. Real-life interruption prefix (10% chance) ─────────────────────────
   if (Math.random() < 0.10) {
     await bot.sendMessage(chatId, interruptionMsg(lang));
-    await delay(5000 + Math.random() * 7000); // 5–12s "away"
+    await delay(2000 + Math.random() * 2000); // 2–4s "away"
     const u2 = await getUser(userId);
     if (u2?.state !== "chatting" || u2.chattingWith !== FAKE_CHAT_ID) return;
   }
@@ -1212,6 +1212,13 @@ bot.on("message", async (msg) => {
           // Both still connected — relay the message
           try {
             if (msg.photo) {
+              // Payment screenshot check — notify admin even in real chat
+              if (!user.hasPaid && ADMIN_ID) {
+                const caption = `💰 *Payment screenshot!*\n\nUser: *${escMd(user.name)}* (${escMd(user.age)})\nID: \`${id}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\n\nRun: /grant ${id}`;
+                bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, { caption, parse_mode: "Markdown" }).catch(() => {});
+                await bot.sendMessage(chatId, "📸 *Screenshot received!* ✅\n\nOur team will verify and activate your account shortly 💕", { parse_mode: "Markdown" });
+                return;
+              }
               await bot.forwardMessage(recipientId, chatId, msg.message_id);
             } else if (text) {
               const safeName = escHtml(user.name ?? "Match");
