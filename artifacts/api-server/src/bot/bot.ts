@@ -1272,9 +1272,11 @@ bot.on("message", async (msg) => {
         const recipient = await getUser(recipientId);
         if (
           recipient?.state === "chatting" &&
-          recipient.chattingWith === id
+          recipient.chattingWith === id &&
+          recipient.chattingWith !== FAKE_CHAT_ID && // recipient must NOT be in AI fake chat
+          recipient.hasPaid // recipient must still be a paid user
         ) {
-          // Both still connected — relay the message
+          // Both still connected and both verified paid — relay the message
           try {
             if (msg.photo) {
               // Forward photo directly to partner
