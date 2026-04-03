@@ -413,9 +413,10 @@ function schedulePayReminder(chatId: number, userId: number, matchName?: string)
 
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
-async function sendPayGate(chatId: number) {
+async function sendPayGate(chatId: number, prefix?: string) {
   await bot.sendMessage(
     chatId,
+    (prefix ? `${prefix}\n\n` : ``) +
     `💎 *Go Premium — Unlock Full Access*\n\n` +
     `What you get:\n` +
     `✅ Unlimited real matches\n` +
@@ -485,8 +486,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await bot.sendMessage(chatId, "That's the end of your free trial.").catch(() => {});
-        await sendPayGate(chatId).catch(() => {});
+        await sendPayGate(chatId, "⏰ Your free trial has ended!").catch(() => {});
         schedulePayReminder(chatId, userId, persona?.name);
       } else if (u && !u.hasPaid) {
         await sendPayGate(chatId).catch(() => {});
@@ -700,22 +700,21 @@ async function stopChat(chatId: number, userId: number) {
       await db.update(usersTable)
         .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
         .where(eq(usersTable.id, partnerId));
-      await sendMain(partnerId, partner, "Your match ended the chat.");
-      // Show pay gate to partner too if they're unpaid and used their trial
+      // Unpaid partner who used their trial → show pay gate directly (one message)
       if (!partner.hasPaid && (partner.chatCount ?? 0) > 0) {
-        await delay(600);
         await sendPayGate(partnerId);
+      } else {
+        await sendMain(partnerId, partner, "Your match ended the chat.");
       }
     }
   }
 
   const updated = await getUser(userId);
-  await sendMain(chatId, updated!, "Chat ended.");
-
-  // Show pay gate to unpaid users who have used their free trial (fake or real)
+  // Unpaid users who've used their trial → skip sendMain, show pay gate directly
   if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
-    await delay(600);
     await sendPayGate(chatId);
+  } else {
+    await sendMain(chatId, updated!, "Chat ended.");
   }
 }
 
@@ -837,8 +836,7 @@ async function findMatch(chatId: number, userId: number) {
               const paidPartnerUpdated = await getUser(paidPartnerId);
               if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated, "Your match's free trial ended.").catch(() => {});
             }
-            await bot.sendMessage(unpaidChatId, "That's the end of your free trial.").catch(() => {});
-            await sendPayGate(unpaidChatId).catch(() => {});
+            await sendPayGate(unpaidChatId, "⏰ Your free trial has ended!").catch(() => {});
             schedulePayReminder(unpaidChatId, unpaidUserId);
           } else if (u && !u.hasPaid) {
             await sendPayGate(unpaidChatId).catch(() => {});
@@ -1020,9 +1018,8 @@ async function finishEditField(chatId: number, id: number) {
   editModeMap.delete(id);
   await upsertUser(id, { state: "idle" });
   const updated = await getUser(id);
-  await bot.sendMessage(chatId, "✅ Updated!", { reply_markup: { remove_keyboard: true } });
   await showProfile(chatId, updated!);
-  await sendMain(chatId, updated!);
+  await sendMain(chatId, updated!, "✅ Profile updated!");
 }
 
 // ── Message router ────────────────────────────────────────────────────────────
@@ -1074,8 +1071,7 @@ bot.on("message", async (msg) => {
       editModeMap.delete(id);
       await upsertUser(id, { state: "idle" });
       const fresh = await getUser(id);
-      await bot.sendMessage(chatId, "Cancelled.", { reply_markup: { remove_keyboard: true } });
-      await sendMain(chatId, fresh!);
+      await sendMain(chatId, fresh!, "Cancelled.");
       return;
     }
 
@@ -1224,9 +1220,8 @@ bot.on("message", async (msg) => {
       await upsertUser(id, { country, state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, "🎉 *Profile complete!* You're all set!", { parse_mode: "Markdown" });
       await showProfile(chatId, updated!);
-      await sendMain(chatId, updated!);
+      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set!");
       return;
     }
 
