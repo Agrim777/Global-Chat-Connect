@@ -56,6 +56,7 @@ interface FakePersona {
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
 const editModeMap   = new Map<number, string>();          // userId → edit field ("choosing"|"name"|"age"|"gender"|"looking_for"|"bio"|"country")
 const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat timer
+const processingSet = new Set<number>();                  // userId → currently processing message (prevents concurrent DB hammering)
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -962,6 +963,10 @@ bot.on("message", async (msg) => {
 
   if (text.startsWith("/")) return;
 
+  // Per-user lock — prevents concurrent DB hammering when user taps buttons rapidly
+  if (processingSet.has(id)) return;
+  processingSet.add(id);
+
   try {
     logger.info({ userId: id, text: text.slice(0, 40) }, "message received");
     let user = await getUser(id);
@@ -1193,11 +1198,10 @@ bot.on("message", async (msg) => {
           }
           return;
         }
-        try {
-          await fakeAutoReply(chatId, id, text ?? "");
-        } catch (fakeErr) {
-          logger.warn({ userId: id, fakeErr }, "fakeAutoReply error — ignoring");
-        }
+        // Fire-and-forget — releases the processing lock immediately, reply comes async
+        fakeAutoReply(chatId, id, text ?? "").catch(err =>
+          logger.warn({ userId: id, err }, "fakeAutoReply error")
+        );
         return;
       }
 
@@ -1305,21 +1309,19 @@ bot.on("message", async (msg) => {
     const errStack = err instanceof Error ? (err.stack ?? errMsg) : errMsg;
     logger.error({ userId: id, text: text.slice(0, 40), err }, "Message handler error");
     console.error(`[BOT ERROR] user=${id} text="${text.slice(0, 40)}" error=${errStack.slice(0, 500)}`);
-    // Restore the correct keyboard based on user's CURRENT state — never show the wrong menu
     try {
       const u = await getUser(id);
       if (u?.state === "chatting") {
-        // User is still in a chat — show Stop Chat button, not the main menu
         await bot.sendMessage(chatId, "Something went wrong. You're still in your chat.", {
           reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
         });
       } else if (u) {
         await sendMain(chatId, u);
       }
-      // If no user record, stay silent — they haven't started yet
-    } catch {
-      // Truly last resort — stay silent, don't send confusing messages
-    }
+    } catch { /* stay silent */ }
+  } finally {
+    // Always release the per-user lock
+    processingSet.delete(id);
   }
 });
 
@@ -1409,14 +1411,24 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
     await db.update(usersTable).set({ hasPaid: true, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
     await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})`);
 
-    // Notify the user
-    await bot.sendMessage(
-      targetId,
-      `🎉 Your premium is now active!\n\nThank you for your support 💕\nYou can now connect with real people worldwide. Tap Find Match to get started!`
-    ).catch(() => {});
-
     const updated = await getUser(targetId);
-    if (updated) await sendMain(targetId, updated).catch(() => {});
+    if (!updated) return;
+
+    if (updated.isProfileComplete) {
+      // Profile done — they can match immediately
+      await bot.sendMessage(
+        targetId,
+        `🎉 Your premium is now active!\n\nThank you for your support 💕\nYou can now connect with real people worldwide. Tap 💘 Find Match to get started!`
+      ).catch(() => {});
+      await sendMain(targetId, updated).catch(() => {});
+    } else {
+      // Profile incomplete — guide them to finish setup first
+      await bot.sendMessage(
+        targetId,
+        `🎉 Your premium is now active!\n\nThank you for your support 💕\nPlease complete your profile so we can find your match!`
+      ).catch(() => {});
+      await sendMain(targetId, updated).catch(() => {});
+    }
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`[GRANT ERROR] ${errMsg}`);
