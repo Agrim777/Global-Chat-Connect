@@ -738,138 +738,106 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
 // ── Find match ───────────────────────────────────────────────────────────────
 
 async function findMatch(chatId: number, userId: number) {
-  // Prevent this user from being picked as a match by someone else while we search
+  // Prevent this user from being picked as a match while we're searching
+  if (matchingSet.has(userId)) return;
   matchingSet.add(userId);
   try {
-  const me = await getUser(userId);
-  if (!me?.isProfileComplete) {
-    await bot.sendMessage(chatId, "Please complete your profile first! Tap *Setup Profile*.", { parse_mode: "Markdown" });
-    return;
-  }
-
-  // Ghost connection check — if chatting_with points to a deleted user, reset to idle
-  if (me.state === "chatting" && me.chattingWith && me.chattingWith !== FAKE_CHAT_ID) {
-    const partner = await getUser(me.chattingWith);
-    if (!partner) {
-      await db.update(usersTable)
-        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(eq(usersTable.id, userId));
-      me.state = "idle";
-      me.chattingWith = null;
+    const me = await getUser(userId);
+    if (!me?.isProfileComplete) {
+      await bot.sendMessage(chatId, "Please complete your profile first! Tap *Setup Profile*.", { parse_mode: "Markdown" });
+      return;
     }
-  }
 
-  if (me.state === "chatting") {
-    await bot.sendMessage(chatId, "You're already in a chat! Tap 🛑 Stop Chat to end it first.");
-    return;
-  }
+    // Ghost connection check — if chatting_with points to a deleted user, reset to idle
+    if (me.state === "chatting" && me.chattingWith && me.chattingWith !== FAKE_CHAT_ID) {
+      const partner = await getUser(me.chattingWith);
+      if (!partner) {
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, userId));
+        me.state = "idle";
+        me.chattingWith = null;
+      }
+    }
 
-  // After first free trial, require payment
-  if (me.chatCount > 0 && !me.hasPaid) {
-    await sendPayGate(chatId);
-    return;
-  }
+    if (me.state === "chatting") {
+      await bot.sendMessage(chatId, "You're already in a chat! Tap 🛑 Stop Chat to end it first.");
+      return;
+    }
 
-  // ── First-ever chat OR paid user: try real match first ───────
-  const eligible = await findEligibleUsers(me, userId);
-
-  if (eligible.length > 0) {
-    // Real human available — atomic match: only connect if match is still idle
-    const match = pickRandom(eligible);
-    const newCount = (me.chatCount ?? 0) + 1;
-    const matchNewCount = (match.chatCount ?? 0) + 1;
-
-    // Atomically claim the match — only succeeds if they are still idle
-    const claimed = await db.update(usersTable)
-      .set({ state: "chatting", chattingWith: userId, chatCount: matchNewCount, updatedAt: new Date() })
-      .where(and(eq(usersTable.id, match.id), eq(usersTable.state, "idle")))
-      .returning({ id: usersTable.id });
-
-    if (claimed.length === 0) {
-      // Someone else grabbed this match first — fall back to fake chat or retry message
-      if (me.hasPaid) {
-        await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-          reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
-        });
+    // ── FREE USERS: AI chat ONLY — never touch real user pool ──────────────
+    if (!me.hasPaid) {
+      if (me.chatCount > 0) {
+        // Already used free trial — require payment
+        await sendPayGate(chatId);
       } else {
+        // First ever chat — AI demo only
         await startFakeChat(chatId, userId, me.lookingFor);
       }
       return;
     }
 
-    // Match claimed — now connect our side
-    await db.update(usersTable)
-      .set({ state: "chatting", chattingWith: match.id, chatCount: newCount, updatedAt: new Date() })
-      .where(eq(usersTable.id, userId));
+    // ── PAID USERS: find a real match ─────────────────────────────────────
+    const eligible = await findEligibleUsers(me, userId);
 
+    if (eligible.length === 0) {
+      await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
+        reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+      });
+      return;
+    }
+
+    const match = pickRandom(eligible);
+    const newCount      = (me.chatCount    ?? 0) + 1;
+    const matchNewCount = (match.chatCount ?? 0) + 1;
+
+    // ── Atomic transaction: claim BOTH users at once ──────────────────────
+    // If either is no longer idle (grabbed by another concurrent findMatch),
+    // the whole transaction rolls back — preventing double connections.
+    let connected = false;
+    try {
+      await db.transaction(async (tx) => {
+        const selfClaimed = await tx.update(usersTable)
+          .set({ state: "chatting", chattingWith: match.id, chatCount: newCount, updatedAt: new Date() })
+          .where(and(eq(usersTable.id, userId), eq(usersTable.state, "idle")))
+          .returning({ id: usersTable.id });
+        if (selfClaimed.length === 0) throw new Error("self_taken");
+
+        const matchClaimed = await tx.update(usersTable)
+          .set({ state: "chatting", chattingWith: userId, chatCount: matchNewCount, updatedAt: new Date() })
+          .where(and(eq(usersTable.id, match.id), eq(usersTable.state, "idle")))
+          .returning({ id: usersTable.id });
+        if (matchClaimed.length === 0) throw new Error("match_taken");
+
+        connected = true;
+      });
+    } catch {
+      // Transaction rolled back — someone else grabbed one of the users first
+      await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
+        reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+      });
+      return;
+    }
+
+    if (!connected) return;
+
+    // Both claimed — send ONE match message each
     const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
     await bot.sendMessage(chatId,
-      me.hasPaid
-        ? `Match found. You're now connected with ${match.name}, ${match.age}. Say hello.`
-        : `Match found. You're connected with ${match.name}, ${match.age}. You have a short free trial to chat.`,
-      { reply_markup: stopKb }
+      `✅ Match found! You're now connected with *${match.name}*, ${match.age}. Say hello! 👋`,
+      { parse_mode: "Markdown", reply_markup: stopKb }
     );
     await bot.sendMessage(match.id,
-      `Match found. You're now connected with ${me.name}, ${me.age}. Say hello.`,
-      { reply_markup: stopKb }
+      `✅ Match found! You're now connected with *${me.name}*, ${me.age}. Say hello! 👋`,
+      { parse_mode: "Markdown", reply_markup: stopKb }
     );
 
-    // If either side is unpaid, enforce the free trial timer
-    const unpaidUserId   = !me.hasPaid    ? userId   : (!match.hasPaid ? match.id : null);
-    const unpaidChatId   = !me.hasPaid    ? chatId   : (!match.hasPaid ? match.id : null);
-    const paidPartnerId  = !me.hasPaid    ? match.id : (!match.hasPaid ? userId   : null);
-
-    if (unpaidUserId !== null && unpaidChatId !== null) {
-      const timer = setTimeout(async () => {
-        try {
-          chatTimerMap.delete(unpaidUserId);
-          const u = await getUser(unpaidUserId);
-          if (u?.state === "chatting" && !u.hasPaid) {
-            // Disconnect both users
-            await db.update(usersTable)
-              .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-              .where(eq(usersTable.id, unpaidUserId));
-            if (paidPartnerId) {
-              await db.update(usersTable)
-                .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-                .where(eq(usersTable.id, paidPartnerId));
-              const paidPartnerUpdated = await getUser(paidPartnerId);
-              if (paidPartnerUpdated) await sendMain(paidPartnerId, paidPartnerUpdated, "Your match's free trial ended.").catch(() => {});
-            }
-            await sendPayGate(unpaidChatId, "⏰ Your free trial has ended!").catch(() => {});
-            schedulePayReminder(unpaidChatId, unpaidUserId);
-          } else if (u && !u.hasPaid) {
-            await sendPayGate(unpaidChatId).catch(() => {});
-            schedulePayReminder(unpaidChatId, unpaidUserId);
-          }
-        } catch (err) {
-          logger.error({ err }, "Free-trial timer error (real chat)");
-          console.error(`[TIMER ERROR] real chat: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }, FREE_CHAT_DURATION_MS);
-      chatTimerMap.set(unpaidUserId, timer);
-    }
-    return;
-  }
-
-  // ── No real users available ───────────────────────────────────────────────
-  if (me.hasPaid) {
-    // Paid user — no one online right now
-    await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-      reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
-    });
-    return;
-  }
-
-  // First-timer, no real users — use fake chat as fallback
-  await startFakeChat(chatId, userId, me.lookingFor);
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger.error({ err }, "findMatch error");
     console.error(`[FINDMATCH ERROR] user=${userId} error=${errMsg}`);
     await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
   } finally {
-    // Always release the matching lock so this user can be matched again
     matchingSet.delete(userId);
   }
 }
