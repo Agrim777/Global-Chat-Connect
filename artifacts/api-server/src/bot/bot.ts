@@ -57,6 +57,7 @@ const editModeMap   = new Map<number, string>();          // userId → edit fie
 const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat timer
 const processingSet = new Set<number>();                  // userId → currently processing message (prevents concurrent DB hammering)
 const matchingSet   = new Set<number>();                  // userId → currently inside findMatch (prevents race condition in pairing)
+const fakeReplySet  = new Set<number>();                  // userId → fakeAutoReply in flight (prevents double AI replies on rapid messages)
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -595,6 +596,11 @@ function callbackReply(lastMsg: string, lang: "hindi" | "hinglish" | "english"):
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
+  // Prevent double AI replies when user types faster than reply arrives
+  if (fakeReplySet.has(userId)) return;
+  fakeReplySet.add(userId);
+
+  try {
   const persona = fakePersonaMap.get(userId);
   if (!persona) return;
 
@@ -643,6 +649,9 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
 
   // Remember last message for future callbacks
   persona.lastUserMsg = userText;
+  } finally {
+    fakeReplySet.delete(userId);
+  }
 }
 
 // ── Stop chat ────────────────────────────────────────────────────────────────
@@ -1329,7 +1338,6 @@ bot.on("message", async (msg) => {
     if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
     if (text === "👤 My Profile") {
       await showProfile(chatId, user);
-      await sendMain(chatId, user);
       return;
     }
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
@@ -1470,19 +1478,15 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
     if (!updated) return;
 
     if (updated.isProfileComplete) {
-      // Profile done — they can match immediately
-      await bot.sendMessage(
-        targetId,
-        `🎉 Your premium is now active!\n\nThank you for your support 💕\nYou can now connect with real people worldwide. Tap 💘 Find Match to get started!`
+      // Profile done — one message with menu buttons
+      await sendMain(targetId, updated,
+        `🎉 Your premium is now active!\n\nThank you for your support 💕\nTap 💘 Find Match to connect with real people worldwide!`
       ).catch(() => {});
-      await sendMain(targetId, updated).catch(() => {});
     } else {
       // Profile incomplete — guide them to finish setup first
-      await bot.sendMessage(
-        targetId,
+      await sendMain(targetId, updated,
         `🎉 Your premium is now active!\n\nThank you for your support 💕\nPlease complete your profile so we can find your match!`
       ).catch(() => {});
-      await sendMain(targetId, updated).catch(() => {});
     }
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
