@@ -675,15 +675,25 @@ async function stopChat(chatId: number, userId: number) {
 async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number) {
   // Unpaid users never get real matches — always fake chat only
   if (!me.hasPaid) return [];
-  const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
+
+  // Fetch only idle, complete, paid users from the DB (not a full table scan)
+  const candidates = await db.select().from(usersTable).where(
+    and(
+      eq(usersTable.isProfileComplete, true),
+      eq(usersTable.hasPaid, true),
+      eq(usersTable.state, "idle")
+    )
+  );
+
   return candidates.filter((c) => {
-    if (c.id === userId || !c.isActive || c.state === "chatting") return false;
-    if (!c.hasPaid) return false;
+    if (c.id === userId) return false;
+    if (!c.isActive) return false;
     // Exclude users already inside findMatch (race condition guard)
     if (matchingSet.has(c.id)) return false;
-    if (me.hasPaid) return true;
-    return (me.lookingFor === "any" || me.lookingFor === c.gender) &&
-           (c.lookingFor === "any" || c.lookingFor === me.gender);
+    // Gender preference — both sides must want each other
+    const meWantsC = !me.lookingFor || me.lookingFor === "any" || me.lookingFor === c.gender;
+    const cWantsMe = !c.lookingFor  || c.lookingFor  === "any" || c.lookingFor  === me.gender;
+    return meWantsC && cWantsMe;
   });
 }
 
@@ -1368,8 +1378,18 @@ bot.onText(/\/edit/, async (msg) => {
   if (u?.isProfileComplete) { await startEditProfile(msg.chat.id, msg.from!.id); return; }
   await startSetup(msg.chat.id, msg.from!.id);
 });
-bot.onText(/\/match/, async (msg) => { await findMatch(msg.chat.id, msg.from!.id); });
-bot.onText(/\/stop/, async (msg) => { await stopChat(msg.chat.id, msg.from!.id); });
+bot.onText(/\/match/, async (msg) => {
+  const id = msg.from!.id;
+  if (processingSet.has(id)) return;
+  processingSet.add(id);
+  try { await findMatch(msg.chat.id, id); } finally { processingSet.delete(id); }
+});
+bot.onText(/\/stop/, async (msg) => {
+  const id = msg.from!.id;
+  if (processingSet.has(id)) return;
+  processingSet.add(id);
+  try { await stopChat(msg.chat.id, id); } finally { processingSet.delete(id); }
+});
 
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
 
