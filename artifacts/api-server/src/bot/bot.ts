@@ -389,6 +389,27 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     ? ["hmm 🤔", "wait really?", "haha go on"]
     : ["hmm 🤔", "wait really?", "okay and?"]));
 }
+// ── 5-minute pay reminder after free trial ends ───────────────────────────────
+const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha"];
+
+function schedulePayReminder(chatId: number, userId: number, matchName?: string) {
+  const girl = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
+  setTimeout(async () => {
+    try {
+      const u = await getUser(userId);
+      if (!u || u.hasPaid) return; // already paid — skip
+      await bot.sendMessage(
+        chatId,
+        `💌 Hey! *${girl}* is still waiting for you...\n\n` +
+        `She really enjoyed your chat and wants to keep talking to you! 😍\n\n` +
+        `Don't keep her waiting — unlock *Premium* and continue your conversation right now!\n\n` +
+        `👉 ${PAY_LINK}`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    } catch { /* silent */ }
+  }, 5 * 60 * 1000); // 5 minutes
+}
+
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
 async function sendPayGate(chatId: number) {
@@ -455,6 +476,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
   const timer = setTimeout(async () => {
     try {
       chatTimerMap.delete(userId);
+      const persona = fakePersonaMap.get(userId);
       fakePersonaMap.delete(userId);
       const u = await getUser(userId);
       // End chat if still active (check state, don't rely on chattingWith === 0)
@@ -464,8 +486,10 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
           .where(eq(usersTable.id, userId));
         await bot.sendMessage(chatId, "That's the end of your free trial.").catch(() => {});
         await sendPayGate(chatId).catch(() => {});
+        schedulePayReminder(chatId, userId, persona?.name);
       } else if (u && !u.hasPaid) {
         await sendPayGate(chatId).catch(() => {});
+        schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
       logger.error({ err }, "Free-trial timer error (fake chat)");
@@ -782,8 +806,10 @@ async function findMatch(chatId: number, userId: number) {
             }
             await bot.sendMessage(unpaidChatId, "That's the end of your free trial.").catch(() => {});
             await sendPayGate(unpaidChatId).catch(() => {});
+            schedulePayReminder(unpaidChatId, unpaidUserId);
           } else if (u && !u.hasPaid) {
             await sendPayGate(unpaidChatId).catch(() => {});
+            schedulePayReminder(unpaidChatId, unpaidUserId);
           }
         } catch (err) {
           logger.error({ err }, "Free-trial timer error (real chat)");
