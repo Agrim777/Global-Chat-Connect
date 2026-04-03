@@ -975,13 +975,12 @@ async function startEditProfile(chatId: number, id: number) {
   );
 }
 
-// Finish an edit-mode update — return user to idle with their profile shown
+// Finish an edit-mode update — return user to idle with one combined message
 async function finishEditField(chatId: number, id: number) {
   editModeMap.delete(id);
   await upsertUser(id, { state: "idle" });
   const updated = await getUser(id);
-  await showProfile(chatId, updated!);
-  await sendMain(chatId, updated!, "✅ Profile updated!");
+  await sendMain(chatId, updated!, "✅ Profile updated! Tap 👤 My Profile to view it.");
 }
 
 // ── Message router ────────────────────────────────────────────────────────────
@@ -1182,8 +1181,7 @@ bot.on("message", async (msg) => {
       await upsertUser(id, { country, state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await showProfile(chatId, updated!);
-      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set!");
+      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set — tap 👤 My Profile to see it.");
       return;
     }
 
