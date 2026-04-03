@@ -1926,9 +1926,16 @@ bot.onText(/\/broadcast/, async (msg) => {
     return msgs[Math.floor(Math.random() * msgs.length)];
   }
 
-  await bot.sendMessage(chatId, "📡 Fetching unpaid users...");
+  await bot.sendMessage(chatId, "📡 Fetching unpaid users from production...");
 
-  const targets = await db.select({ id: usersTable.id })
+  // Use Railway production DB directly so broadcast reaches real users
+  const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
+  const { Pool: PgPool } = await import("pg").then(m => m.default ?? m) as { Pool: typeof import("pg").Pool };
+  const prodPool = new PgPool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 3 });
+  const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
+  const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
+
+  const targets = await prodDb.select({ id: usersTable.id })
     .from(usersTable)
     .where(
       and(
@@ -1959,6 +1966,7 @@ bot.onText(/\/broadcast/, async (msg) => {
     await sleep(80);
   }
 
+  await prodPool.end().catch(() => {});
   await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`);
 });
 
