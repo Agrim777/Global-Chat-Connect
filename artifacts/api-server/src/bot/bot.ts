@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -57,6 +57,7 @@ const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
 const editModeMap   = new Map<number, string>();          // userId → edit field ("choosing"|"name"|"age"|"gender"|"looking_for"|"bio"|"country")
 const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat timer
 const processingSet = new Set<number>();                  // userId → currently processing message (prevents concurrent DB hammering)
+const matchingSet   = new Set<number>();                  // userId → currently inside findMatch (prevents race condition in pairing)
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -726,8 +727,9 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
   const candidates = await db.select().from(usersTable).where(eq(usersTable.isProfileComplete, true));
   return candidates.filter((c) => {
     if (c.id === userId || !c.isActive || c.state === "chatting") return false;
-    // Only paid users can be matched with paid users
     if (!c.hasPaid) return false;
+    // Exclude users already inside findMatch (race condition guard)
+    if (matchingSet.has(c.id)) return false;
     if (me.hasPaid) return true;
     return (me.lookingFor === "any" || me.lookingFor === c.gender) &&
            (c.lookingFor === "any" || c.lookingFor === me.gender);
@@ -737,14 +739,29 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
 // ── Find match ───────────────────────────────────────────────────────────────
 
 async function findMatch(chatId: number, userId: number) {
+  // Prevent this user from being picked as a match by someone else while we search
+  matchingSet.add(userId);
   try {
   const me = await getUser(userId);
   if (!me?.isProfileComplete) {
     await bot.sendMessage(chatId, "Please complete your profile first! Tap *Setup Profile*.", { parse_mode: "Markdown" });
     return;
   }
+
+  // Ghost connection check — if chatting_with points to a deleted user, reset to idle
+  if (me.state === "chatting" && me.chattingWith && me.chattingWith !== FAKE_CHAT_ID) {
+    const partner = await getUser(me.chattingWith);
+    if (!partner) {
+      await db.update(usersTable)
+        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(eq(usersTable.id, userId));
+      me.state = "idle";
+      me.chattingWith = null;
+    }
+  }
+
   if (me.state === "chatting") {
-    await bot.sendMessage(chatId, "You're already in a chat! Send /stop to end it first.");
+    await bot.sendMessage(chatId, "You're already in a chat! Tap 🛑 Stop Chat to end it first.");
     return;
   }
 
@@ -758,17 +775,33 @@ async function findMatch(chatId: number, userId: number) {
   const eligible = await findEligibleUsers(me, userId);
 
   if (eligible.length > 0) {
-    // Real human available — connect them
+    // Real human available — atomic match: only connect if match is still idle
     const match = pickRandom(eligible);
     const newCount = (me.chatCount ?? 0) + 1;
-
     const matchNewCount = (match.chatCount ?? 0) + 1;
+
+    // Atomically claim the match — only succeeds if they are still idle
+    const claimed = await db.update(usersTable)
+      .set({ state: "chatting", chattingWith: userId, chatCount: matchNewCount, updatedAt: new Date() })
+      .where(and(eq(usersTable.id, match.id), eq(usersTable.state, "idle")))
+      .returning({ id: usersTable.id });
+
+    if (claimed.length === 0) {
+      // Someone else grabbed this match first — fall back to fake chat or retry message
+      if (me.hasPaid) {
+        await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
+          reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+        });
+      } else {
+        await startFakeChat(chatId, userId, me.lookingFor);
+      }
+      return;
+    }
+
+    // Match claimed — now connect our side
     await db.update(usersTable)
       .set({ state: "chatting", chattingWith: match.id, chatCount: newCount, updatedAt: new Date() })
       .where(eq(usersTable.id, userId));
-    await db.update(usersTable)
-      .set({ state: "chatting", chattingWith: userId, chatCount: matchNewCount, updatedAt: new Date() })
-      .where(eq(usersTable.id, match.id));
 
     const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
     await bot.sendMessage(chatId,
@@ -837,6 +870,9 @@ async function findMatch(chatId: number, userId: number) {
     logger.error({ err }, "findMatch error");
     console.error(`[FINDMATCH ERROR] user=${userId} error=${errMsg}`);
     await bot.sendMessage(chatId, "Couldn't find a match right now. Please try again in a moment.").catch(() => {});
+  } finally {
+    // Always release the matching lock so this user can be matched again
+    matchingSet.delete(userId);
   }
 }
 
@@ -858,11 +894,22 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         state: "idle",
       });
     } else if (user.state === "chatting") {
-      // User is in a chat — remind them and show the Stop Chat button
-      await bot.sendMessage(chatId, "You're currently in a chat! Send messages to your match, or tap the button below to stop.", {
-        reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
-      });
-      return;
+      // Check for ghost connection — partner may have been deleted
+      const ghostPartner = user.chattingWith && user.chattingWith !== FAKE_CHAT_ID
+        ? await getUser(user.chattingWith) : true; // fake chat is always "valid"
+      if (!ghostPartner) {
+        // Partner deleted — reset this user to idle silently
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, id));
+        user = await getUser(id) ?? user;
+      } else {
+        // Genuine active chat — remind them
+        await bot.sendMessage(chatId, "You're currently in a chat! Send messages to your match, or tap the button below to stop.", {
+          reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
+        });
+        return;
+      }
     } else if (user.state !== "idle") {
       // Stuck in a setup step — /start always resets to idle
       await db.update(usersTable)
