@@ -1456,13 +1456,11 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
       return;
     }
 
-    let target = await getUser(targetId);
+    const target = await getUser(targetId);
 
     if (!target) {
-      // User hasn't started the bot yet — pre-create them as paid
-      await db.insert(usersTable).values({ id: targetId, hasPaid: true, state: "idle", isProfileComplete: false })
-        .onConflictDoUpdate({ target: usersTable.id, set: { hasPaid: true, updatedAt: new Date() } });
-      await bot.sendMessage(chatId, `✅ Premium pre-granted to user ${targetId}. They'll have access when they start the bot.`);
+      // User not in DB — refuse to create phantom records
+      await bot.sendMessage(chatId, `❌ User ${targetId} not found. They must start the bot first before premium can be granted.`);
       return;
     }
 
@@ -1570,12 +1568,22 @@ setupBotProfile();
     const allChatting = await db.select().from(usersTable).where(eq(usersTable.state, "chatting"));
     let fixed = 0;
 
+    // Helper: reset a user to idle in DB then push a fresh Telegram keyboard
+    // so their client doesn't show a stale "✅ Premium" or "🛑 Stop Chat" keyboard
+    const resetAndNotify = async (u: typeof allChatting[number], reason: string) => {
+      await db.update(usersTable)
+        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(eq(usersTable.id, u.id));
+      const fresh = await getUser(u.id);
+      if (fresh) {
+        await sendMain(u.id, fresh, `ℹ️ ${reason}`).catch(() => {}); // best-effort
+      }
+    };
+
     for (const u of allChatting) {
       // 1. Fake-chat ghost (in-memory persona lost on restart) — reset free user
       if (!u.chattingWith || u.chattingWith === FAKE_CHAT_ID) {
-        await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(eq(usersTable.id, u.id));
+        await resetAndNotify(u, "Your previous chat session ended. Tap 💘 Find Match to start a new one!");
         fixed++;
         continue;
       }
@@ -1583,12 +1591,15 @@ setupBotProfile();
       // 2. Unpaid user connected to a real user — force-disconnect both
       if (!u.hasPaid) {
         logger.warn({ userId: u.id, partnerId: u.chattingWith }, "Startup: disconnecting unpaid user from real chat");
-        await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(eq(usersTable.id, u.id));
-        await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(and(eq(usersTable.id, u.chattingWith), eq(usersTable.chattingWith, u.id)));
+        await resetAndNotify(u, "Chat session ended.");
+        const partner = await getUser(u.chattingWith);
+        if (partner) {
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(and(eq(usersTable.id, u.chattingWith), eq(usersTable.chattingWith, u.id)));
+          const freshPartner = await getUser(u.chattingWith);
+          if (freshPartner) await sendMain(u.chattingWith, freshPartner, "ℹ️ Chat session ended.").catch(() => {});
+        }
         fixed++;
         continue;
       }
@@ -1597,9 +1608,7 @@ setupBotProfile();
       const partner = await getUser(u.chattingWith);
       if (!partner || partner.state !== "chatting" || partner.chattingWith !== u.id) {
         logger.warn({ userId: u.id, partnerId: u.chattingWith }, "Startup: clearing ghost connection (partner missing or mismatched)");
-        await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(eq(usersTable.id, u.id));
+        await resetAndNotify(u, "Your match is no longer available. Tap 💘 Find Match to connect with someone new!");
         fixed++;
       }
     }
