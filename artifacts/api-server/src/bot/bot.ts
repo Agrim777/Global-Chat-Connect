@@ -1270,13 +1270,7 @@ bot.on("message", async (msg) => {
           // Both still connected — relay the message
           try {
             if (msg.photo) {
-              // Payment screenshot check — notify admin even in real chat
-              if (!user.hasPaid && ADMIN_ID) {
-                const caption = `💰 *Payment screenshot!*\n\nUser: *${escMd(user.name)}* (${escMd(user.age)})\nID: \`${id}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\n\nRun: /grant ${id}`;
-                bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, { caption, parse_mode: "Markdown" }).catch(() => {});
-                await bot.sendMessage(chatId, "📸 *Screenshot received!* ✅\n\nOur team will verify and activate your account shortly 💕", { parse_mode: "Markdown" });
-                return;
-              }
+              // Forward photo directly to partner
               await bot.forwardMessage(recipientId, chatId, msg.message_id);
             } else if (text) {
               const safeName = escHtml(user.name ?? "Match");
@@ -1284,7 +1278,7 @@ bot.on("message", async (msg) => {
               await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${safeText}`, { parse_mode: "HTML" });
             }
           } catch (relayErr) {
-            // Partner has blocked the bot or is unreachable — end the chat gracefully
+            // Partner has blocked the bot or is unreachable — reset both and notify each
             logger.warn({ recipientId, relayErr }, "Relay failed — ending chat");
             await db.update(usersTable)
               .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
@@ -1294,6 +1288,9 @@ bot.on("message", async (msg) => {
               .where(eq(usersTable.id, recipientId));
             const fresh = await getUser(id);
             if (fresh) await sendMain(chatId, fresh, "Your match is no longer reachable. Chat ended.");
+            // Best-effort notify recipient — may fail if they blocked the bot
+            const freshRecipient = await getUser(recipientId).catch(() => null);
+            if (freshRecipient) await sendMain(recipientId, freshRecipient, "Your match is no longer reachable. Chat ended.").catch(() => {});
           }
         } else {
           // Stale connection — clean up and return to menu
