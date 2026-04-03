@@ -219,11 +219,35 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
 
   // ── Special topic overrides (checked first regardless of context) ─────────
 
-  if (/tera naam|tumhara naam|your name|naam kya|who are you|what.?s your name|aap ka naam|apna naam/.test(t)) {
-    persona.lastAsked = "job";
-    if (lang === "hindi")    return two(`${persona.name} hun 😊`, "tum batao apna?");
-    if (lang === "hinglish") return two(`${persona.name} 😊`, "tum? and kahan se?");
-    return f ? two(`${persona.name} 🙈`, "you? where you from?") : two(persona.name, "yours?");
+  // ── Name question — catch every way someone asks (not "mera naam X hai") ──
+  if (/tera naam|apna naam|naam bata|naam batao|naam kya|kya naam|your name|what.?s your name|call you|who are you|kaun ho|naam bolo|name kya|naam bolo/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? [`${persona.name} 😊`, "tum batao apna naam?"] : [`${persona.name}`, "yours?"],
+      f ? [`haha main ${persona.name} hun 🙈`, "tum?"] : [`${persona.name} here`, "you?"],
+      f ? [`${persona.name}! 😄`, "kyon? yaad rakhoge? 😄"] : [`${persona.name}`, "remember it 😄"],
+    ]);
+  }
+
+  // ── Gender question — AI answers based on persona's actual gender ─────────
+  // e.g. "m or f", "male or female", "girl or boy", "ladki ho ya ladka"
+  if (/\b(m or f|m\/f|male or female|girl or boy|ladki ho|ladka ho|ladki hai|girl hai|boy hai|female ho|male ho|tum girl|you girl|are you girl|are you female|are you male|aap ladki|aap ladka|m ya f|f ya m|boy ya girl|girl ya boy)\b/.test(t)
+    || /^[mfMF]\??$/.test(t.trim())) {
+    persona.lastAsked = "continuation";
+    if (f) {
+      return rnd([
+        ["f 😊", "tum?"],
+        ["female hun 🙈", "aur tum?"],
+        ["girl hun obviously 😄", "kyon pooch raha tha?"],
+        ["haha f 😊", "tum M ho na?"],
+      ]);
+    } else {
+      return rnd([
+        ["m 😊", "tum?"],
+        ["male hun", "aur tum?"],
+        ["boy hun 😄", "tum?"],
+      ]);
+    }
   }
 
   if (/kitne saal|umar|how old|your age|age kya|tumhari umar|teri umar/.test(t)) {
