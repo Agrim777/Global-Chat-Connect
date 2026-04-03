@@ -49,7 +49,6 @@ interface FakePersona {
   lastAsked: string;
   mood: Mood;
   msgCount: number;          // total messages received
-  pendingSkip: boolean;      // if we skipped the last message
   lastUserMsg: string;       // last thing user said (for callbacks)
   callbackUsed: boolean;     // already done a callback this convo
 }
@@ -452,7 +451,6 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     lastAsked: openerObj.lastAsked,
     mood: "neutral",
     msgCount: 0,
-    pendingSkip: false,
     lastUserMsg: "",
     callbackUsed: false,
   });
@@ -582,91 +580,45 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   if (!persona) return;
 
   const lang = detectLang(userText);
-  const hour = istHour();
-  const isLateNight = hour >= 23 || hour < 5; // 11pm–5am IST
 
   // Update persona state
   persona.msgCount++;
   shiftMood(persona);
 
-  // ── 1. Skip this message silently (8% chance, never twice in a row) ──────
-  if (!persona.pendingSkip && Math.random() < 0.08) {
-    persona.pendingSkip = true;
-    persona.lastUserMsg = userText;
-    return; // "seen" but no reply yet
-  }
-
-  const wasSkipped = persona.pendingSkip;
-  persona.pendingSkip = false;
-
-  // ── 2. Compute realistic typing delay ────────────────────────────────────
-  let baseMs: number;
-  if (persona.mood === "distracted") {
-    baseMs = 4000 + Math.random() * 4000;   // 4–8s (busy / away)
-  } else if (wasSkipped) {
-    baseMs = 5000 + Math.random() * 7000;   // 5–12s (finally saw it)
-  } else if (isLateNight) {
-    baseMs = 2000 + Math.random() * 3000;   // 2–5s (sleepy, slow)
-  } else {
-    baseMs = 1000 + Math.min(userText.length * 10, 1500) + Math.random() * 2000; // 1–4.5s
-  }
-
+  // ── 1. Fast, natural typing delay (0.4 – 1.6s) ───────────────────────────
+  // Keep it snappy — free trial is only 60 seconds
+  const baseMs = 400 + Math.min(userText.length * 8, 600) + Math.random() * 600;
   await delay(baseMs);
 
   // Guard: user may have left during delay
   const u = await getUser(userId);
   if (u?.state !== "chatting" || u.chattingWith !== FAKE_CHAT_ID) return;
 
-  // ── 3. Real-life interruption prefix (10% chance) ─────────────────────────
-  if (Math.random() < 0.10) {
-    await bot.sendMessage(chatId, interruptionMsg(lang));
-    await delay(2000 + Math.random() * 2000); // 2–4s "away"
-    const u2 = await getUser(userId);
-    if (u2?.state !== "chatting" || u2.chattingWith !== FAKE_CHAT_ID) return;
-  }
-
-  // ── 4. Callback to earlier message (5% chance, once per convo) ───────────
-  if (!persona.callbackUsed && persona.msgCount > 4 && Math.random() < 0.05) {
+  // ── 2. Callback to earlier message (5% chance, once per convo) ───────────
+  if (!persona.callbackUsed && persona.msgCount > 3 && Math.random() < 0.05) {
     const cb = callbackReply(persona.lastUserMsg, lang);
     if (cb) {
       persona.callbackUsed = true;
       await bot.sendMessage(chatId, cb[0]);
-      await delay(800 + Math.random() * 700);
+      await delay(300 + Math.random() * 300);
     }
   }
 
-  // ── 5. Build main reply ───────────────────────────────────────────────────
+  // ── 3. Build main reply ───────────────────────────────────────────────────
   let parts: string[];
 
-  if (persona.mood === "annoyed" || (persona.mood === "distracted" && Math.random() < 0.55)) {
-    // Low-engagement dry reply
+  if (persona.mood === "annoyed") {
     parts = dryReply(lang);
   } else {
     parts = buildSmartReply(userText, persona);
   }
 
-  // ── 6. Late-night: collapse to single short reply ─────────────────────────
-  if (isLateNight && parts.length > 1 && Math.random() < 0.55) {
-    parts = [parts[0]];
-  }
+  // ── 4. Soft typos (casual feel, no self-correction) ──────────────────────
+  parts = parts.map(p => Math.random() < 0.18 ? applyTypos(p) : p);
 
-  // ── 7. Typo + self-correction sequence (12% chance) ──────────────────────
-  if (parts.length > 0 && Math.random() < 0.12) {
-    const typoVer = applyTypos(parts[0]);
-    if (typoVer !== parts[0]) {
-      await bot.sendMessage(chatId, typoVer);
-      await delay(900 + Math.random() * 700);
-      await bot.sendMessage(chatId, "*" + parts[0]); // WA-style correction
-      parts = parts.slice(1);
-    }
-  } else {
-    // Apply soft typos to any part (no correction, just casual)
-    parts = parts.map(p => Math.random() < 0.20 ? applyTypos(p) : p);
-  }
-
-  // ── 8. Send parts one by one with realistic inter-message gap ────────────
+  // ── 5. Send parts quickly one by one ─────────────────────────────────────
   for (let i = 0; i < parts.length; i++) {
-    if (i > 0) await delay(600 + Math.random() * 1000);
+    if (i > 0) await delay(300 + Math.random() * 400);
     await bot.sendMessage(chatId, parts[i]);
   }
 
