@@ -800,9 +800,9 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   persona.msgCount++;
   shiftMood(persona);
 
-  // ── 1. Fast, natural typing delay (0.3 – 0.9s) ───────────────────────────
-  // Keep it snappy — free trial is only 30 seconds
-  const baseMs = 300 + Math.min(userText.length * 4, 300) + Math.random() * 300;
+  // ── 1. Human-like typing delay (1.5 – 4s) ────────────────────────────────
+  // Longer messages take more time to "read & type back"
+  const baseMs = 1500 + Math.min(userText.length * 30, 1500) + Math.random() * 1000;
   await delay(baseMs);
 
   // Guard: user may have left during delay
@@ -815,7 +815,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     if (cb) {
       persona.callbackUsed = true;
       await bot.sendMessage(chatId, cb[0]);
-      await delay(300 + Math.random() * 300);
+      await delay(1000 + Math.random() * 800);
     }
   }
 
@@ -831,9 +831,9 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   // ── 4. Soft typos (casual feel, no self-correction) ──────────────────────
   parts = parts.map(p => Math.random() < 0.18 ? applyTypos(p) : p);
 
-  // ── 5. Send parts quickly one by one ─────────────────────────────────────
+  // ── 5. Send parts one by one with human-like gap ─────────────────────────
   for (let i = 0; i < parts.length; i++) {
-    if (i > 0) await delay(300 + Math.random() * 400);
+    if (i > 0) await delay(1000 + Math.random() * 1200);
     await bot.sendMessage(chatId, parts[i]);
   }
 
