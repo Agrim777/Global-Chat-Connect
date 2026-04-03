@@ -1,6 +1,12 @@
 import { Router } from "express";
-import { db, usersTable } from "@workspace/db";
+import pg from "pg";
 import { eq, and, gt } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { usersTable } from "@workspace/db";
+
+const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
+const prodPool = new pg.Pool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 5 });
+const db = drizzle(prodPool, { schema: { usersTable } });
 
 const router = Router();
 
