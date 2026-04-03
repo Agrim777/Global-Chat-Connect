@@ -1097,7 +1097,7 @@ bot.on("message", async (msg) => {
           { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
         );
       } else {
-        await startEditProfile(chatId, id); // unrecognised input — show picker again
+        await startSetup(chatId, id); // unrecognised input — restart fresh setup
       }
       return;
     }
@@ -1332,8 +1332,7 @@ bot.on("message", async (msg) => {
     }
     if (text === "✏️ Edit Profile") {
       if ((user.state as string) === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before editing your profile."); return; }
-      if (!user.isProfileComplete) { await startSetup(chatId, id); return; }
-      await startEditProfile(chatId, id);
+      await startSetup(chatId, id);
       return;
     }
     if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
@@ -1413,8 +1412,6 @@ bot.onText(/\/profile/, async (msg) => {
 });
 
 bot.onText(/\/edit/, async (msg) => {
-  const u = await getUser(msg.from!.id);
-  if (u?.isProfileComplete) { await startEditProfile(msg.chat.id, msg.from!.id); return; }
   await startSetup(msg.chat.id, msg.from!.id);
 });
 bot.onText(/\/match/, async (msg) => {
