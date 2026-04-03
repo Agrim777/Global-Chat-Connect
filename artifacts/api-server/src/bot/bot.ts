@@ -1194,6 +1194,23 @@ bot.on("message", async (msg) => {
       }
 
       // Real chat relay — allow messages whenever both sides are still connected to each other
+
+      // ── SAFETY GATE: unpaid users must NEVER relay to real users ───────────
+      if (!user.hasPaid) {
+        logger.warn({ userId: id }, "Relay blocked: unpaid user in real chat — force-disconnecting");
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, id));
+        if (user.chattingWith) {
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(and(eq(usersTable.id, user.chattingWith), eq(usersTable.chattingWith, id)));
+        }
+        const fresh = await getUser(id);
+        if (fresh) await sendPayGate(chatId);
+        return;
+      }
+
       const recipientId = user.chattingWith;
       if (recipientId) {
         const recipient = await getUser(recipientId);
@@ -1492,5 +1509,40 @@ async function setupBotProfile() {
 }
 
 setupBotProfile();
+
+// ── Startup: disconnect any unpaid users from real chats ─────────────────────
+// Handles stale DB state from before payment checks were enforced.
+(async () => {
+  try {
+    const allChatting = await db
+      .select()
+      .from(usersTable)
+      .where(and(eq(usersTable.state, "chatting"), eq(usersTable.hasPaid, false)));
+
+    for (const u of allChatting) {
+      if (!u.chattingWith || u.chattingWith === FAKE_CHAT_ID) {
+        // Stuck in fake-chat state but no in-memory persona (bot restarted) — reset
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, u.id));
+        continue;
+      }
+      // Unpaid user connected to a REAL user — disconnect both
+      logger.warn({ userId: u.id, partnerId: u.chattingWith }, "Startup: disconnecting unpaid user from real chat");
+      await db.update(usersTable)
+        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(eq(usersTable.id, u.id));
+      await db.update(usersTable)
+        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(and(eq(usersTable.id, u.chattingWith), eq(usersTable.chattingWith, u.id)));
+    }
+
+    if (allChatting.length > 0) {
+      logger.info({ count: allChatting.length }, "Startup cleanup: unpaid users reset");
+    }
+  } catch (err) {
+    logger.error({ err }, "Startup cleanup failed (non-fatal)");
+  }
+})();
 
 logger.info("Telegram bot polling started");
