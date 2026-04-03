@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq, and, gt } from "drizzle-orm";
+import { eq, and, gt, ne } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -1934,7 +1934,8 @@ bot.onText(/\/broadcast/, async (msg) => {
       and(
         gt(usersTable.chatCount, 0),
         eq(usersTable.hasPaid, false),
-        eq(usersTable.isProfileComplete, true)
+        eq(usersTable.isProfileComplete, true),
+        ...(ADMIN_ID ? [ne(usersTable.id, ADMIN_ID)] : [])
       )
     );
 

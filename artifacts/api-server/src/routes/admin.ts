@@ -1,6 +1,6 @@
 import { Router } from "express";
 import pg from "pg";
-import { eq, and, gt } from "drizzle-orm";
+import { eq, and, gt, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { usersTable } from "@workspace/db";
 
@@ -55,9 +55,15 @@ router.get("/admin/broadcast", async (req, res) => {
     return;
   }
 
+  const adminId = Number(ADMIN_KEY);
   const targets = await db.select({ id: usersTable.id })
     .from(usersTable)
-    .where(and(gt(usersTable.chatCount, 0), eq(usersTable.hasPaid, false), eq(usersTable.isProfileComplete, true)));
+    .where(and(
+      gt(usersTable.chatCount, 0),
+      eq(usersTable.hasPaid, false),
+      eq(usersTable.isProfileComplete, true),
+      ne(usersTable.id, adminId)
+    ));
 
   res.json({ status: "started", total: targets.length, message: `Broadcast started for ${targets.length} users` });
 
