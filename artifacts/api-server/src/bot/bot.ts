@@ -953,7 +953,17 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
 // First-time profile setup (only called when no profile exists)
 async function startSetup(chatId: number, id: number) {
   editModeMap.delete(id); // ensure we're NOT in edit mode
-  await upsertUser(id, { state: "setup_name" });
+  // Wipe all old profile fields so the user always starts completely fresh
+  await upsertUser(id, {
+    name: null as any,
+    age: null as any,
+    gender: null as any,
+    lookingFor: null as any,
+    bio: null as any,
+    country: null as any,
+    isProfileComplete: false,
+    state: "setup_name",
+  });
   await bot.sendMessage(chatId,
     "Let's build your profile! 🎉\n\n*Step 1 of 6* — 📝 What should we call you?\n\n_Type your first name only._",
     { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
@@ -1315,12 +1325,9 @@ bot.on("message", async (msg) => {
     // ── Menu buttons ────────────────────────────────────────────────────
 
     if (text === "🚀 Setup Profile") {
-      if (user.isProfileComplete) {
-        // Profile already exists — send them to edit instead
-        await startEditProfile(chatId, id);
-      } else {
-        await startSetup(chatId, id);
-      }
+      // Always start completely fresh — wipes old profile data
+      if ((user.state as string) === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before setting up your profile."); return; }
+      await startSetup(chatId, id);
       return;
     }
     if (text === "✏️ Edit Profile") {
@@ -1558,36 +1565,47 @@ async function setupBotProfile() {
 
 setupBotProfile();
 
-// ── Startup: disconnect any unpaid users from real chats ─────────────────────
-// Handles stale DB state from before payment checks were enforced.
+// ── Startup: full ghost-connection cleanup for ALL users ─────────────────────
 (async () => {
   try {
-    const allChatting = await db
-      .select()
-      .from(usersTable)
-      .where(and(eq(usersTable.state, "chatting"), eq(usersTable.hasPaid, false)));
+    const allChatting = await db.select().from(usersTable).where(eq(usersTable.state, "chatting"));
+    let fixed = 0;
 
     for (const u of allChatting) {
+      // 1. Fake-chat ghost (in-memory persona lost on restart) — reset free user
       if (!u.chattingWith || u.chattingWith === FAKE_CHAT_ID) {
-        // Stuck in fake-chat state but no in-memory persona (bot restarted) — reset
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, u.id));
+        fixed++;
         continue;
       }
-      // Unpaid user connected to a REAL user — disconnect both
-      logger.warn({ userId: u.id, partnerId: u.chattingWith }, "Startup: disconnecting unpaid user from real chat");
-      await db.update(usersTable)
-        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(eq(usersTable.id, u.id));
-      await db.update(usersTable)
-        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(and(eq(usersTable.id, u.chattingWith), eq(usersTable.chattingWith, u.id)));
+
+      // 2. Unpaid user connected to a real user — force-disconnect both
+      if (!u.hasPaid) {
+        logger.warn({ userId: u.id, partnerId: u.chattingWith }, "Startup: disconnecting unpaid user from real chat");
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, u.id));
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(and(eq(usersTable.id, u.chattingWith), eq(usersTable.chattingWith, u.id)));
+        fixed++;
+        continue;
+      }
+
+      // 3. Partner deleted or partner no longer points back — ghost connection
+      const partner = await getUser(u.chattingWith);
+      if (!partner || partner.state !== "chatting" || partner.chattingWith !== u.id) {
+        logger.warn({ userId: u.id, partnerId: u.chattingWith }, "Startup: clearing ghost connection (partner missing or mismatched)");
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, u.id));
+        fixed++;
+      }
     }
 
-    if (allChatting.length > 0) {
-      logger.info({ count: allChatting.length }, "Startup cleanup: unpaid users reset");
-    }
+    logger.info({ total: allChatting.length, fixed }, "Startup cleanup: ghost connections resolved");
   } catch (err) {
     logger.error({ err }, "Startup cleanup failed (non-fatal)");
   }
