@@ -51,6 +51,7 @@ interface FakePersona {
   msgCount: number;          // total messages received
   lastUserMsg: string;       // last thing user said (for callbacks)
   callbackUsed: boolean;     // already done a callback this convo
+  askedTopics: Set<string>;  // tracks used continuation topics — no repeats
 }
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
 const editModeMap   = new Map<number, string>();          // userId → edit field ("choosing"|"name"|"age"|"gender"|"looking_for"|"bio"|"country")
@@ -154,6 +155,50 @@ function detectLang(text: string): "hindi" | "hinglish" | "english" {
   if (/[\u0900-\u097F]/.test(text)) return "hindi";
   if (/\b(kya|hai|hoon|hain|mein|tum|aap|kar|raha|rahi|tha|thi|nahi|nhi|kuch|bahut|accha|acha|theek|bhai|yaar|suno|bolo|kaise|abhi|thoda|bas|baat|pyaar|haha|lol|ngl|btw|karo|bol|chal|acha|achi|thik|bilkul|matlab|pata|wala|wali|laga|mila|mili|hun|hn|hna|bata|bol|dekh|sun|arrey|arre|omg|bro|dude|yar)\b/i.test(text)) return "hinglish";
   return "english";
+}
+
+// ── Continuation topic pool — 22 unique topics, never repeats in one session ──
+// Each entry has a string ID, female version, and male version (array = burst msgs)
+
+interface TopicEntry { id: string; f: string[]; m: string[] }
+
+const CONTINUATION_TOPICS: TopicEntry[] = [
+  { id: "superpower",    f: ["haha random question —", "agar koi bhi superpower mile toh kaunsi loge? 😄"], m: ["random q 😄", "which superpower?"] },
+  { id: "guilty_song",   f: ["honest question 🙈", "sabse embarrassing song jo secretly sunti ho? 😂"], m: ["guilty pleasure song?", "honest answer 😂"] },
+  { id: "chai_maggi",    f: ["acha bata —", "chai ya maggi? raat ke 12 baje wali craving 😂"], m: ["chai or maggi?", "midnight craving?"] },
+  { id: "fav_movie",     f: ["btw —", "ek movie ya show jo sabko recommend karogi? 🍿"], m: ["fav movie or show?", "must watch?"] },
+  { id: "pet",           f: ["acha —", "pets hai tere? ya chahte ho? 🐶"], m: ["pets?", "dog or cat person?"] },
+  { id: "last_laugh",    f: ["haha random —", "last time kab hanste hanste pet dard hua? 😂"], m: ["last time you laughed super hard?", "what happened?"] },
+  { id: "dream_trip",    f: ["real question —", "ek jagah jo definitely jaana hai life mein? ✈️"], m: ["dream travel destination?", "must visit?"] },
+  { id: "intro_song",    f: ["omg serious question —", "agar tere life ka intro song hota toh kaunsa hota? 😂"], m: ["life intro song?", "what would it be?"] },
+  { id: "zomato_or_ghar",f: ["important question 😄", "Zomato wala ya ghar ka khana?"], m: ["Zomato or ghar ka?", "honest answer?"] },
+  { id: "morning_routine",f: ["haha bata —", "subah uthke pehla kaam kya karte ho? 😄"], m: ["first thing you do after waking up?", "phone check?"] },
+  { id: "bold_thing",    f: ["okay real talk —", "ek boldest cheez jo tumne ki ho life mein? 🙈"], m: ["boldest thing you've done?", "real answer?"] },
+  { id: "school_subject",f: ["haha school yaad hai? 😄", "fav subject kaunsa tha?"], m: ["fav school subject?", "what were you good at?"] },
+  { id: "hidden_talent", f: ["okay bata —", "koi hidden talent? jo log nahi jaante? 👀"], m: ["hidden talent?", "something unexpected?"] },
+  { id: "biggest_fear",  f: ["acha honest question —", "sabse bada dar kya hai tujhe? 🙈"], m: ["biggest fear?", "honest answer?"] },
+  { id: "celeb_crush",   f: ["haha okay okay —", "bollywood ya hollywood mein crush kaunsa hai? 😂"], m: ["celebrity crush?", "go on 😄"] },
+  { id: "never_eat",     f: ["food wala question —", "ek cheez jo kabhi nahi khaoge chaahe kuch bhi ho? 😂"], m: ["one food you'd never eat?", "ever?"] },
+  { id: "weird_habit",   f: ["haha okay don't judge —", "koi weird habit hai? jo sab ke saamne admit nahi karte? 😂"], m: ["any weird habit?", "honest answer 😂"] },
+  { id: "rewind",        f: ["real question —", "zindagi mein koi ek moment rewind kar sakte toh kaun sa? 🥺"], m: ["one moment you'd relive?", "serious answer?"] },
+  { id: "last_cry",      f: ["haha okay emotional question —", "last time kab roya/royi? 🥺"], m: ["last time you actually cried?", "movie or real life?"] },
+  { id: "introvert",     f: ["genuine question —", "introvert ho ya extrovert? ya dono thoda thoda? 😄"], m: ["introvert or extrovert?", "honest answer?"] },
+  { id: "5yr_plan",      f: ["sochte ho future ke baare mein? 😊", "5 saal baad kahan hoge tum?"], m: ["5 year plan?", "any idea?"] },
+  { id: "cooking_skill", f: ["haha serious question —", "ek dish hai jo ghar mein best banate ho?"], m: ["can you cook?", "best dish?"] },
+];
+
+// Pick a continuation topic the persona hasn't used yet.
+// When all 22 are exhausted, clear and start fresh (user would never hit this in 30s).
+function pickFresh(persona: FakePersona): string[] {
+  let available = CONTINUATION_TOPICS.filter(t => !persona.askedTopics.has(t.id));
+  if (available.length === 0) {
+    persona.askedTopics.clear();
+    available = CONTINUATION_TOPICS;
+  }
+  const topic = available[Math.floor(Math.random() * available.length)];
+  persona.askedTopics.add(topic.id);
+  persona.lastAsked = "continuation";
+  return persona.isFemale ? topic.f : topic.m;
 }
 
 // ── Conversational reply engine ────────────────────────────────────────────────
@@ -507,45 +552,38 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     }
 
     case "flirt": {
-      persona.lastAsked = "weekend";
-      return rnd([
-        f ? two("haha you're actually fun to talk to 😄", "kaafi different ho tum") : two("you're easy to talk to 😄", "rare honestly"),
-        f ? two("ngl maza aa raha hai baat karke 😊", "aisa lagta nahi ki abhi abhi mila hun") : two("decent convo ngl 😄", "rare to find"),
-        f ? two("haha honestly nice hai ye 😊", "tum interesting ho yaar") : two("easy to talk to 😊", "good vibe"),
-        f ? three("omg", "honestly ye chat unexpected tha 😊", "usually log itne interesting nahi hote") : two("honestly nice chat 😊", "refreshing"),
-      ]);
+      // Transition to fresh topics — never the same compliment twice
+      return pickFresh(persona);
     }
 
-    case "weekend": {
-      persona.lastAsked = "dream";
-      return rnd([
-        f ? two("acha bata — weekend mein kya karte ho mostly?", "ghar pe rehte ho ya bahar jaate ho? 😄") : two("weekend plans kya hote hain tere?", "chill or go out?"),
-        f ? two("haha interesting question — plan karte ho weekend?", "ya spontaneous types ho?") : two("spontaneous or planner?", "for weekends?"),
-        f ? two("btw weekend mein fav kaam kya hai? 😄", "solo time ya dosto ke saath?") : two("weekend type?", "solo or with friends?"),
-      ]);
-    }
-
-    case "dream": {
-      persona.lastAsked = "done";
-      return rnd([
-        f ? two("acha bata — ek cheez jo tum definitely karna chahte ho life mein?", "dream kya hai? 😊") : two("life goal kya hai tuhara?", "biggest dream?"),
-        f ? two("real question 😊", "agar kal sab kuch possible ho toh kahan hoge tum?") : two("real question", "5 years se?"),
-        f ? two("haha serious question —", "ek dream destination kaunsa hai jo definitely jaana hai?") : two("dream destination?", "must visit?"),
-      ]);
-    }
-
+    case "weekend":
+    case "dream":
     case "done": {
-      // Keep conversation alive — cycle to new topics
-      persona.lastAsked = rnd(["weekend", "food", "habit"]);
-      return rnd([
-        f ? two("btw — favourite movie ya show kaunsa hai? 😄", "jo recommend karo sabko") : two("fav movie?", "recommend something?"),
-        f ? two("haha random question —", "agar koi bhi superpower mil jaye toh kaunsi loge? 😄") : two("random q", "if you had a superpower?"),
-        f ? two("honest question 🙈", "sabse embarrassing song jo secretly sunti ho? 😂") : two("honest q 😂", "guilty pleasure song?"),
-        f ? two("acha bata —", "chai ya maggi? raat ke 12 baje waali craving 😂") : two("chai or maggi?", "midnight craving?"),
-        f ? two("fun question —", "Zomato wala ya ghar ka khana? 😄") : two("Zomato or ghar ka?", "honest answer?"),
-        f ? two("haha random —", "last time kab hanste hanste pet dard hua? 😂") : two("last time you laughed hard?", "what happened?"),
-        f ? two("acha serious question 😊", "ek cheez jo tum roz karte ho bina miss kiye?") : two("daily habit?", "something you never skip?"),
-      ]);
+      // All post-main-flow states — always pick a fresh unused topic
+      return pickFresh(persona);
+    }
+
+    case "continuation": {
+      // User answered a continuation question — react to their answer then ask another
+      const reactions_f = [
+        `haha "${echo}" 😄`,
+        `omg "${echo}"?? 👀`,
+        `wait — "${echo}"?? bolo bolo 😄`,
+        `haha achha ${echo} wala toh sochta nahi tha 😂`,
+        `omg same energy honestly 😄`,
+        `hahaha yaar 😂 okay okay`,
+        `aww honestly that's cute ngl 🙈`,
+        `haha okay noted 😄`,
+      ];
+      const reactions_m = [
+        `haha "${echo}" 😄`,
+        `"${echo}"? interesting 😄`,
+        `okay "${echo}" — go on`,
+        `haha fair enough 😄`,
+      ];
+      const react = [rnd(f ? reactions_f : reactions_m)];
+      const next = pickFresh(persona);
+      return [...react, ...next];
     }
   }
 
@@ -666,6 +704,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     msgCount: 0,
     lastUserMsg: "",
     callbackUsed: false,
+    askedTopics: new Set(),
   });
 
   await db.update(usersTable)
