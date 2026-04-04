@@ -32,3 +32,4 @@ channel = "stable-25_05"
 
 [userenv.shared]
 ADMIN_TELEGRAM_ID = "8273572245"
+PROD_DATABASE_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway"
