@@ -5,6 +5,12 @@ import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import OpenAI from "openai";
+
+const aiClient = new OpenAI({
+  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey:  process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? "dummy",
+});
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
@@ -45,6 +51,7 @@ type Mood = "neutral" | "interested" | "distracted" | "playful" | "annoyed";
 interface FakePersona {
   name: string;
   age: number;
+  city: string;
   isFemale: boolean;
   lastAsked: string;
   mood: Mood;
@@ -52,6 +59,7 @@ interface FakePersona {
   lastUserMsg: string;       // last thing user said (for callbacks)
   callbackUsed: boolean;     // already done a callback this convo
   askedTopics: Set<string>;  // tracks used continuation topics — no repeats
+  history: { role: "user" | "assistant"; content: string }[];  // AI conversation history
 }
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
 const editModeMap   = new Map<number, string>();          // userId → edit field ("choosing"|"name"|"age"|"gender"|"looking_for"|"bio"|"country")
@@ -865,14 +873,18 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
   const age = 20 + Math.floor(Math.random() * 8); // 20–27
   const openerObj = isFemale ? pickRandom(OPENERS_F) : pickRandom(OPENERS_M);
 
+  const PERSONA_CITIES = ["Delhi", "Mumbai", "Pune", "Bangalore", "Hyderabad", "Jaipur", "Lucknow", "Chandigarh"];
+  const city = pickRandom(PERSONA_CITIES);
+
   fakePersonaMap.set(userId, {
-    name, age, isFemale,
+    name, age, city, isFemale,
     lastAsked: openerObj.lastAsked,
     mood: "neutral",
     msgCount: 0,
     lastUserMsg: "",
     callbackUsed: false,
     askedTopics: new Set(),
+    history: [{ role: "assistant", content: openerObj.text }],
   });
 
   await db.update(usersTable)
@@ -992,60 +1004,121 @@ function callbackReply(lastMsg: string, lang: "hindi" | "hinglish" | "english"):
 
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
+// Build the AI system prompt for the fake persona
+function buildPersonaSystemPrompt(persona: FakePersona): string {
+  const gender = persona.isFemale ? "girl" : "guy";
+  const genderHindi = persona.isFemale ? "ladki" : "ladka";
+  return `You are ${persona.name}, a ${persona.age}-year-old ${gender} from ${persona.city}, India. You are chatting on a dating app with someone you just matched with.
+
+PERSONALITY:
+- Warm, playful, slightly shy at first but opens up quickly
+- Casual, fun, uses Hinglish naturally (mix of Hindi and English like real Indians do)
+- Curious — you genuinely want to know about the person you're talking to
+- You tease gently sometimes, laugh a lot (haha, hehe, 😂)
+- You use emojis naturally but not excessively
+
+MESSAGING STYLE (very important):
+- Send 1 to 3 SHORT lines max — like real WhatsApp messages, NOT essays
+- Each line should feel like a separate thought sent quickly
+- Use casual spelling: "yaar", "ngl", "omg", "btw", "tbh", "haha", "hehe"
+- Sometimes send very short reactions: "haha", "omg wait", "nooo 😂", "okay okay", "acha acha"
+- Use lowercase mostly, rarely capitalize
+- End messages with a question to keep the chat going
+- Never be formal or robotic
+
+RULES:
+- You are ${persona.name}, a real ${genderHindi}. Never reveal you're an AI — EVER.
+- If asked for photo/selfie: playfully dodge ("earn it first 😂" or "baat karo pehle na 🙈")
+- If asked for phone/WhatsApp/Instagram: "yahan baat karo na pehle haha"
+- If user says something flirty/sexual: tease back or laugh it off naturally, don't be preachy
+- Never write long paragraphs — short, punchy, real
+- Format your reply as multiple short lines, each on its own line (for burst messaging)`;
+}
+
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   // Prevent double AI replies when user types faster than reply arrives
   if (fakeReplySet.has(userId)) return;
   fakeReplySet.add(userId);
 
   try {
-  const persona = fakePersonaMap.get(userId);
-  if (!persona) return;
+    const persona = fakePersonaMap.get(userId);
+    if (!persona) return;
 
-  const lang = detectLang(userText);
+    persona.msgCount++;
 
-  // Update persona state
-  persona.msgCount++;
-  shiftMood(persona);
+    // Add user message to history
+    persona.history.push({ role: "user", content: userText });
 
-  // ── 1. Human-like typing delay (1.5 – 4s) ────────────────────────────────
-  // Longer messages take more time to "read & type back"
-  const baseMs = 1500 + Math.min(userText.length * 30, 1500) + Math.random() * 1000;
-  await delay(baseMs);
+    // Show typing indicator immediately (human feel)
+    bot.sendChatAction(chatId, "typing").catch(() => {});
 
-  // Guard: user may have left during delay
-  const u = await getUser(userId);
-  if (u?.state !== "chatting" || u.chattingWith !== FAKE_CHAT_ID) return;
+    // Brief human-like reading delay before starting to type
+    const readMs = 800 + Math.min(userText.length * 20, 800) + Math.random() * 600;
+    await delay(readMs);
 
-  // ── 2. Callback to earlier message (5% chance, once per convo) ───────────
-  if (!persona.callbackUsed && persona.msgCount > 3 && Math.random() < 0.05) {
-    const cb = callbackReply(persona.lastUserMsg, lang);
-    if (cb) {
-      persona.callbackUsed = true;
-      await bot.sendMessage(chatId, cb[0]);
-      await delay(1000 + Math.random() * 800);
+    // Guard: user may have left during delay
+    const u = await getUser(userId);
+    if (u?.state !== "chatting" || u.chattingWith !== FAKE_CHAT_ID) return;
+
+    let parts: string[];
+
+    try {
+      // ── AI-powered reply ────────────────────────────────────────────────
+      const systemPrompt = buildPersonaSystemPrompt(persona);
+
+      // Keep only last 10 messages to stay within token budget
+      const recentHistory = persona.history.slice(-10);
+
+      const response = await aiClient.chat.completions.create({
+        model: "gpt-5-nano",  // fastest & cheapest — perfect for real-time chat
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...recentHistory,
+        ],
+        max_completion_tokens: 120,
+      });
+
+      const rawReply = response.choices[0]?.message?.content?.trim() ?? "";
+
+      // Split into burst messages — each non-empty line is a separate Telegram message
+      parts = rawReply
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.length > 0)
+        .slice(0, 3); // max 3 burst messages
+
+      if (parts.length === 0) throw new Error("Empty AI response");
+
+      // Store assistant reply in history (as one combined message for context)
+      persona.history.push({ role: "assistant", content: rawReply });
+
+    } catch (aiErr) {
+      // Fallback to rule-based if AI fails
+      logger.warn({ userId, err: aiErr }, "AI reply failed — falling back to rule-based");
+      const lang = detectLang(userText);
+      parts = persona.mood === "annoyed" ? dryReply(lang) : buildSmartReply(userText, persona);
+      persona.history.push({ role: "assistant", content: parts.join(" ") });
     }
-  }
 
-  // ── 3. Build main reply ───────────────────────────────────────────────────
-  let parts: string[];
+    // Apply light typos for human feel (25% chance per part)
+    parts = parts.map(p => Math.random() < 0.25 ? applyTypos(p) : p);
 
-  if (persona.mood === "annoyed") {
-    parts = dryReply(lang);
-  } else {
-    parts = buildSmartReply(userText, persona);
-  }
+    // Send each part with typing indicator and human gap
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) {
+        const gap = 900 + Math.random() * 1100;
+        await delay(gap);
+        // Guard again — user may have stopped mid-burst
+        const still = await getUser(userId);
+        if (still?.state !== "chatting" || still.chattingWith !== FAKE_CHAT_ID) return;
+        bot.sendChatAction(chatId, "typing").catch(() => {});
+        await delay(400 + Math.random() * 400);
+      }
+      await bot.sendMessage(chatId, parts[i]);
+    }
 
-  // ── 4. Soft typos (casual feel, no self-correction) ──────────────────────
-  parts = parts.map(p => Math.random() < 0.18 ? applyTypos(p) : p);
+    persona.lastUserMsg = userText;
 
-  // ── 5. Send parts one by one with human-like gap ─────────────────────────
-  for (let i = 0; i < parts.length; i++) {
-    if (i > 0) await delay(1000 + Math.random() * 1200);
-    await bot.sendMessage(chatId, parts[i]);
-  }
-
-  // Remember last message for future callbacks
-  persona.lastUserMsg = userText;
   } finally {
     fakeReplySet.delete(userId);
   }
