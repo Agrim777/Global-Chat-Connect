@@ -1520,7 +1520,7 @@ async function finishEditField(chatId: number, id: number) {
 // ── Message router ────────────────────────────────────────────────────────────
 
 bot.on("message", async (msg) => {
-  if (!msg.text && !msg.photo && !msg.document) return;
+  if (!msg.text && !msg.photo) return; // documents/files not supported
   if (!msg.from) return; // ignore channel posts / anonymous senders
   const chatId = msg.chat.id;
   const id = msg.from.id;
@@ -1796,20 +1796,10 @@ bot.on("message", async (msg) => {
         ) {
           // Both still connected and both verified paid — relay the message
           try {
-            if (msg.photo) {
-              // Re-send by file_id — anonymous, no "Forwarded from" tag
-              const bestPhoto = msg.photo[msg.photo.length - 1];
-              const senderName = escHtml(user.name ?? "Match");
-              await bot.sendPhoto(recipientId, bestPhoto.file_id, {
-                caption: msg.caption ? `💬 <b>${senderName}</b>: ${escHtml(msg.caption)}` : undefined,
-                parse_mode: "HTML",
-              });
-            } else if (msg.document) {
-              // Re-send document by file_id — no forwarded attribution
-              const senderName = escHtml(user.name ?? "Match");
-              await bot.sendDocument(recipientId, msg.document.file_id, {
-                caption: msg.caption ? `💬 <b>${senderName}</b>: ${escHtml(msg.caption)}` : undefined,
-                parse_mode: "HTML",
+            if (msg.photo || msg.document) {
+              // Photos and files are not allowed in chat — text only
+              await bot.sendMessage(chatId, "📝 Only text messages are supported in chat.", {
+                reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
               });
             } else if (text) {
               const safeName = escHtml(user.name ?? "Match");
