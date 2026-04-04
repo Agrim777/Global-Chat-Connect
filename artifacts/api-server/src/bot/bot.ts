@@ -881,7 +881,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
   await bot.sendMessage(
     chatId,
-    `✅ Match found! Say hi — you have a 30-second free preview 🔥`,
+    `✅ Match found! Say hi to ${name} 💕`,
     { reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
@@ -1062,6 +1062,9 @@ async function stopChat(chatId: number, userId: number) {
 
   const partnerId = me.chattingWith;
 
+  // Save persona name BEFORE deleting — so paygate can show the right girl's name
+  const fakePersonaName = fakePersonaMap.get(userId)?.name;
+
   // Clear free-chat timer if present
   const timer = chatTimerMap.get(userId);
   if (timer) { clearTimeout(timer); chatTimerMap.delete(userId); }
@@ -1095,9 +1098,9 @@ async function stopChat(chatId: number, userId: number) {
   }
 
   const updated = await getUser(userId);
-  // Unpaid users who've used their trial → show pay gate only (no menu)
+  // Unpaid users who've used their trial → show pay gate with correct girl name
   if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
-    await sendPayGate(chatId);
+    await sendPayGate(chatId, undefined, fakePersonaName);
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
   }
@@ -1869,7 +1872,20 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
       return;
     }
 
-    await db.update(usersTable).set({ hasPaid: true, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
+    // If user was in a fake chat, clean up the in-memory state and reset to idle
+    // so they can immediately tap Find Match after premium is granted
+    const wasInFakeChat = target.state === "chatting" && target.chattingWith === FAKE_CHAT_ID;
+    if (wasInFakeChat) {
+      const fakeTimer = chatTimerMap.get(targetId);
+      if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(targetId); }
+      fakePersonaMap.delete(targetId);
+    }
+
+    // Grant premium; if they were mid-fake-chat also reset to idle so they can Find Match immediately
+    const grantUpdate: Partial<typeof usersTable.$inferInsert> = { hasPaid: true, updatedAt: new Date() };
+    if (wasInFakeChat) { grantUpdate.state = "idle"; grantUpdate.chattingWith = null; }
+    await db.update(usersTable).set(grantUpdate).where(eq(usersTable.id, targetId));
+
     await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})`);
 
     const updated = await getUser(targetId);
@@ -2050,8 +2066,15 @@ setupBotProfile();
 
     for (const u of allChatting) {
       // 1. Fake-chat ghost (in-memory persona lost on restart) — reset free user
+      //    Also reset chatCount to 0 so they get a fresh demo (they got 0 seconds due to restart)
       if (!u.chattingWith || u.chattingWith === FAKE_CHAT_ID) {
-        await resetAndNotify(u, "Your previous chat session ended. Tap 💘 Find Match to start a new one!");
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, chatCount: 0, updatedAt: new Date() })
+          .where(eq(usersTable.id, u.id));
+        const fresh = await getUser(u.id);
+        if (fresh) {
+          await sendMain(u.id, fresh, "ℹ️ Connection lost — but your free preview is still waiting! Tap 💘 Find Match to start fresh.").catch(() => {});
+        }
         fixed++;
         continue;
       }
