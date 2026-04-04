@@ -95,4 +95,40 @@ router.get("/admin/broadcast/status", async (req, res) => {
   res.json({ running: broadcastRunning });
 });
 
+let broadcastNewRunning = false;
+
+router.get("/admin/broadcast/new", async (req, res) => {
+  const key = req.query["key"] as string;
+  if (key !== ADMIN_KEY) { res.status(403).json({ error: "Forbidden" }); return; }
+
+  if (broadcastNewRunning) {
+    res.json({ status: "already_running", message: "New-user broadcast already in progress" });
+    return;
+  }
+
+  const adminId = Number(ADMIN_KEY);
+  const targets = await db.select({ id: usersTable.id })
+    .from(usersTable)
+    .where(and(
+      eq(usersTable.hasPaid, false),
+      eq(usersTable.isProfileComplete, true),
+      eq(usersTable.chatCount, 0),
+      ne(usersTable.id, adminId)
+    ));
+
+  res.json({ status: "started", total: targets.length, message: `New-user broadcast started for ${targets.length} users` });
+
+  broadcastNewRunning = true;
+  let sent = 0, failed = 0;
+  for (const row of targets) {
+    try {
+      const result = await sendTg(row.id, inviteMsg(rndName()));
+      if (result.ok) sent++; else failed++;
+    } catch { failed++; }
+    await sleep(80);
+  }
+  broadcastNewRunning = false;
+  console.log(`[BROADCAST-NEW] Done — sent: ${sent}, failed: ${failed}, total: ${targets.length}`);
+});
+
 export default router;
