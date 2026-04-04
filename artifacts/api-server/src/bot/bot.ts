@@ -1070,15 +1070,23 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
       const recentHistory = persona.history.slice(-10);
 
       const response = await aiClient.chat.completions.create({
-        model: "gpt-5-nano",  // fastest & cheapest — perfect for real-time chat
+        model: "gpt-4o-mini",
         messages: [
           { role: "system", content: systemPrompt },
           ...recentHistory,
         ],
-        max_completion_tokens: 120,
+        max_tokens: 120,
+        temperature: 0.9,
       });
 
-      const rawReply = response.choices[0]?.message?.content?.trim() ?? "";
+      const choice = response.choices[0];
+      const rawReply = choice?.message?.content?.trim() ?? "";
+
+      // Debug log to diagnose any issues
+      console.log(`[AI] userId=${userId} finish=${choice?.finish_reason} len=${rawReply.length} reply="${rawReply.slice(0, 80)}"`);
+      if (choice?.message?.refusal) {
+        console.log(`[AI REFUSAL] userId=${userId} refusal="${choice.message.refusal}"`);
+      }
 
       // Split into burst messages — each non-empty line is a separate Telegram message
       parts = rawReply
