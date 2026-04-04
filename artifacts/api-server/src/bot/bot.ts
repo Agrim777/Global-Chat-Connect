@@ -897,8 +897,9 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     { reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
-  // Opener after short "typing" delay
-  await delay(800 + Math.random() * 500);
+  // Opener: show typing indicator first, then send almost immediately
+  bot.sendChatAction(chatId, "typing").catch(() => {});
+  await delay(300 + Math.random() * 200); // 300-500ms max — user must see the opener immediately
   const still = await getUser(userId);
   if (still?.state === "chatting" && still.chattingWith === FAKE_CHAT_ID) {
     await bot.sendMessage(chatId, openerObj.text);
@@ -1307,10 +1308,31 @@ async function findMatch(chatId: number, userId: number) {
       `✅ Match found! You're now connected with *${match.name}*, ${match.age}. Say hello! 👋`,
       { parse_mode: "Markdown", reply_markup: stopKb }
     );
-    await bot.sendMessage(match.id,
-      `✅ Match found! You're now connected with *${me.name}*, ${me.age}. Say hello! 👋`,
-      { parse_mode: "Markdown", reply_markup: stopKb }
-    );
+
+    // Try to notify match partner — if they deactivated/blocked, clean up and tell searcher
+    try {
+      await bot.sendMessage(match.id,
+        `✅ Match found! You're now connected with *${me.name}*, ${me.age}. Say hello! 👋`,
+        { parse_mode: "Markdown", reply_markup: stopKb }
+      );
+    } catch (notifyErr: unknown) {
+      const is403 = notifyErr instanceof Error && (notifyErr as NodeJS.ErrnoException & { code?: string; response?: { statusCode?: number } }).response?.statusCode === 403;
+      if (is403) {
+        // Partner deactivated their account or blocked the bot — mark them inactive
+        logger.warn({ matchId: match.id }, "Match partner is deactivated — marking inactive and resetting");
+        await db.update(usersTable)
+          .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, match.id));
+        // Reset searcher too — they're no longer connected
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, userId));
+        await bot.sendMessage(chatId, "😔 That match just went offline. Tap 💘 Find Match to try again!", {
+          reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+        });
+      }
+      // Non-403 errors: leave the connection as-is (transient network issue)
+    }
 
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -1841,8 +1863,14 @@ bot.on("message", async (msg) => {
     }
     if (text === "💳 Support Us") { await sendPayGate(chatId); return; }
 
-    // Unrecognised input — re-show the menu so buttons are always visible
-    await sendMain(chatId, user);
+    // Unrecognised input:
+    // — if free user who used trial, they're probably confused & trying to chat → show paygate
+    // — otherwise re-show the menu so buttons are always visible
+    if (!user.hasPaid && (user.chatCount ?? 0) > 0) {
+      await sendPayGate(chatId, "💬 Want to keep chatting? Unlock Premium to connect with real people! 💕");
+    } else {
+      await sendMain(chatId, user);
+    }
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errStack = err instanceof Error ? (err.stack ?? errMsg) : errMsg;
