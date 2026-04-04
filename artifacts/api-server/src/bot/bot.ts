@@ -1797,8 +1797,20 @@ bot.on("message", async (msg) => {
           // Both still connected and both verified paid — relay the message
           try {
             if (msg.photo) {
-              // Forward photo directly to partner
-              await bot.forwardMessage(recipientId, chatId, msg.message_id);
+              // Re-send by file_id — anonymous, no "Forwarded from" tag
+              const bestPhoto = msg.photo[msg.photo.length - 1];
+              const senderName = escHtml(user.name ?? "Match");
+              await bot.sendPhoto(recipientId, bestPhoto.file_id, {
+                caption: msg.caption ? `💬 <b>${senderName}</b>: ${escHtml(msg.caption)}` : undefined,
+                parse_mode: "HTML",
+              });
+            } else if (msg.document) {
+              // Re-send document by file_id — no forwarded attribution
+              const senderName = escHtml(user.name ?? "Match");
+              await bot.sendDocument(recipientId, msg.document.file_id, {
+                caption: msg.caption ? `💬 <b>${senderName}</b>: ${escHtml(msg.caption)}` : undefined,
+                parse_mode: "HTML",
+              });
             } else if (text) {
               const safeName = escHtml(user.name ?? "Match");
               const safeText = escHtml(text);
