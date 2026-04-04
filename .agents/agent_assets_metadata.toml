@@ -12,3 +12,9 @@ id = "IFV73RQB4hqYy9CGAIyjV"
 uri = "file://BOT_PROMPT.md"
 type = "text"
 title = "Telegram Dating Bot — Full Build Prompt"
+
+[[outputs]]
+id = "KlLykK9WIoCq-0_U5kwU1"
+uri = "file://exports/all_users.csv"
+type = "table"
+title = "All Users — Dating Bot (1,326 users)"
