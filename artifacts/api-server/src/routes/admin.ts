@@ -1,6 +1,6 @@
 import { Router } from "express";
 import pg from "pg";
-import { eq, and, gt, ne } from "drizzle-orm";
+import { eq, and, gt, ne, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { usersTable } from "@workspace/db";
 
@@ -16,6 +16,15 @@ const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 
 const GIRL_NAMES = ["Riya","Priya","Neha","Simran","Komal","Ananya","Kavya","Shreya","Pooja","Nidhi","Megha","Tanya","Ishika","Aisha","Sanya"];
 function rndName() { return GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)]; }
+
+function inviteMsg(name: string): string {
+  const msgs = [
+    `💘 Arey! Tumne abhi tak chat try nahi ki?\n\n*${name}* jaisi ladkiyan yahan already hain aur match dhoondh rahi hain 🥺\n\nFree trial mein ek baar zaroor milao — koi payment nahi abhi!\n\n👉 /start dabao aur shuru karo`,
+    `🌟 Ek second bhi waste mat karo!\n\n*${name}* jaise real log yahan hain — abhi bhi online hai woh 💕\n\nTumhara free trial abhi bhi baaki hai. Try karo!\n\n👉 /start dabao`,
+    `🔔 Tumhara account bana hai lekin chat nahi ki abhi tak?\n\n*${name}* ne poochha — _"koi naya aaya kya?"_ 🥺\n\nFree mein ek baar milao. Koi limit nahi abhi.\n\n👉 /start dabao aur dekho`,
+  ];
+  return msgs[Math.floor(Math.random() * msgs.length)];
+}
 
 function fomoMsg(name: string): string {
   const msgs = [
@@ -56,10 +65,9 @@ router.get("/admin/broadcast", async (req, res) => {
   }
 
   const adminId = Number(ADMIN_KEY);
-  const targets = await db.select({ id: usersTable.id })
+  const targets = await db.select({ id: usersTable.id, chatCount: usersTable.chatCount })
     .from(usersTable)
     .where(and(
-      gt(usersTable.chatCount, 0),
       eq(usersTable.hasPaid, false),
       eq(usersTable.isProfileComplete, true),
       ne(usersTable.id, adminId)
@@ -71,7 +79,8 @@ router.get("/admin/broadcast", async (req, res) => {
   let sent = 0, failed = 0;
   for (const row of targets) {
     try {
-      const result = await sendTg(row.id, fomoMsg(rndName()));
+      const msg = row.chatCount > 0 ? fomoMsg(rndName()) : inviteMsg(rndName());
+      const result = await sendTg(row.id, msg);
       if (result.ok) sent++; else failed++;
     } catch { failed++; }
     await sleep(80);
