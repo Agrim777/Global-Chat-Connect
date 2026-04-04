@@ -2028,6 +2028,62 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
   await bot.sendMessage(msg.chat.id, `✅ Premium revoked for user ${targetId}.`);
 });
 
+// ── Admin: /deleteuser <userId> ───────────────────────────────────────────────
+
+bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
+
+  const targetId = parseInt(match![1].trim(), 10);
+  if (isNaN(targetId)) { await bot.sendMessage(chatId, "❌ Invalid user ID. Usage: /deleteuser 1234567890"); return; }
+
+  try {
+    const target = await getUser(targetId);
+    if (!target) { await bot.sendMessage(chatId, `❌ User ${targetId} not found in DB.`); return; }
+
+    // 1. If they're in a fake chat — clear in-memory state
+    if (target.state === "chatting" && target.chattingWith === FAKE_CHAT_ID) {
+      const fakeTimer = chatTimerMap.get(targetId);
+      if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(targetId); }
+      fakePersonaMap.delete(targetId);
+      fakeReplySet.delete(targetId);
+    }
+
+    // 2. If they're in a real chat — disconnect partner gracefully
+    if (target.state === "chatting" && target.chattingWith && target.chattingWith !== FAKE_CHAT_ID) {
+      const partnerId = target.chattingWith;
+      const partner = await getUser(partnerId);
+      if (partner) {
+        const disconnected = await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, targetId)))
+          .returning({ id: usersTable.id });
+
+        if (disconnected.length > 0) {
+          await sendMain(partnerId, partner, "Your match is no longer available. Tap 💘 Find Match to connect with someone new!").catch(() => {});
+        }
+      }
+    }
+
+    // 3. Hard delete from DB
+    await db.delete(usersTable).where(eq(usersTable.id, targetId));
+
+    await bot.sendMessage(chatId,
+      `🗑️ User deleted successfully.\n\n` +
+      `*ID:* \`${targetId}\`\n` +
+      `*Name:* ${escMd(target.name ?? "Unknown")}\n` +
+      `*Username:* @${escMd(target.telegramUsername ?? "none")}\n` +
+      `*Was paid:* ${target.hasPaid ? "Yes" : "No"}\n` +
+      `*State was:* ${target.state ?? "unknown"}`,
+      { parse_mode: "Markdown" }
+    );
+
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await bot.sendMessage(chatId, `❌ Delete failed: ${errMsg.slice(0, 200)}`).catch(() => {});
+  }
+});
+
 // ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
 
 bot.onText(/\/broadcast/, async (msg) => {
