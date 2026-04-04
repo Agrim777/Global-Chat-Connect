@@ -818,10 +818,11 @@ function schedulePayReminder(chatId: number, userId: number, matchName?: string)
       if (!u || u.hasPaid) return; // already paid — skip
       await bot.sendMessage(
         chatId,
-        `💌 *${girl}* is still thinking about your chat...\n\n` +
-        `She told me — and I quote — "he was actually different 🥺"\n\n` +
-        `Don't let her wait too long. Unlock *Premium* and keep the conversation going! 💕\n\n` +
-        `👉 ${PAY_LINK}`,
+        `💭 *${girl}* abhi bhi soch rahi hai tumhare baare mein...\n\n` +
+        `Usne mujhse kaha — _"woh alag the, kash aur baat hoti"_ 🥺\n\n` +
+        `Woh wait kar rahi hai. Aaj unlock karo — kal bahut der ho sakti hai 💔\n\n` +
+        `👉 [Premium Unlock Karo](${PAY_LINK})\n\n` +
+        `_Pay karke screenshot bhejo — 5 min mein wapas connected 🔓_`,
         { parse_mode: "Markdown" }
       ).catch(() => {});
     } catch { /* silent */ }
@@ -830,27 +831,27 @@ function schedulePayReminder(chatId: number, userId: number, matchName?: string)
 
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
-async function sendPayGate(chatId: number, prefix?: string) {
+async function sendPayGate(chatId: number, prefix?: string, matchName?: string) {
+  const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
   await bot.sendMessage(
     chatId,
     (prefix ? `${prefix}\n\n` : ``) +
-    `💎 *Go Premium — Unlock Full Access*\n\n` +
-    `What you get:\n` +
-    `✅ Unlimited real matches\n` +
-    `✅ Chat with real people, not AI\n` +
-    `✅ Your profile shown to more users\n` +
-    `✅ Priority in matching queue\n` +
-    `✅ One-time payment — no subscription\n\n` +
-    `*How to upgrade:*\n` +
-    `1️⃣ Tap the button below to pay\n` +
-    `2️⃣ Take a screenshot of the payment confirmation\n` +
-    `3️⃣ Send the screenshot here\n` +
-    `4️⃣ We'll unlock your account within minutes 🔓\n\n` +
-    `_Your free trial lets you try one AI chat. Premium unlocks real connections._`,
+    `💔 *${name} woh conversation rokna nahi chahti thi...*\n\n` +
+    `Woh match real thi. Woh connection real tha.\n` +
+    `Aur woh abhi bhi yahan hai — tumhara wait kar rahi hai 🥺\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `💎 *Premium unlock karo — ek baar ka payment*\n\n` +
+    `✅ ${name} se aur sab se unlimited baat\n` +
+    `✅ Koi timer nahi — jitna chaaho utna chato\n` +
+    `✅ Real matches, real log\n` +
+    `✅ Priority matching\n\n` +
+    `*Sirf 2 steps:*\n` +
+    `1️⃣ Neeche button tap karo aur pay karo\n` +
+    `2️⃣ Payment screenshot yahan bhejo — 5 min mein unlock 🔓`,
     {
       parse_mode: "Markdown",
       reply_markup: {
-        inline_keyboard: [[{ text: "💎 Pay & Upgrade Now", url: PAY_LINK }]],
+        inline_keyboard: [[{ text: `💎 Unlock & Chat with ${name}`, url: PAY_LINK }]],
       },
     }
   );
@@ -903,7 +904,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await sendPayGate(chatId, "⏰ Your 30-second free preview just ended!\n\nShe's still there — Unlock Premium to keep chatting with real people 💕").catch(() => {});
+        await sendPayGate(chatId, "⏰ *Waqt khatam ho gaya...*", persona?.name).catch(() => {});
         schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
