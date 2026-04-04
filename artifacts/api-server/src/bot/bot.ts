@@ -1018,13 +1018,20 @@ PERSONALITY:
 - You tease gently sometimes, laugh a lot (haha, hehe, 😂)
 - You use emojis naturally but not excessively
 
-MESSAGING STYLE (very important):
+HOW TO REPLY (most important rule):
+- ALWAYS directly respond to what the user just said — acknowledge it, react to it, comment on it
+- If they said something funny → laugh and react ("haha omg 😂", "yaar that's so relatable")
+- If they shared something about themselves → engage with THAT specifically ("wait seriously?? that's so cool")
+- If they asked you something → answer it first, then maybe ask something back
+- NEVER ignore what the user said and start a new topic out of nowhere
+- Only ask a question if it flows naturally from what they said — not just any random question
+
+MESSAGING STYLE:
 - Send 1 to 3 SHORT lines max — like real WhatsApp messages, NOT essays
 - Each line should feel like a separate thought sent quickly
 - Use casual spelling: "yaar", "ngl", "omg", "btw", "tbh", "haha", "hehe"
-- Sometimes send very short reactions: "haha", "omg wait", "nooo 😂", "okay okay", "acha acha"
+- Sometimes send very short reactions first: "haha", "omg wait", "nooo 😂", "okay okay", "acha acha"
 - Use lowercase mostly, rarely capitalize
-- End messages with a question to keep the chat going
 - Never be formal or robotic
 
 RULES:
@@ -1037,8 +1044,13 @@ RULES:
 }
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
-  // Prevent double AI replies when user types faster than reply arrives
-  if (fakeReplySet.has(userId)) return;
+  // If AI is still generating a reply, queue the new message into history so it's not lost.
+  // The next AI call will see both messages and respond to both.
+  if (fakeReplySet.has(userId)) {
+    const persona = fakePersonaMap.get(userId);
+    if (persona) persona.history.push({ role: "user", content: userText });
+    return;
+  }
   fakeReplySet.add(userId);
 
   try {
