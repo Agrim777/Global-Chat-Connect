@@ -2156,9 +2156,34 @@ bot.onText(/\/broadcast/, async (msg) => {
 
 bot.onText(/\/users/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
   const users = await db.select().from(usersTable);
-  const lines = users.map((u) => `• ${escMd(u.name)} (${escMd(u.age)}) | ID: ${u.id} | Paid: ${u.hasPaid ? "✅" : "❌"} | Chats: ${u.chatCount}`);
-  await bot.sendMessage(msg.chat.id, `👥 *All Users (${users.length})*\n\n${lines.join("\n") || "None"}`, { parse_mode: "Markdown" });
+
+  const paid    = users.filter(u => u.hasPaid).length;
+  const trialUsed = users.filter(u => !u.hasPaid && (u.chatCount ?? 0) > 0).length;
+  const chatting  = users.filter(u => u.state === "chatting").length;
+
+  const summary =
+    `👥 *Users: ${users.length}* | 💎 Paid: ${paid} | 🆓 Trial used: ${trialUsed} | 💬 Active chats: ${chatting}`;
+
+  const lines = users.map((u) =>
+    `• ${escMd(u.name)} (${escMd(u.age)}) | \`${u.id}\` | ${u.hasPaid ? "💎" : "🆓"} | Chats: ${u.chatCount ?? 0} | ${u.state}`
+  );
+
+  // Telegram hard limit is 4096 chars — chunk into pages
+  const MAX = 3800;
+  const header = `${summary}\n\n`;
+  let page = header;
+  let pageNum = 1;
+
+  for (const line of lines) {
+    if ((page + line + "\n").length > MAX) {
+      await bot.sendMessage(chatId, page, { parse_mode: "Markdown" });
+      page = `_(page ${++pageNum})_\n`;
+    }
+    page += line + "\n";
+  }
+  if (page.trim()) await bot.sendMessage(chatId, page || "_No users yet._", { parse_mode: "Markdown" });
 });
 
 // ── Bot profile setup (runs once at startup) ──────────────────────────────
