@@ -18,7 +18,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 3 * 60 * 1000; // 3 minutes free trial
+const FREE_CHAT_DURATION_MS = 1 * 60 * 1000; // 1 minute free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -1241,8 +1241,8 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
       // Show typing indicator before each message
       bot.sendChatAction(chatId, "typing").catch(() => {});
 
-      // Typing delay = chars × 55ms + small jitter, min 500ms, max 2200ms
-      const typingMs = Math.min(Math.max(parts[i].length * 55, 500), 2200) + Math.random() * 300;
+      // Typing delay = chars × 100ms + jitter, min 1500ms, max 5000ms (human speed)
+      const typingMs = Math.min(Math.max(parts[i].length * 100, 1500), 5000) + Math.random() * 500;
       await delay(typingMs);
 
       // Guard — user may have stopped mid-burst
