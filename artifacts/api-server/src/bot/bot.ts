@@ -1089,11 +1089,9 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     // Add user message to history
     persona.history.push({ role: "user", content: userText });
 
-    // Show typing indicator immediately (human feel)
-    bot.sendChatAction(chatId, "typing").catch(() => {});
-
-    // Brief human-like reading delay before starting to type
-    const readMs = 800 + Math.min(userText.length * 20, 800) + Math.random() * 600;
+    // Phase 1 — reading delay (person reads the message before replying)
+    // 1.5s base + ~40ms per character the user typed (longer message = more time to read) + random jitter
+    const readMs = 1500 + Math.min(userText.length * 40, 2000) + Math.random() * 1000;
     await delay(readMs);
 
     // Guard: user may have left during delay
@@ -1151,18 +1149,26 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     // Apply light typos for human feel (25% chance per part)
     parts = parts.map(p => Math.random() < 0.25 ? applyTypos(p) : p);
 
-    // Send each part with typing indicator and human gap
+    // Send each part with realistic typing speed
+    // Human mobile typing: ~5-7 chars/sec = ~150ms per char, capped sensibly
     for (let i = 0; i < parts.length; i++) {
-      if (i > 0) {
-        const gap = 900 + Math.random() * 1100;
-        await delay(gap);
-        // Guard again — user may have stopped mid-burst
-        const still = await getUser(userId);
-        if (still?.state !== "chatting" || still.chattingWith !== FAKE_CHAT_ID) return;
-        bot.sendChatAction(chatId, "typing").catch(() => {});
-        await delay(400 + Math.random() * 400);
-      }
+      // Show typing indicator before each message
+      bot.sendChatAction(chatId, "typing").catch(() => {});
+
+      // Typing delay = chars × 120ms + random jitter, min 1s, max 5s
+      const typingMs = Math.min(Math.max(parts[i].length * 120, 1000), 5000) + Math.random() * 800;
+      await delay(typingMs);
+
+      // Guard — user may have stopped mid-burst
+      const still = await getUser(userId);
+      if (still?.state !== "chatting" || still.chattingWith !== FAKE_CHAT_ID) return;
+
       await bot.sendMessage(chatId, parts[i]);
+
+      // Short pause between burst messages (like hitting send and typing again)
+      if (i < parts.length - 1) {
+        await delay(400 + Math.random() * 600);
+      }
     }
 
     persona.lastUserMsg = userText;
