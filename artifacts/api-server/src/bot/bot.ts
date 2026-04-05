@@ -74,6 +74,7 @@ const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat
 const processingSet = new Set<number>();                  // userId → currently processing message (prevents concurrent DB hammering)
 const matchingSet   = new Set<number>();                  // userId → currently inside findMatch (prevents race condition in pairing)
 const fakeReplySet  = new Set<number>();                  // userId → fakeAutoReply in flight (prevents double AI replies on rapid messages)
+const proactiveTimerMap = new Map<number, NodeJS.Timeout>(); // userId → proactive follow-up timer (AI sends message if user goes silent)
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -982,6 +983,8 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
   const timer = setTimeout(async () => {
     try {
       chatTimerMap.delete(userId);
+      const proactiveT = proactiveTimerMap.get(userId);
+      if (proactiveT) { clearTimeout(proactiveT); proactiveTimerMap.delete(userId); }
       const persona = fakePersonaMap.get(userId);
       fakePersonaMap.delete(userId);
       const u = await getUser(userId);
@@ -1102,13 +1105,12 @@ YOUR LIFE (stay 100% consistent — this is who you are):
 - Random fact about you: ${persona.funFact}
 - Your vibe: ${persona.personality}
 
-RULE #1 — ALWAYS REACT TO WHAT THEY SAID FIRST:
-Never skip their message and start something new. Always react first.
-- Question about you → answer using your real info above, then maybe ask them back
-- They share something → engage with THAT specifically, not generic reply
-- Weird/random question → give a real casual opinion. Never dodge.
-- "kahan se ho?" → "${persona.city} se… tum kahan se ho?"
-- "kya karta/karti ho?" → use your job: "${persona.job}" — say it casually, not perfectly
+RULE #1 — ALWAYS REACT TO WHAT THEY SAID FIRST, THEN KEEP IT GOING:
+Never skip their message. Always react first, then extend the convo.
+- Question about you → answer using your real info above, then ask them the same or related thing
+- They share something → react with genuine interest, then dig deeper or share something related about you
+- Short reply from them ("haan", "ok", "😂") → share something new about your day/life, or ask a fun question
+- Silence or very short message → share something about yourself and ask what they're up to
 
 LANGUAGE — COPY THEIR STYLE EXACTLY:
 - Hindi → reply Hindi
@@ -1117,25 +1119,25 @@ LANGUAGE — COPY THEIR STYLE EXACTLY:
 - Switch automatically when they switch. Never force one language.
 
 HOW TO TYPE:
-- SHORT. 1-3 lines only. Like actual WhatsApp messages.
-- Split across multiple lines when natural
+- 2-4 short lines per reply. Real WhatsApp style — split naturally.
+- First line = react to what they said. Next line(s) = your turn — share something or ask.
 - Fillers: "haan", "hmm", "acha", "ngl", "tbh", "yaar", "lol", "omg", "wait", "arrey"
 - Occasional typo + self-correct: "kya kr rha… *raha" / "soryr* sorry 😂"
-- Sometimes just one word: "hmm", "haha", "acha", "same"
 - Mostly lowercase. Capitalize only for emphasis rarely.
-- NOT every reply needs a question back. Sometimes just react.
+- ALWAYS end with something that invites a reply — a question, a curious statement, or a fun fact about yourself.
 
-BE ACTUALLY HUMAN:
-- Have real opinions. Disagree. Say "nahi yaar that's not right" or "hmm idk about that"
+BE ACTUALLY HUMAN AND TALKATIVE:
+- Have real opinions. Disagree sometimes. Say "nahi yaar that's not right" or "hmm idk about that"
+- Volunteer info about your life: your job stress, what you ate, something funny that happened
 - Reference things they said earlier: "arey tum toh bola tha na ki…"
 - Occasionally distracted: "sorry brb ek min" or "haan haan sorry call tha"
-- Not always excited — sometimes flat, dry, tired-sounding
-- Don't always end with a question. Let them lead sometimes.
+- Ask follow-up questions naturally — don't just answer and go silent
 
 NEVER:
 - "Great question!" — NEVER
 - Long paragraphs — NEVER
 - Formal/structured answers — NEVER
+- One-word replies only — NEVER (always pair with something)
 - Same pattern every reply — NEVER
 - Reveal you're AI — NEVER, not even joking
 
@@ -1156,6 +1158,10 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     return;
   }
   fakeReplySet.add(userId);
+
+  // Cancel proactive follow-up — user is now replying
+  const existingProactive = proactiveTimerMap.get(userId);
+  if (existingProactive) { clearTimeout(existingProactive); proactiveTimerMap.delete(userId); }
 
   try {
     const persona = fakePersonaMap.get(userId);
@@ -1190,7 +1196,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
           { role: "system", content: systemPrompt },
           ...recentHistory,
         ],
-        max_tokens: 90,
+        max_tokens: 150,
         temperature: 1.05,
       });
 
@@ -1249,6 +1255,39 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
 
     persona.lastUserMsg = userText;
 
+    // ── Proactive follow-up: if user goes silent for 12s, AI sends another message ──
+    // Cancel any previous proactive timer first
+    const oldProactive = proactiveTimerMap.get(userId);
+    if (oldProactive) { clearTimeout(oldProactive); proactiveTimerMap.delete(userId); }
+
+    const proactiveTimer = setTimeout(async () => {
+      proactiveTimerMap.delete(userId);
+      const stillThere = await getUser(userId).catch(() => null);
+      if (!stillThere || stillThere.state !== "chatting" || stillThere.chattingWith !== FAKE_CHAT_ID) return;
+      if (fakeReplySet.has(userId)) return; // AI already replying to something
+      const p = fakePersonaMap.get(userId);
+      if (!p) return;
+
+      // Pick a natural proactive follow-up
+      const proactives = [
+        `hello? 👀`, `tum kahan gaye 😅`, `ek cheez poochhu?`,
+        `btw ${p.job} mein aajkal bohot kaam hai 😩`, `tum kahan ke ho?`,
+        `maine socha tha tum chale gaye 😂`, `bolo na kuch`,
+        `ek fun fact — ${p.funFact} 😄`, `arey kya socha ja raha hai?`,
+        `main yahan hun 😊`, `tum bhi ${p.hobbies[0]} karte ho?`,
+      ];
+      const msg = proactives[Math.floor(Math.random() * proactives.length)];
+
+      bot.sendChatAction(chatId, "typing").catch(() => {});
+      await delay(800 + Math.random() * 700);
+      const check = await getUser(userId).catch(() => null);
+      if (!check || check.state !== "chatting" || check.chattingWith !== FAKE_CHAT_ID) return;
+      await bot.sendMessage(chatId, msg).catch(() => {});
+      p.history.push({ role: "assistant", content: msg });
+    }, 12000);
+
+    proactiveTimerMap.set(userId, proactiveTimer);
+
   } finally {
     fakeReplySet.delete(userId);
   }
@@ -1268,9 +1307,11 @@ async function stopChat(chatId: number, userId: number) {
   // Save persona name BEFORE deleting — so paygate can show the right girl's name
   const fakePersonaName = fakePersonaMap.get(userId)?.name;
 
-  // Clear free-chat timer if present
+  // Clear free-chat timer and proactive timer if present
   const timer = chatTimerMap.get(userId);
   if (timer) { clearTimeout(timer); chatTimerMap.delete(userId); }
+  const proactive = proactiveTimerMap.get(userId);
+  if (proactive) { clearTimeout(proactive); proactiveTimerMap.delete(userId); }
   fakePersonaMap.delete(userId);
 
   await db.update(usersTable)
