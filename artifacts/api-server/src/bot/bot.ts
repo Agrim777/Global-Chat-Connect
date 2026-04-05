@@ -990,7 +990,17 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await sendPayGate(chatId, "⏰ *Waqt khatam ho gaya...*", persona?.name).catch(() => {});
+        await sendPayGate(chatId, "⏰ *Waqt khatam ho gaya...*", persona?.name);
+        // Reset keyboard from "🛑 Stop Chat" to main menu so user isn't stuck
+        await bot.sendMessage(chatId, "👆 Oopar wala button press karo to unlock karo!", {
+          reply_markup: {
+            keyboard: [
+              [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
+              [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
+            ],
+            resize_keyboard: true,
+          },
+        }).catch(() => {});
         schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
@@ -1295,6 +1305,16 @@ async function stopChat(chatId: number, userId: number) {
   // Unpaid users who've used their trial → show pay gate with correct girl name
   if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
     await sendPayGate(chatId, undefined, fakePersonaName);
+    // Reset keyboard from "🛑 Stop Chat" to main menu
+    await bot.sendMessage(chatId, "👆 Oopar wala button press karo to unlock karo!", {
+      reply_markup: {
+        keyboard: [
+          [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
+          [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
+        ],
+        resize_keyboard: true,
+      },
+    }).catch(() => {});
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
   }
