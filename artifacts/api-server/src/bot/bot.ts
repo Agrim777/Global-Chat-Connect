@@ -970,9 +970,9 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     { reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
-  // Opener: show typing indicator, then wait like a real person composing their first message
+  // Opener: show typing indicator, then wait briefly — keeps 45s trial moving
   bot.sendChatAction(chatId, "typing").catch(() => {});
-  await delay(2000 + Math.random() * 2000); // 2-4 seconds — real person composing first message
+  await delay(1000 + Math.random() * 1000); // 1-2 seconds
   const still = await getUser(userId);
   if (still?.state === "chatting" && still.chattingWith === FAKE_CHAT_ID) {
     await bot.sendMessage(chatId, openerObj.text);
@@ -1166,9 +1166,9 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     // Add user message to history
     persona.history.push({ role: "user", content: userText });
 
-    // Phase 1 — reading delay (person reads the message before replying)
-    // 1.5s base + ~40ms per character the user typed (longer message = more time to read) + random jitter
-    const readMs = 1500 + Math.min(userText.length * 40, 2000) + Math.random() * 1000;
+    // Phase 1 — reading delay (brief, keeps trial chat active)
+    // 600ms base + ~15ms per char (max 600ms) + small jitter
+    const readMs = 600 + Math.min(userText.length * 15, 600) + Math.random() * 400;
     await delay(readMs);
 
     // Guard: user may have left during delay
@@ -1190,7 +1190,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
           { role: "system", content: systemPrompt },
           ...recentHistory,
         ],
-        max_tokens: 150,
+        max_tokens: 90,
         temperature: 1.05,
       });
 
@@ -1226,14 +1226,13 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     // Apply light typos for human feel (25% chance per part)
     parts = parts.map(p => Math.random() < 0.25 ? applyTypos(p) : p);
 
-    // Send each part with realistic typing speed
-    // Human mobile typing: ~5-7 chars/sec = ~150ms per char, capped sensibly
+    // Send each part with snappy typing speed — trial is only 45s so keep it punchy
     for (let i = 0; i < parts.length; i++) {
       // Show typing indicator before each message
       bot.sendChatAction(chatId, "typing").catch(() => {});
 
-      // Typing delay = chars × 120ms + random jitter, min 1s, max 5s
-      const typingMs = Math.min(Math.max(parts[i].length * 120, 1000), 5000) + Math.random() * 800;
+      // Typing delay = chars × 55ms + small jitter, min 500ms, max 2200ms
+      const typingMs = Math.min(Math.max(parts[i].length * 55, 500), 2200) + Math.random() * 300;
       await delay(typingMs);
 
       // Guard — user may have stopped mid-burst
