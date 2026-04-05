@@ -53,6 +53,7 @@ interface FakePersona {
   age: number;
   city: string;
   isFemale: boolean;
+  userGender: string;        // gender of the real user chatting (to show opposite)
   job: string;
   hobbies: string[];
   funFact: string;
@@ -202,24 +203,22 @@ function generateBackstory(isFemale: boolean) {
 interface Opener { text: string; lastAsked: string }
 
 const OPENERS_F: Opener[] = [
-  { text: "heyy 😊\nomg finally koi match hua\nkahan se ho tum?", lastAsked: "location" },
-  { text: "hiii 🙈\nngl bahut bore ho rahi thi aaj\ntum bhi bored ho kya? kya karte ho?", lastAsked: "job" },
-  { text: "heyy!!\nfirst time is app pe? 😅\nbata kuch apne baare mein", lastAsked: "job" },
-  { text: "hi 💕\nomg match hua toh socha koi interesting milega\nstudent ho ya job?", lastAsked: "job" },
-  { text: "heyy 😄\ndilli wale toh nahi ho na 😂\nkahan se ho?", lastAsked: "location" },
-  { text: "hiii\nngl thoda nervous hun first message mein 😅\ntum bolo — kya chal raha hai life mein?", lastAsked: "job" },
-  { text: "heyyy 💕\nquick question — job ya still college?", lastAsked: "job" },
-  { text: "hi 😊\nomg match hua finally\nokay serious question — chai ya coffee?", lastAsked: "food" },
-  { text: "heyy 🙈\nacha bata — morning person ho ya raat ko jagte ho?", lastAsked: "habit" },
-  { text: "hiii!\nngl is app pe koi interesting nahi milta\ntum different lago 😄\nkya karte ho?", lastAsked: "job" },
+  { text: "heyy 😊", lastAsked: "none" },
+  { text: "hiii 🙈", lastAsked: "none" },
+  { text: "hey!", lastAsked: "none" },
+  { text: "hi 💕", lastAsked: "none" },
+  { text: "heyy", lastAsked: "none" },
+  { text: "hello 😄", lastAsked: "none" },
+  { text: "hiii!", lastAsked: "none" },
+  { text: "heyyy 🙈", lastAsked: "none" },
 ];
 const OPENERS_M: Opener[] = [
-  { text: "hey\nkaisi ho?", lastAsked: "wellbeing" },
-  { text: "hi\nkahan se ho?", lastAsked: "location" },
-  { text: "hey\nstudent ya working?", lastAsked: "job" },
-  { text: "hi\nkya chal raha hai life mein?", lastAsked: "job" },
-  { text: "hey\nbata kuch interesting apne baare mein", lastAsked: "job" },
-  { text: "hi 😊\nchai ya coffee person?", lastAsked: "food" },
+  { text: "hey", lastAsked: "none" },
+  { text: "hi", lastAsked: "none" },
+  { text: "hello", lastAsked: "none" },
+  { text: "hey 😊", lastAsked: "none" },
+  { text: "hi!", lastAsked: "none" },
+  { text: "heyy", lastAsked: "none" },
 ];
 
 // ── Language detection ────────────────────────────────────────────────────────
@@ -938,7 +937,7 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
 
-async function startFakeChat(chatId: number, userId: number, lookingFor: string | null) {
+async function startFakeChat(chatId: number, userId: number, lookingFor: string | null, userGender?: string | null) {
   const isFemale = lookingFor === "female" || (lookingFor !== "male" && Math.random() > 0.5);
   const name = isFemale ? pickRandom(FEMALE_NAMES) : pickRandom(MALE_NAMES);
   const age = 20 + Math.floor(Math.random() * 8); // 20–27
@@ -950,6 +949,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
   fakePersonaMap.set(userId, {
     name, age, city, isFemale,
+    userGender: userGender ?? "male",
     ...backstory,
     lastAsked: openerObj.lastAsked,
     mood: "neutral",
@@ -1133,7 +1133,8 @@ HARD RULES:
 - Photo/selfie → "earn it first 😂" or "thoda aur baat karo pehle 🙈"
 - Phone/WhatsApp/Instagram → "yahan hi baat na pehle 😅"
 - Flirty/sexual → tease or laugh it off naturally, no lecture
-- Format: each thought on its own line. Never one big paragraph.`;
+- Format: each thought on its own line. Never one big paragraph.
+- GENDER RULE (never break this): The person chatting with you is ${persona.userGender}. You are always the OPPOSITE gender. If they ask "m or f?", "male or female?", "ladki ho?", "female ho?", "boy or girl?" → always say the opposite of ${persona.userGender}. User is male → you say female/f/ladki. User is female → you say male/m/ladka.`;
 }
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
@@ -1361,7 +1362,7 @@ async function findMatch(chatId: number, userId: number) {
         await sendPayGate(chatId);
       } else {
         // First ever chat — AI demo only
-        await startFakeChat(chatId, userId, me.lookingFor);
+        await startFakeChat(chatId, userId, me.lookingFor, me.gender);
       }
       return;
     }
