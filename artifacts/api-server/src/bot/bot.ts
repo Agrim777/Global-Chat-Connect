@@ -1637,7 +1637,7 @@ async function startSetup(chatId: number, id: number) {
     state: "setup_name",
   });
   await bot.sendMessage(chatId,
-    "Let's build your profile! 🎉\n\n*Step 1 of 6* — 📝 What should we call you?\n\n_Type your first name only._",
+    "Sirf 3 sawaal — phir dating shuru! 🎉\n\n*Step 1 of 3* — 📝 Apna naam batao?\n\n_Sirf first name._",
     { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
   );
 }
@@ -1789,7 +1789,7 @@ bot.on("message", async (msg) => {
       const capitalized = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
       await upsertUser(id, { name: capitalized, state: isEdit ? "idle" : "setup_age" });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 🎉\n\n*Step 2 of 6* — 🎂 How old are you?`, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 😊\n\n*Step 2 of 3* — 🎂 Umar kitni hai?`, { parse_mode: "Markdown" });
       return;
     }
 
@@ -1803,7 +1803,7 @@ bot.on("message", async (msg) => {
       }
       await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `*Step 3 of 6* — ⚤ What's your *gender*?`, {
+      await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ Tumhara gender?`, {
         parse_mode: "Markdown",
         reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true },
       });
@@ -1816,12 +1816,13 @@ bot.on("message", async (msg) => {
       const gMap: Record<string, "male"|"female"|"other"> = { male:"male", female:"female", other:"other" };
       const g = gMap[text.toLowerCase()];
       if (!g) { await bot.sendMessage(chatId, "Please tap Male, Female, or Other."); return; }
-      await upsertUser(id, { gender: g, state: isEdit ? "idle" : "setup_looking_for" });
-      if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `*Step 4 of 6* — 💞 Who are you *looking for*?`, {
-        parse_mode: "Markdown",
-        reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }]], resize_keyboard: true, one_time_keyboard: true },
-      });
+      if (isEdit) {
+        await upsertUser(id, { gender: g, state: "idle" });
+        await finishEditField(chatId, id); return;
+      }
+      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle", isProfileComplete: true });
+      const updated = await getUser(id);
+      await sendMain(chatId, updated!, "🎉 Profile ready! Ab shuru karte hain — tap 💘 *Find Match* to begin!");
       return;
     }
 
