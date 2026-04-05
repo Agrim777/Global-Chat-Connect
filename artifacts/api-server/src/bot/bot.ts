@@ -907,33 +907,54 @@ function schedulePayReminder(chatId: number, userId: number, matchName?: string)
 async function sendPayGate(chatId: number, prefix?: string, matchName?: string) {
   const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
   const msgs = [
-    `⏰ *Tumhara free time khatam ho gaya...*\n\n` +
-    `*${name}* abhi bhi yahan hai 🥺\n` +
+    `⏰ <b>Tumhara free time khatam ho gaya...</b>\n\n` +
+    `<b>${name}</b> abhi bhi yahan hai 🥺\n` +
     `Woh baat karna chahti thi — tum hi ruk gaye.\n\n` +
     `Ek baar ka ₹199 — phir koi timer nahi, koi rukawat nahi.\n` +
     `Pay karo → screenshot bhejo → 2 min mein unlock 🔓\n\n` +
     `👇`,
 
-    `💔 *${name} ne poochha — "woh wapas aayenge?"*\n\n` +
+    `💔 <b>${name} ne poochha — "woh wapas aayenge?"</b>\n\n` +
     `Ek accha conversation tha. Sirf ₹199 ki wajah se toot gaya.\n\n` +
     `Unlock karo — ek payment, unlimited real baat.\n` +
     `Pay karo → screenshot bhejo → account unlock ✅\n\n` +
     `👇`,
 
-    `😶 *Itni jaldi?*\n\n` +
-    `*${name}* abhi bhi online hai.\n` +
+    `😶 <b>Itni jaldi?</b>\n\n` +
+    `<b>${name}</b> abhi bhi online hai.\n` +
     `Woh soch rahi hai tum serious the ya nahi...\n\n` +
     `Prove it. ₹199 ek baar. Phir jitna chaaho baat karo.\n` +
     `Pay → screenshot yahan bhejo → unlock in minutes 🔓\n\n` +
     `👇`,
   ];
   const msg = msgs[Math.floor(Math.random() * msgs.length)];
-  await bot.sendMessage(chatId, (prefix ? `${prefix}\n\n` : ``) + msg, {
-    parse_mode: "Markdown",
+  const fullText = (prefix ? `${prefix}\n\n` : ``) + msg;
+  try {
+    await bot.sendMessage(chatId, fullText, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
+      },
+    });
+  } catch {
+    // HTML failed — retry as plain text (always works)
+    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), {
+      reply_markup: {
+        inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
+      },
+    });
+  }
+  // Reset keyboard from "🛑 Stop Chat" to main menu
+  await bot.sendMessage(chatId, "👆 Button dabao upar wala — ya neeche se match dhundo!", {
     reply_markup: {
-      inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
+      keyboard: [
+        [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
+        [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
+      ],
+      resize_keyboard: true,
     },
-  });
+  }).catch(() => {});
+  console.log(`[PAYGATE SENT] chatId=${chatId} name=${name}`);
 }
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
@@ -993,17 +1014,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await sendPayGate(chatId, "⏰ *Waqt khatam ho gaya...*", persona?.name);
-        // Reset keyboard from "🛑 Stop Chat" to main menu so user isn't stuck
-        await bot.sendMessage(chatId, "👆 Oopar wala button press karo to unlock karo!", {
-          reply_markup: {
-            keyboard: [
-              [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
-              [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
-            ],
-            resize_keyboard: true,
-          },
-        }).catch(() => {});
+        await sendPayGate(chatId, "⏰ Waqt khatam ho gaya...", persona?.name);
         schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
@@ -1105,35 +1116,34 @@ YOUR LIFE (stay 100% consistent — this is who you are):
 - Random fact about you: ${persona.funFact}
 - Your vibe: ${persona.personality}
 
-YOU TEXT EXACTLY LIKE A REAL GIRL ON WHATSAPP. That means:
+YOU TEXT EXACTLY LIKE A REAL GIRL ON WHATSAPP:
 
-SHORT AND NATURAL — no structure, no paragraphs:
-- Sometimes just 1 line. Sometimes 2 short lines. Never a list, never 3+ structured sentences.
-- "haha sach mein? 😂" is a complete reply. "hmm idk" is a complete reply.
-- React to what they said in the most natural way possible. Then maybe add one more thing — or not.
-- Don't always ask a question. Real people don't. Sometimes just say something and stop.
-- When you do ask something, ask ONE thing only. Not three questions in a row.
+HOW TO REPLY:
+- Read what they ACTUALLY said. Reply to THAT. Not a generic greeting.
+- If they say "hi" or "hello" back → don't say "kya haal chaal" again. Instead ask something: "kahan se ho?", "kya karte ho?", or share something: "aaj kuch bhi nahi hua mere saath lol"
+- If they ask where you're from → "${persona.city} se. tum?" — done. Simple.
+- If they share something → react to it specifically. "Delhi? yaar gaye nahi kabhi achha hoga"
+- If they say something short like "ok" or "hm" → share something new about your day or ask one thing
 
-REAL WHATSAPP TYPING STYLE:
-- all lowercase mostly. "haan", "kya", "nahi", "acha", "lol", "omg", "yaar", "arrey", "ngl"
-- short forms: "kya kr rha", "bol na", "hn", "toh", "bhai", "yaa", "nope"
-- occasional typo then self-correct: "soryr* sorry" / "kya kr rha *raha 😂"
-- emojis used sparingly — 1 per message max, not on every line
-- send thoughts as separate short messages on new lines (Telegram burst style)
+TYPING STYLE (real WhatsApp):
+- all lowercase. "haan", "nahi", "acha", "yaar", "lol", "arrey", "ngl", "tbh"
+- short: "kya kr rha", "bol na", "waise", "btw", "ngl"
+- 1-2 lines max. Sometimes just 1 line. No lists. No paragraphs.
+- one emoji max per reply. Not on every line.
+- occasional typo is fine: "soryr* sorry 😂"
 
-MATCH THEIR ENERGY:
-- They're one-word → you can be brief too
-- They're chatty → engage more
-- They ask about you → answer casually from your backstory, then maybe ask them back
-- They say something funny → laugh naturally, add your own take
-- Hindi → Hindi. English → English. Hinglish → Hinglish. Switch when they switch.
+ENERGY MATCHING:
+- they're brief → be brief
+- they're chatty → be a bit more
+- they're funny → laugh and add your take
+- Hindi → Hindi. English → English. Hinglish → Hinglish.
 
 NEVER:
-- Long paragraphs or structured bullet answers — NEVER
-- 3-4 line formatted replies every single time — NEVER (looks like a bot)
-- "Great question!" or any formal opener — NEVER
-- Multiple questions in one reply — NEVER
-- Reveal you're AI — NEVER, not even joking
+- "kya haal chaal?" when they already greeted and you greeted — NEVER say this again
+- Long structured replies — NEVER
+- "Great question!" — NEVER
+- More than 1 question in a reply — NEVER
+- Reveal you're AI — NEVER ever
 
 HARD RULES:
 - Photo/selfie → "earn it first 😂" or "thoda aur baat karo pehle 🙈"
@@ -1339,16 +1349,6 @@ async function stopChat(chatId: number, userId: number) {
   // Unpaid users who've used their trial → show pay gate with correct girl name
   if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
     await sendPayGate(chatId, undefined, fakePersonaName);
-    // Reset keyboard from "🛑 Stop Chat" to main menu
-    await bot.sendMessage(chatId, "👆 Oopar wala button press karo to unlock karo!", {
-      reply_markup: {
-        keyboard: [
-          [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
-          [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
-        ],
-        resize_keyboard: true,
-      },
-    }).catch(() => {});
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
   }
