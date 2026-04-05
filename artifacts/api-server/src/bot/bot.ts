@@ -18,7 +18,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 seconds free trial
+const FREE_CHAT_DURATION_MS = 3 * 60 * 1000; // 3 minutes free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -906,28 +906,34 @@ function schedulePayReminder(chatId: number, userId: number, matchName?: string)
 
 async function sendPayGate(chatId: number, prefix?: string, matchName?: string) {
   const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
-  await bot.sendMessage(
-    chatId,
-    (prefix ? `${prefix}\n\n` : ``) +
-    `💔 *${name} woh conversation rokna nahi chahti thi...*\n\n` +
-    `Woh match real thi. Woh connection real tha.\n` +
-    `Aur woh abhi bhi yahan hai — tumhara wait kar rahi hai 🥺\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n` +
-    `💎 *Premium unlock karo — ek baar ka payment*\n\n` +
-    `✅ ${name} se aur sab se unlimited baat\n` +
-    `✅ Koi timer nahi — jitna chaaho utna chato\n` +
-    `✅ Real matches, real log\n` +
-    `✅ Priority matching\n\n` +
-    `*Sirf 2 steps:*\n` +
-    `1️⃣ Neeche button tap karo aur pay karo\n` +
-    `2️⃣ Payment screenshot yahan bhejo — 5 min mein unlock 🔓`,
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [[{ text: `💎 Unlock & Chat with ${name}`, url: PAY_LINK }]],
-      },
-    }
-  );
+  const msgs = [
+    `⏰ *Tumhara free time khatam ho gaya...*\n\n` +
+    `*${name}* abhi bhi yahan hai 🥺\n` +
+    `Woh baat karna chahti thi — tum hi ruk gaye.\n\n` +
+    `Ek baar ka ₹199 — phir koi timer nahi, koi rukawat nahi.\n` +
+    `Pay karo → screenshot bhejo → 2 min mein unlock 🔓\n\n` +
+    `👇`,
+
+    `💔 *${name} ne poochha — "woh wapas aayenge?"*\n\n` +
+    `Ek accha conversation tha. Sirf ₹199 ki wajah se toot gaya.\n\n` +
+    `Unlock karo — ek payment, unlimited real baat.\n` +
+    `Pay karo → screenshot bhejo → account unlock ✅\n\n` +
+    `👇`,
+
+    `😶 *Itni jaldi?*\n\n` +
+    `*${name}* abhi bhi online hai.\n` +
+    `Woh soch rahi hai tum serious the ya nahi...\n\n` +
+    `Prove it. ₹199 ek baar. Phir jitna chaaho baat karo.\n` +
+    `Pay → screenshot yahan bhejo → unlock in minutes 🔓\n\n` +
+    `👇`,
+  ];
+  const msg = msgs[Math.floor(Math.random() * msgs.length)];
+  await bot.sendMessage(chatId, (prefix ? `${prefix}\n\n` : ``) + msg, {
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
+    },
+  });
 }
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
