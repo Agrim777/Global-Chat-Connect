@@ -18,7 +18,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 45 * 1000; // 45 seconds free trial
+const FREE_CHAT_DURATION_MS = 3 * 60 * 1000; // 3 minutes free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -1288,7 +1288,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
       if (!check || check.state !== "chatting" || check.chattingWith !== FAKE_CHAT_ID) return;
       await bot.sendMessage(chatId, msg).catch(() => {});
       p.history.push({ role: "assistant", content: msg });
-    }, 12000);
+    }, 30000);
 
     proactiveTimerMap.set(userId, proactiveTimer);
 
