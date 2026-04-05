@@ -18,7 +18,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 3 * 60 * 1000; // 3 minutes free trial
+const FREE_CHAT_DURATION_MS = 45 * 1000; // 45 seconds free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -978,7 +978,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     await bot.sendMessage(chatId, openerObj.text);
   }
 
-  // 30-second free chat timer — ends chat and shows pay gate when trial expires
+  // 45-second free chat timer — ends chat and shows pay gate when trial expires
   const timer = setTimeout(async () => {
     try {
       chatTimerMap.delete(userId);
