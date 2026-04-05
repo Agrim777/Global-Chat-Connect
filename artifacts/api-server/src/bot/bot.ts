@@ -960,7 +960,7 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
 
 async function startFakeChat(chatId: number, userId: number, lookingFor: string | null, userGender?: string | null) {
-  const isFemale = lookingFor === "female" || (lookingFor !== "male" && Math.random() > 0.5);
+  const isFemale = userGender === "male" ? true : userGender === "female" ? false : Math.random() > 0.5;
   const name = isFemale ? pickRandom(FEMALE_NAMES) : pickRandom(MALE_NAMES);
   const age = 20 + Math.floor(Math.random() * 8); // 20–27
   const openerObj = isFemale ? pickRandom(OPENERS_F) : pickRandom(OPENERS_M);
