@@ -1014,7 +1014,18 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await sendPayGate(chatId, "⏰ Waqt khatam ho gaya...", persona?.name);
+        // Show "typing..." for 2s then a teaser — creates curiosity gap before paygate
+        await bot.sendChatAction(chatId, "typing").catch(() => {});
+        await new Promise(r => setTimeout(r, 2000));
+        const teasers = [
+          `💬 ${persona?.name ?? "Woh"} kuch kehne wali thi...\n\n_"main tumhe ek baat batana chahti thi —"_\n\n🔒 Message locked.`,
+          `✍️ ${persona?.name ?? "Woh"} type kar rahi thi...\n\n_"acha suno, actually mujhe tumse —"_\n\n🔒 Message locked.`,
+          `💭 ${persona?.name ?? "Woh"} ne likha aur phir ruk gayi...\n\n_"yaar seriously tum thoda different lagte ho —"_\n\n🔒 Message locked.`,
+        ];
+        const teaser = teasers[Math.floor(Math.random() * teasers.length)];
+        await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
+        await new Promise(r => setTimeout(r, 1500));
+        await sendPayGate(chatId, "⏰ Free preview khatam...", persona?.name);
         schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
