@@ -960,6 +960,12 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
 
 async function startFakeChat(chatId: number, userId: number, lookingFor: string | null, userGender?: string | null) {
+  // Cancel any existing timer to prevent double paygate
+  const existingTimer = chatTimerMap.get(userId);
+  if (existingTimer) { clearTimeout(existingTimer); chatTimerMap.delete(userId); }
+  const existingProactive = proactiveTimerMap.get(userId);
+  if (existingProactive) { clearTimeout(existingProactive); proactiveTimerMap.delete(userId); }
+
   const isFemale = userGender === "male" ? true : userGender === "female" ? false : Math.random() > 0.5;
   const name = isFemale ? pickRandom(FEMALE_NAMES) : pickRandom(MALE_NAMES);
   const age = 20 + Math.floor(Math.random() * 8); // 20–27
@@ -1258,8 +1264,8 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
       // Show typing indicator before each message
       bot.sendChatAction(chatId, "typing").catch(() => {});
 
-      // Typing delay = chars × 100ms + jitter, min 1500ms, max 5000ms (human speed)
-      const typingMs = Math.min(Math.max(parts[i].length * 100, 1500), 5000) + Math.random() * 500;
+      // Typing delay = chars × 65ms + jitter, min 1000ms, max 3500ms (natural human speed)
+      const typingMs = Math.min(Math.max(parts[i].length * 65, 1000), 3500) + Math.random() * 400;
       await delay(typingMs);
 
       // Guard — user may have stopped mid-burst
