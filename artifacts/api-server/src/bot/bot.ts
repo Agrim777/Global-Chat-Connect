@@ -2100,6 +2100,29 @@ bot.onText(/\/test/, async (msg) => {
   }
 });
 
+// ── Admin /demo — test AI chat as if you're a fresh free user ─────────────────
+bot.onText(/\/demo/, async (msg) => {
+  if (msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+  const userId = msg.from!.id;
+  const u = await getUser(userId);
+  // Temporarily reset chatCount so admin can experience the fake chat
+  await db.update(usersTable)
+    .set({ state: "idle", chattingWith: null, chatCount: 0, updatedAt: new Date() })
+    .where(eq(usersTable.id, userId));
+  await bot.sendMessage(chatId, "🔧 Demo mode: Starting AI chat as a fresh user. Use /restore to go back to premium.");
+  await startFakeChat(chatId, userId, u?.lookingFor ?? "any", u?.gender ?? "male");
+});
+
+bot.onText(/\/restore/, async (msg) => {
+  if (msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+  await db.update(usersTable)
+    .set({ state: "idle", chattingWith: null, chatCount: 1, hasPaid: true, updatedAt: new Date() })
+    .where(eq(usersTable.id, msg.from!.id));
+  await bot.sendMessage(chatId, "✅ Restored to premium. All good.");
+});
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 bot.onText(/\/profile/, async (msg) => {
