@@ -204,22 +204,22 @@ function generateBackstory(isFemale: boolean) {
 interface Opener { text: string; lastAsked: string }
 
 const OPENERS_F: Opener[] = [
-  { text: "heyy 😊", lastAsked: "none" },
-  { text: "hiii 🙈", lastAsked: "none" },
-  { text: "hey!", lastAsked: "none" },
-  { text: "hi 💕", lastAsked: "none" },
-  { text: "heyy", lastAsked: "none" },
-  { text: "hello 😄", lastAsked: "none" },
-  { text: "hiii!", lastAsked: "none" },
-  { text: "heyyy 🙈", lastAsked: "none" },
+  { text: "heyy! pehli baar ho is app pe? 😊", lastAsked: "intro" },
+  { text: "hiii 🙈 kahan se ho tum?", lastAsked: "city" },
+  { text: "hey! finally koi mila baat karne ko 😂 kya chal raha hai?", lastAsked: "none" },
+  { text: "heyy, boring lag raha tha toh socha baat karte hain 😄 tum kya karte ho?", lastAsked: "job" },
+  { text: "hiii! tumhara naam kya hai? 😊", lastAsked: "name" },
+  { text: "heyy! kaafi din se koi dhang ka banda nahi mila baat karne ko 😂 tum theek lagte ho", lastAsked: "none" },
+  { text: "hi 💕 kahan se ho?", lastAsked: "city" },
+  { text: "heyy, bata kuch apne baare mein — naam, kahan se 😊", lastAsked: "intro" },
 ];
 const OPENERS_M: Opener[] = [
-  { text: "hey", lastAsked: "none" },
-  { text: "hi", lastAsked: "none" },
-  { text: "hello", lastAsked: "none" },
-  { text: "hey 😊", lastAsked: "none" },
-  { text: "hi!", lastAsked: "none" },
-  { text: "heyy", lastAsked: "none" },
+  { text: "hey! kahan se ho tum? 😊", lastAsked: "city" },
+  { text: "hi, pehli baar ho is app pe?", lastAsked: "intro" },
+  { text: "hey! boring lag raha tha akele 😂 kya chal raha hai?", lastAsked: "none" },
+  { text: "heyy, tumhara naam kya hai? 😊", lastAsked: "name" },
+  { text: "hi! kya karte ho? 😊", lastAsked: "job" },
+  { text: "hey, finally koi mila 😄 kahan se ho?", lastAsked: "city" },
 ];
 
 // ── Language detection ────────────────────────────────────────────────────────
@@ -1190,9 +1190,9 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     // Add user message to history
     persona.history.push({ role: "user", content: userText });
 
-    // Phase 1 — reading delay (brief, keeps trial chat active)
-    // 600ms base + ~15ms per char (max 600ms) + small jitter
-    const readMs = 600 + Math.min(userText.length * 15, 600) + Math.random() * 400;
+    // Phase 1 — show "seen / reading" feel immediately, then think
+    bot.sendChatAction(chatId, "typing").catch(() => {}); // instant activity — she's reading
+    const readMs = 800 + Math.min(userText.length * 20, 800) + Math.random() * 500;
     await delay(readMs);
 
     // Guard: user may have left during delay
