@@ -885,97 +885,70 @@ const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha
 
 function schedulePayReminder(chatId: number, userId: number, matchName?: string) {
   const girl = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
-
-  const sendReminder = async (msgText: string) => {
+  setTimeout(async () => {
     try {
       const u = await getUser(userId);
-      if (!u || u.hasPaid) return; // already paid — skip
-      await bot.sendMessage(chatId, msgText, {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [[{ text: "💎 ₹199 — Unlock Karo", url: PAY_LINK }]],
-        },
-      }).catch(() => {});
+      if (!u || u.hasPaid) return;
+      await bot.sendMessage(
+        chatId,
+        `💭 *${girl}* abhi bhi soch rahi hai tumhare baare mein...\n\n` +
+        `Usne mujhse kaha — _"woh alag the, kash aur baat hoti"_ 🥺\n\n` +
+        `Woh wait kar rahi hai. Aaj unlock karo — kal bahut der ho sakti hai 💔\n\n` +
+        `👉 [Premium Unlock Karo](${PAY_LINK})\n\n` +
+        `_Pay karke screenshot bhejo — 5 min mein wapas connected 🔓_`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
     } catch { /* silent */ }
-  };
-
-  // Reminder 1 — 10 minutes
-  setTimeout(() => sendReminder(
-    `💭 *${girl}* abhi bhi online hai...\n\n` +
-    `_"woh wapas aaye nahi... shayad serious nahi the"_ — yahi soch rahi hai woh 🥺\n\n` +
-    `Prove her wrong. Sirf ₹199.`
-  ), 10 * 60 * 1000);
-
-  // Reminder 2 — 1 hour
-  setTimeout(() => sendReminder(
-    `⏳ 1 ghanta ho gaya...\n\n` +
-    `*${girl}* ne koi aur match nahi dhundha — woh abhi bhi tumhara wait kar rahi hai 💕\n\n` +
-    `Ek baar pay karo, phir koi timer nahi. Real baat, real log.`
-  ), 60 * 60 * 1000);
-
-  // Reminder 3 — next morning (18 hours)
-  setTimeout(() => sendReminder(
-    `🌅 Good morning!\n\n` +
-    `*${girl}* ne subah uthke sabse pehle app check kiya — tumhara naam dekha 🥺\n\n` +
-    `Aaj unlock karo. ₹199 ek baar — phir unlimited real conversations 💕`
-  ), 18 * 60 * 60 * 1000);
+  }, 5 * 60 * 1000);
 }
 
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
 async function sendPayGate(chatId: number, prefix?: string, matchName?: string) {
   const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
-  const hooks = [
+  const msgs = [
     `⏰ <b>Tumhara free time khatam ho gaya...</b>\n\n` +
     `<b>${name}</b> abhi bhi yahan hai 🥺\n` +
-    `Woh baat karna chahti thi — tum hi ruk gaye.`,
+    `Woh baat karna chahti thi — tum hi ruk gaye.\n\n` +
+    `Ek baar ka ₹199 — phir koi timer nahi, koi rukawat nahi.\n` +
+    `Pay karo → screenshot bhejo → 2 min mein unlock 🔓\n\n` +
+    `👇`,
 
     `💔 <b>${name} ne poochha — "woh wapas aayenge?"</b>\n\n` +
-    `Ek accha conversation tha. Sirf ₹199 ki wajah se toot gaya.`,
+    `Ek accha conversation tha. Sirf ₹199 ki wajah se toot gaya.\n\n` +
+    `Unlock karo — ek payment, unlimited real baat.\n` +
+    `Pay karo → screenshot bhejo → account unlock ✅\n\n` +
+    `👇`,
 
     `😶 <b>Itni jaldi?</b>\n\n` +
     `<b>${name}</b> abhi bhi online hai.\n` +
-    `Woh soch rahi hai — tum serious the ya nahi?`,
+    `Woh soch rahi hai tum serious the ya nahi...\n\n` +
+    `Prove it. ₹199 ek baar. Phir jitna chaaho baat karo.\n` +
+    `Pay → screenshot yahan bhejo → unlock in minutes 🔓\n\n` +
+    `👇`,
   ];
-  const hook = hooks[Math.floor(Math.random() * hooks.length)];
-
-  const howTo =
-    `\n\n━━━━━━━━━━━━━━━━\n` +
-    `💎 <b>Unlock karna bahut easy hai:</b>\n\n` +
-    `1️⃣ Neeche button dabao — ₹199 pay karo\n` +
-    `2️⃣ Payment success screen ka screenshot lo\n` +
-    `3️⃣ Woh screenshot <b>is chat mein bhejo</b>\n` +
-    `4️⃣ 2 minute mein unlock ho jaayega ✅\n\n` +
-    `<i>Sirf ek baar payment — phir unlimited baat, koi timer nahi 💕</i>`;
-
-  const fullText = (prefix ? `${prefix}\n\n` : ``) + hook + howTo;
-
+  const msg = msgs[Math.floor(Math.random() * msgs.length)];
+  const fullText = (prefix ? `${prefix}\n\n` : ``) + msg;
   try {
     await bot.sendMessage(chatId, fullText, {
       parse_mode: "HTML",
       reply_markup: {
-        inline_keyboard: [
-          [{ text: `💎 ₹199 — Unlock & Chat Now`, url: PAY_LINK }],
-        ],
+        inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
       },
     });
   } catch {
     await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), {
       reply_markup: {
-        inline_keyboard: [
-          [{ text: `💎 ₹199 — Unlock & Chat Now`, url: PAY_LINK }],
-        ],
+        inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
       },
     });
   }
-
-  // Keyboard with "Maine Pay Kar Diya" to guide users who've paid
-  await bot.sendMessage(chatId, "👆 Pay karo aur screenshot yahan bhejo!", {
+  // Reset keyboard from "🛑 Stop Chat" to main menu
+  await bot.sendMessage(chatId, "👆 Button dabao upar wala — ya neeche se match dhundo!", {
     reply_markup: {
       keyboard: [
-        [{ text: "📸 Maine Pay Kar Diya!" }],
-        [{ text: "💘 Find Match" }, { text: "✅ Premium" }],
-        [{ text: "👤 My Profile" }, { text: "✏️ Edit Profile" }],
+        [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
+        [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
       ],
       resize_keyboard: true,
     },
@@ -1743,7 +1716,7 @@ bot.on("message", async (msg) => {
     // ── Escape hatch: pressing any main-menu button while stuck in a setup step resets to idle ──
     const MAIN_MENU_BUTTONS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile",
       "🛑 Stop Matching", "🛑 Stop Chat", "💎 Go Premium",
-      "✅ Premium", "💳 Support Us", "🚀 Setup Profile", "📸 Maine Pay Kar Diya!"];
+      "✅ Premium", "💳 Support Us", "🚀 Setup Profile"];
     if (MAIN_MENU_BUTTONS.includes(text) &&
         user.state !== "idle" && user.state !== "chatting") {
       editModeMap.delete(id);
@@ -1821,8 +1794,7 @@ bot.on("message", async (msg) => {
       // Allow "skip" during edit to keep current value
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
       const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat",
-        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "🚀 Setup Profile",
-        "📸 Maine Pay Kar Diya!", ...EDIT_FIELD_LABELS];
+        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
       if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text) || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text)) {
         await bot.sendMessage(chatId, "Please type your real name (letters only, 2–50 chars).", { reply_markup: { remove_keyboard: true } });
         return;
@@ -2072,21 +2044,6 @@ bot.on("message", async (msg) => {
       return;
     }
     if (text === "💳 Support Us") { await sendPayGate(chatId); return; }
-
-    // User says they've already paid — guide them to send screenshot
-    if (text === "📸 Maine Pay Kar Diya!") {
-      if (user.hasPaid) {
-        await bot.sendMessage(chatId, "✅ Tumhara account already premium hai! Tap 💘 Find Match to connect.");
-      } else {
-        await bot.sendMessage(chatId,
-          `🙌 Bahut acha! Ab bas ek kaam:\n\n` +
-          `📱 Payment confirmation ka screenshot lo aur <b>yahan is chat mein bhejo</b>.\n\n` +
-          `Hum 2 minute mein verify karke tumhara account unlock kar denge 🔓💕`,
-          { parse_mode: "HTML" }
-        );
-      }
-      return;
-    }
 
     // Unrecognised input:
     // — if free user who used trial, they're probably confused & trying to chat → show paygate
