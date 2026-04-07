@@ -8,8 +8,7 @@ import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 
 const aiClient = new OpenAI({
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
-  apiKey:  process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? "dummy",
+  apiKey: process.env.OPENAI_API_KEY ?? "",
 });
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
