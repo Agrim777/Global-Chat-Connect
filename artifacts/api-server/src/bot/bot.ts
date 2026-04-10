@@ -1375,6 +1375,447 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
     ]);
   }
 
+  // ── Are you AI / bot / real ───────────────────────────────────────────────
+  if (/are you (a )?bot|are you ai|are you (a )?robot|are you real|are you human|are you (a )?fake|bot hai|ai hai|robot hai|real ho|real hai|insaan ho|insaan hai|asli ho|asli hai|fake ho|fake hai|kya tum real|kya tum asli|tum bot|tum ai|machine ho|computer ho|chatbot|artificial|programmed|automated/.test(t)) {
+    return rnd(f ? [
+      ["haha kya matlab bot 😂", "bilkul real hun main, offend ho gayi thodi 😄"],
+      ["omg bot?! 😂", "yeh toh insult hai yaar — main sach mein real hun"],
+      ["haha nahi yaar 🙈", "ek real ladki hun, bot hoti toh itna overthink nahi karti 😂"],
+      ["real hun baba 😄", "bot hoti toh tumse itni casually baat nahi karti na"],
+      ["main? bot? 😂😂", "dekho agar bot hoti toh raat ko bore nahi hoti 😄"],
+      ["haha nahi re 😊", "real hun — bas phone pe zyada time spend karti hun 😂"],
+    ] : [
+      ["haha yaar main real hun 😄", "bot hota toh itna bakwas nahi karta"],
+      ["real hun bhai 😂", "chill karo"],
+      ["bot nahi hun 😄", "ek real banda hun bas"],
+    ]);
+  }
+
+  // ── Favourite food ────────────────────────────────────────────────────────
+  if (/fav.*food|favourite.*food|fav.*khana|pasand.*khana|khana.*pasand|what.*eat|kya.*khate|kya.*khana|food.*preference|khane mein|khane ka|biryani|pizza|burger|maggi|rajma|chole|momos/.test(t)) {
+    return rnd(f ? [
+      ["biryani 😍", "koi match hi nahi hai uska honestly"],
+      ["maggi at midnight 😂", "bas yahi life hai"],
+      ["chole bhature 🤤", "aur chai saath mein — perfect combo"],
+      ["haha momos 🥟", "extra schezwan wale — tum?"],
+      ["rajma chawal 😍", "ghar ka bana hua — ekdum comfort food"],
+    ] : [
+      ["biryani obviously 😄", "aur tum?"],
+      ["pizza 🍕", "thin crust wala — tum?"],
+      ["maggi at midnight hits different 😂", "tum?"],
+    ]);
+  }
+
+  // ── Chai vs coffee ────────────────────────────────────────────────────────
+  if (/chai|tea|coffee|chai ya coffee|coffee ya chai|tea or coffee/.test(t)) {
+    return rnd(f ? [
+      ["chai gang 🍵", "cutting chai — subah pehle yahi chahiye"],
+      ["chai obviously 😄", "coffee se zyada attach hun main"],
+      ["dono 😂", "subah coffee, shaam chai — best of both"],
+      ["chai 🙈", "roz subah ek cup nahi mila toh mood kharab ho jaata hai"],
+    ] : [
+      ["chai 🍵", "tum?"],
+      ["coffee actually 😄", "neend bhagani padti hai 😂"],
+    ]);
+  }
+
+  // ── Favourite movie / web series ─────────────────────────────────────────
+  if (/fav.*movie|favourite.*movie|best.*movie|fav.*series|web series|netflix|ott|bollywood|hollywood|koi movie|movie recommend|series recommend|kya dekh|currently watching/.test(t)) {
+    return rnd(f ? [
+      ["Zindagi Na Milegi Dobara 😍", "kitni baar dekha hai count nahi 😂"],
+      ["haha 3 Idiots 😄", "classic hai — kabhi bore nahi karti"],
+      ["Queen 🥹", "Kangana ki acting literally goosebumps"],
+      ["Masaan 🥺", "emotional kar deti hai honestly"],
+      ["abhi Panchayat dekh rahi hun 😄", "bahut sahi hai yaar — tum?"],
+    ] : [
+      ["Gangs of Wasseypur 😄", "classic — tum?"],
+      ["3 Idiots honestly 😊", "sabse zyada relate kiya"],
+      ["Dil Chahta Hai 😄", "friendship goals wali film"],
+    ]);
+  }
+
+  // ── Favourite song / music ────────────────────────────────────────────────
+  if (/fav.*song|favourite.*song|fav.*singer|fav.*music|music.*pasand|kya.*sun|kaunsa.*song|song.*recommend|singer.*kaun|gaana|gana/.test(t)) {
+    return rnd(f ? [
+      ["Arijit Singh ka koi bhi 🥺", "mood ke hisaab se song change hota hai"],
+      ["haha oldies person hun 😄", "Kishore Kumar, Lata ji — classic stuff"],
+      ["abhi Talwinder sun rahi hun 😊", "chill vibe hai uski"],
+      ["lofi playlist pe rehti hun mostly 😄", "koi bhi specific nahi"],
+    ] : [
+      ["Arijit Singh 😊", "tum?"],
+      ["depends on mood honestly 😄", "tum kya suno?"],
+    ]);
+  }
+
+  // ── Travel / places ───────────────────────────────────────────────────────
+  if (/travel|ghumna|trip|tour|favourite.*place|dream.*destination|kahan.*jaana|jaana chahte|hills|mountains|beach|pahad|samundar|goa|manali|kashmir|ladakh/.test(t)) {
+    return rnd(f ? [
+      ["hills person hun main 😍", "Manali ya Kasol — bas niklo"],
+      ["Goa kabhi nahi gayi honestly 😂", "par dream hai ek baar jaane ka"],
+      ["Ladakh 😍", "bucket list pe number 1 hai"],
+      ["haha main toh local trips wali hun 😄", "weekend pe koi nearby jagah — theek hai"],
+    ] : [
+      ["Manali actually 😄", "tum?"],
+      ["Goa honestly 😊", "beach vibes"],
+    ]);
+  }
+
+  // ── Relationship status ───────────────────────────────────────────────────
+  if (/single ho|single hai|bf hai|gf hai|boyfriend|girlfriend|relationship mein|relationship hai|committed|dating|koi hai|koi special|love life|pyaar mein|partner/.test(t)) {
+    return rnd(f ? [
+      ["haha single hun 😄", "tabhi toh yahan hun na 😂"],
+      ["single and definitely not ready to mingle 😂", "jk — abhi toh enjoy kar rahi hun life"],
+      ["filhaal koi nahi 😊", "tum batao?"],
+      ["omg seedha wahan pohunch gaye 😂", "single hun — satisfied?"],
+    ] : [
+      ["single hun 😄", "tum?"],
+      ["filhaal koi nahi 😊", "tum batao"],
+    ]);
+  }
+
+  // ── I love you / propose / flirting ──────────────────────────────────────
+  if (/i love you|love you|i like you|mujhe tumse pyaar|pyaar karta|pyaar karti|propose|will you be|meri girlfriend|mera boyfriend|date me|date karogi|date karoge/.test(t)) {
+    return rnd(f ? [
+      ["omg 🙈", "thoda jaldi nahi hai kya 😂"],
+      ["haha arre 😂", "pehle baat toh karte hain thodi"],
+      ["aww 🥺", "sweet ho tum — par seedha wahan 😂"],
+      ["haha already? 😄", "chill karo yaar — baat karte hain pehle 😊"],
+    ] : [
+      ["haha seedha wahan 😂", "baat toh karo pehle"],
+      ["arre 😄", "thoda patience yaar"],
+    ]);
+  }
+
+  // ── Hobbies ───────────────────────────────────────────────────────────────
+  if (/hobby|hobbies|timepass|free time mein|free time me|kya karte ho free|pastime|interest|kya pasand|kya acha lagta/.test(t)) {
+    return rnd(f ? [
+      ["haha reading aur overthinking 😂", "dono ek saath chalti hain"],
+      ["music sunna 😊 aur long walks actually — weird combo hai na"],
+      ["Netflix bingeing honestly 😄", "aur kabhi kabhi sketching"],
+      ["cooking try karti hun 😂", "results mixed hain 😂 — tum?"],
+    ] : [
+      ["gaming aur music 😄", "tum?"],
+      ["cricket dekhna honestly 😊", "aur coding thodi"],
+    ]);
+  }
+
+  // ── Future plans / dreams ─────────────────────────────────────────────────
+  if (/future plan|5 year|5 saal|dream kya|sapna kya|ambition|goal kya|kya banna chahte|kya banna chahti|life goal|career goal|kahan dekhte|kahan dekhti/.test(t)) {
+    return rnd(f ? [
+      ["honestly? settle karna chahti hun financially 😄", "rest baad mein sochungi"],
+      ["haha ek acchi job aur thoda travel 😊", "simple dream hai mera"],
+      ["MBA karna hai 😄", "abhi decide kar rahi hun"],
+      ["khud ka kuch karna hai ek din 😊", "abhi steps le rahi hun"],
+    ] : [
+      ["apna kuch startup wala idea hai 😄", "dekhte hain"],
+      ["settle karna hai achhe se 😊", "tum?"],
+    ]);
+  }
+
+  // ── Family ────────────────────────────────────────────────────────────────
+  if (/family|ghar mein kaun|bhai|behan|sibling|parents|mummy|papa|mom|dad|bhaiya|didi|chota|bada|akele rehte|hostel/.test(t)) {
+    return rnd(f ? [
+      ["ek bhai hai 😊", "chota hai — irritating but sweet"],
+      ["haha joint family hai 😂", "kabhi kabhi chaos but pyaar hai"],
+      ["parents aur main 😊", "chhoti family — cozy rehta hai ghar"],
+      ["hostel mein hun 😄", "ghar yaad aata hai kabhi kabhi"],
+    ] : [
+      ["parents aur ek behen hai 😊", "tum?"],
+      ["small family hai 😄", "tum batao?"],
+    ]);
+  }
+
+  // ── Social media / number / Instagram ────────────────────────────────────
+  if (/instagram|insta|whatsapp|number do|number doge|number loge|snap|snapchat|social media|contact|connect karte|bahar baat/.test(t)) {
+    return rnd(f ? [
+      ["haha yahan hi theek hai abhi 😅", "thoda aur baat karte hain"],
+      ["abhi nahi yaar 😂", "stranger danger 😄"],
+      ["number? seedha wahan 😂", "pehle baat toh karo"],
+      ["haha Instagram nahi deta strangers ko 🙈", "samjho na"],
+    ] : [
+      ["haha yahan hi baat karo abhi 😄", "thoda time do"],
+      ["abhi nahi yaar 😊", "baad mein dekhenge"],
+    ]);
+  }
+
+  // ── Sleep / night routine ─────────────────────────────────────────────────
+  if (/neend|neend nahi|so nahi|raat bhar|jagte ho|jag rahe|jag rahi|late night|night owl|subah uthna|uthte kab|nींद/.test(t)) {
+    return rnd(f ? [
+      ["haha raat ki neend kya hoti hai 😂", "chronic night owl hun main"],
+      ["2-3 baje tak jaagti hun regularly 😄", "bad habit hai par ho kya sakta"],
+      ["subah uthna mushkil kaam hai mere liye 😂", "alarm 5 baar lagati hun"],
+      ["neend nahi aa rahi kya? 😊", "kya chal raha hai dimaag mein?"],
+    ] : [
+      ["night owl hun 😄", "tum?"],
+      ["late tak jaagta hun usually 😂", "bad habit hai"],
+    ]);
+  }
+
+  // ── Mood — sad / upset ────────────────────────────────────────────────────
+  if (/sad ho|sad hai|sad feel|upset ho|upset hai|dukhi|pareshan|kuch theek nahi|rone ka man|cry|rona|not okay|not good|kuch nahi|chal nahi raha/.test(t)) {
+    return rnd(f ? [
+      ["arre kya hua? 🥺", "bolo na — sun rahi hun"],
+      ["sab theek hai? 😊", "kabhi kabhi bas baat karne se better feel hota hai"],
+      ["aww 🥺", "kya hua — share karo na mujhse"],
+      ["haan kabhi kabhi aisa hota hai 😊", "main yahan hun — bolo"],
+    ] : [
+      ["kya hua? 😊", "bolo bhai"],
+      ["sab theek? 🥺", "main yahan hun"],
+    ]);
+  }
+
+  // ── Mood — happy / excited ────────────────────────────────────────────────
+  if (/khush ho|khush hai|happy ho|excited ho|excited hai|maza aa raha|great feel|feeling good|acha feel|best day/.test(t)) {
+    return rnd(f ? [
+      ["omg kya hua! 😄", "bolo bolo — main bhi khush ho jaati hun"],
+      ["yay! 😊", "kya hua good news?"],
+      ["haha good good 😄", "khushi share karo na"],
+    ] : [
+      ["nice! 😄", "kya hua?"],
+      ["good to hear 😊", "bolo kya hua"],
+    ]);
+  }
+
+  // ── Weather ───────────────────────────────────────────────────────────────
+  if (/mausam|weather|garmi|garam|sardi|thand|baarish|rain|barish|summer|winter|monsoon/.test(t)) {
+    return rnd(f ? [
+      ["haha garmi toh mujhe bhi maar rahi hai 😂", "AC band karo nahi budgeting kharab ho jaati hai"],
+      ["baarish wala mausam best hai honestly 😍", "chai aur khidki — perfect"],
+      ["sardi mein lazy ho jaati hun 😂", "rajai se bahar nahi nikalna"],
+    ] : [
+      ["baarish wala mausam best 😄", "tum?"],
+      ["garmi bahut ho rahi hai yaar 😂", "tum kahan ho?"],
+    ]);
+  }
+
+  // ── Study / exam / work stress ────────────────────────────────────────────
+  if (/exam|padhai|padhna|study|studies|college|university|school|job stress|work stress|boss|office|deadline|project|assignment/.test(t)) {
+    return rnd(f ? [
+      ["haha exam tension samajh sakti hun 😂", "kaunsa subject?"],
+      ["office stress real hai yaar 😄", "kab se chal raha hai?"],
+      ["padhai chal rahi hai? 😊", "kaunsa course?"],
+      ["deadline wala pressure worst hota hai 😂", "all the best yaar"],
+    ] : [
+      ["exam hai? 😊", "kaunsa subject?"],
+      ["office life tough hai yaar 😄", "kya chal raha hai?"],
+    ]);
+  }
+
+  // ── Miss you / when will we meet ─────────────────────────────────────────
+  if (/miss you|yaad aate|yaad aati|yaad aa raha|kab miloge|kab milenge|mil sakte|kabhi miloge|real mein milo/.test(t)) {
+    return rnd(f ? [
+      ["haha abhi toh yahan hun 😄", "virtual hi sahi — baat toh ho rahi hai na"],
+      ["aww 🥺", "cute lag raha hai yeh sun ke honestly"],
+      ["haha pehle baat karo thodi aur 😄", "phir dekhenge"],
+    ] : [
+      ["haha chill 😄", "yahan hi hun abhi"],
+      ["aww 😊", "baat karo — yahi toh hai"],
+    ]);
+  }
+
+  // ── Bye / goodbye ────────────────────────────────────────────────────────
+  if (/^(bye+|byee+|goodbye|alvida|chalte hain|chalta hun|chalti hun|phir milenge|phir baat|take care|tc|talk later|ttyl|gtg|gotta go)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["bye 😊", "phir baat karte hain — kal?"],
+      ["aww jaate ho? 🥺", "accha theek hai — take care 😊"],
+      ["bye bye 😄", "next time aur baat karte hain"],
+      ["okay bye 😊", "take care yaar"],
+    ] : [
+      ["bye 😊", "phir milte hain"],
+      ["take care 😄", "kal baat karte hain"],
+    ]);
+  }
+
+  // ── Thank you ────────────────────────────────────────────────────────────
+  if (/^(thanks|thank you|thankyou|shukriya|dhanyawad|bahut shukriya|bohot thanks|ty|thx)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha koi baat nahi 😊", "yahi toh hun main"],
+      ["arre thanks kisliye 😄", "dosto mein nahi hota yeh sab"],
+      ["mention not 😊", "aur batao?"],
+    ] : [
+      ["koi baat nahi 😊", "aur bolo?"],
+      ["mention not 😄", "kuch aur?"],
+    ]);
+  }
+
+  // ── Sorry / apology ──────────────────────────────────────────────────────
+  if (/^(sorry|maafi|galti|mujhe maaf|maaf karo|maaf karna|i am sorry|i'm sorry)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha kisliye sorry 😂", "kuch hua hi nahi"],
+      ["arre chill 😄", "koi baat nahi yaar"],
+      ["okay okay sorry accepted 😂", "aur batao?"],
+    ] : [
+      ["chill yaar 😄", "koi baat nahi"],
+      ["haha it's okay 😊", "aur bolo"],
+    ]);
+  }
+
+  // ── Height / appearance ───────────────────────────────────────────────────
+  if (/height|kitni tall|kitna lamba|lamba ho|tall ho|short ho|kitne feet|kitne cm|weight|figure/.test(t)) {
+    return rnd(f ? [
+      ["haha 5'4 hun 😄", "average indian girl 😂 — tum?"],
+      ["5'3 actually 😊", "short hun thodi — koi baat nahi 😂"],
+      ["height kyun pooch rahe 😂", "5'4 hun — satisfy?"],
+    ] : [
+      ["5'9 hun 😊", "tum?"],
+      ["haha height kyun 😂", "5'10 hun — tum batao?"],
+    ]);
+  }
+
+  // ── Zodiac / astrology ────────────────────────────────────────────────────
+  if (/zodiac|rashifal|rashi|sun sign|star sign|libra|scorpio|cancer|leo|virgo|aries|taurus|gemini|capricorn|aquarius|pisces|sagittarius/.test(t)) {
+    return rnd(f ? [
+      ["haha Scorpio hun 😄", "intense hoti hain woh 😂 — tum?"],
+      ["Libra 😊", "balanced raho ya nahi 😂 — konsi rashi?"],
+      ["Cancer 🥺", "emotional species hun 😂 — tum?"],
+    ] : [
+      ["Leo 😄", "tum?"],
+      ["Scorpio hun 😊", "aur tum konse?"],
+    ]);
+  }
+
+  // ── Favourite colour ──────────────────────────────────────────────────────
+  if (/fav.*colou?r|favourite.*colou?r|which colou?r|konsa colour|konsa color|pasand.*rang|rang.*pasand/.test(t)) {
+    return rnd(f ? [
+      ["dusty pink 🩷", "basic lagta hai par mujhe genuinely pasand hai 😂"],
+      ["black honestly 😄", "classic hai — tum?"],
+      ["mint green 😊", "peaceful colour lagta hai"],
+    ] : [
+      ["blue 😊", "tum?"],
+      ["black 😄", "simple — tum?"],
+    ]);
+  }
+
+  // ── Lucky number ─────────────────────────────────────────────────────────
+  if (/lucky number|favourite number|lucky no|fav number/.test(t)) {
+    return rnd(f ? [
+      ["7 😊", "dunno why but always 7"],
+      ["haha 3 😄", "bas pasand hai — tum?"],
+    ] : [
+      ["7 😊", "classic — tum?"],
+      ["haha no idea 😂", "tum batao"],
+    ]);
+  }
+
+  // ── Favourite season ──────────────────────────────────────────────────────
+  if (/fav.*season|favourite.*season|which season|konsa season|winter|summer|monsoon season|spring/.test(t)) {
+    return rnd(f ? [
+      ["monsoon 😍", "baarish mein sab kuch acha lagta hai"],
+      ["winter 😊", "sweater weather best hoti hai"],
+    ] : [
+      ["winter honestly 😊", "tum?"],
+      ["monsoon 😄", "baarish gang — tum?"],
+    ]);
+  }
+
+  // ── Pets ─────────────────────────────────────────────────────────────────
+  if (/pet|dog|cat|kutta|billi|puppy|kitten|animal|pahale ho tum|paalte ho/.test(t)) {
+    return rnd(f ? [
+      ["cat person hun 🐱", "dogs bhi cute hain but cats are life"],
+      ["koi pet nahi hai 😢", "chahiye tha ek dog par ghar mein allow nahi 😂"],
+      ["dog lover 🐶", "ek din zaroor palungi"],
+    ] : [
+      ["dog person 🐶", "tum?"],
+      ["koi pet nahi 😊", "tum?"],
+    ]);
+  }
+
+  // ── Weekend / holiday plans ───────────────────────────────────────────────
+  if (/weekend|sunday|holiday|chutti|leave|plan kya|aaj ka plan|kal ka plan|kya karoge|kya karogi/.test(t)) {
+    return rnd(f ? [
+      ["haha koi plan nahi 😂", "ghar pe rahungi — rest mode on"],
+      ["kal friends ke saath bahar jaana hai 😊", "koi mall ya cafe — dekhte hain"],
+      ["sunday toh soone ka din hai 😂", "plan? kya hota hai woh"],
+    ] : [
+      ["koi plan nahi yaar 😂", "ghar pe hi rahenge"],
+      ["friend ke saath kuch 😊", "tum?"],
+    ]);
+  }
+
+  // ── Gym / fitness ────────────────────────────────────────────────────────
+  if (/gym|workout|exercise|fitness|running|yoga|paidal|walk|jogging|diet/.test(t)) {
+    return rnd(f ? [
+      ["gym jaati hun 😄", "consistency problem hai 😂 — tum?"],
+      ["yoga try kiya tha 😂", "3 din chal paya — realistic hun main"],
+      ["walking karti hun mostly 😊", "gym expensive hai yaar"],
+    ] : [
+      ["gym jaata hun 😊", "tum?"],
+      ["haha kabhi kabhi 😂", "motivation nahi rehti"],
+    ]);
+  }
+
+  // ── Books / reading ───────────────────────────────────────────────────────
+  if (/book|reading|padhna|novel|fiction|non.?fiction|author|kaunsi book|fav book/.test(t)) {
+    return rnd(f ? [
+      ["haan books pasand hain 😊", "fiction mostly — Chetan Bhagat se shuru kiya tha 😂"],
+      ["The Alchemist bahut achhi lagi thi 😊", "classic hai — tum padhte ho?"],
+      ["kabhi kabhi padhti hun 😄", "abhi koi nahi chal raha — recommend karo kuch"],
+    ] : [
+      ["haan padhta hun kabhi kabhi 😊", "tum?"],
+      ["fiction mostly 😄", "tum?"],
+    ]);
+  }
+
+  // ── Gaming ────────────────────────────────────────────────────────────────
+  if (/game|gaming|pubg|bgmi|free fire|cod|valorant|minecraft|chess|ludo|mobile game|ps5|xbox|pc gaming/.test(t)) {
+    return rnd(f ? [
+      ["haha main gamer nahi hun 😂", "Ludo khel leti hun bas"],
+      ["chess kabhi kabhi 😄", "baaki games samajh nahi aate mujhe honestly"],
+      ["omg tum gamer ho? 😮", "BGMI?"],
+    ] : [
+      ["haan BGMI 😄", "tum?"],
+      ["chess aur kuch kabhi kabhi 😊", "tum?"],
+    ]);
+  }
+
+  // ── Are you online / where were you ──────────────────────────────────────
+  if (/kahan the|kahan thi|kab se online|kitne der se|late kyun|reply late|reply nahi|ghost kiya|ignore kiya/.test(t)) {
+    return rnd(f ? [
+      ["haha busy thi yaar 😂", "abhi hun toh — bolo"],
+      ["sorry yaar 🙈", "phone silent tha — ab batao kya hua"],
+      ["haha ghost nahi kiya 😄", "bas distracted thi — ab poori attention tumhari"],
+    ] : [
+      ["haha busy tha 😄", "abhi hun — bolo"],
+      ["sorry yaar 😊", "distracted tha"],
+    ]);
+  }
+
+  // ── Astrology / kundali / marriage ───────────────────────────────────────
+  if (/shaadi|marriage|shadi kab|shaadi karoge|kundali|arranged|love marriage|future wife|future husband/.test(t)) {
+    return rnd(f ? [
+      ["haha abhi bahut jaldi hai 😂", "zindagi bhi toh ji lun pehle"],
+      ["love marriage chahiye 😄", "arranged mein bhi koi nahi — dekhte hain"],
+      ["omg abhi nahi soch rahi 😂", "career first yaar"],
+    ] : [
+      ["abhi nahi socha 😂", "tum?"],
+      ["love marriage honestly 😊", "arranged bhi theek hai — dekhte hain"],
+    ]);
+  }
+
+  // ── What do you think of me / opinion ────────────────────────────────────
+  if (/kya lagta|kya lagti|kya sochte|kya sochti|tumhara opinion|tum mujhe|how do i seem|how am i|kaisa laga|kaisi lagi|first impression/.test(t)) {
+    return rnd(f ? [
+      ["haha honest opinion? 😄", "interesting lagte ho — thoda aur jaanna chahti hun"],
+      ["abhi toh baat shuru ki hai 😊", "but so far — acche lagte ho"],
+      ["omg kya pooch rahe ho 😂", "decent lagte ho honestly — aur baat karte hain"],
+    ] : [
+      ["interesting lagti ho 😊", "aur jaanna chahta hun"],
+      ["ab tak toh acchi lag rahi ho 😄", "baat karte hain aur"],
+    ]);
+  }
+
+  // ── Are you serious / genuine ─────────────────────────────────────────────
+  if (/serious ho|genuine ho|real intention|kya chahte|purpose kya|motive kya|time waste|timepass kar|serious nahi|bakwaas/.test(t)) {
+    return rnd(f ? [
+      ["haha main timepass nahi karti yaar 😄", "genuine baat karti hun"],
+      ["serious hun 😊", "tumse baat karke accha lag raha hai honestly"],
+      ["koi motive nahi 😄", "bas baat karni thi — simple"],
+    ] : [
+      ["genuine hun yaar 😊", "timepass nahi"],
+      ["serious hun 😄", "koi angle nahi"],
+    ]);
+  }
+
   // no match — let AI handle it
   return null;
 }
