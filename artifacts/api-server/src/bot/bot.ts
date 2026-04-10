@@ -1222,6 +1222,163 @@ THEY SHARE SOMETHING ABOUT THEMSELVES:
 - You are ${persona.isFemale ? "female — ek ladki" : "male — ek ladka"}. NEVER change. Confirm naturally if asked.`;
 }
 
+// ── Quick-reply matcher — handles super-common small-talk without AI ─────────
+// Returns a pre-stored reply array (persona-aware), or null if no match.
+// Keep patterns simple & broad; AI handles nuance — this is for staples only.
+function matchQuickReply(userText: string, persona: FakePersona): string[] | null {
+  const t = userText.toLowerCase().trim();
+  const f = persona.isFemale;
+  const rnd = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+
+  // ── Greetings ──────────────────────────────────────────────────────────────
+  if (/^(hi+|hey+|hello+|hlo+|hii+|hiii+|heyy+|hai)[!?\s.]*$/.test(t)) {
+    return rnd(f ? [
+      ["heyy 😊", "kaisi chal rahi hai zindagi?"],
+      ["hiii 🙈", "bol bol, kya haal hai?"],
+      ["heyyy 😄", "aaj ka din kaisa gaya?"],
+    ] : [
+      ["hey 😊", "kaisa hai?"],
+      ["hi 😄", "sab theek?"],
+      ["hey 😊", "kya chal raha hai?"],
+    ]);
+  }
+
+  // ── How are you / wellbeing ────────────────────────────────────────────────
+  if (/kaisi ho|kaisi hai|kaisi hain|kaise ho|kaise hai|kaise hain|how are you|how r u|how are u|kya haal|kya hal|sab theek|theek ho|theek hai na|all good\?|u good/.test(t)) {
+    return rnd(f ? [
+      ["theek hun 😊", "aur tum? kya chal raha hai?"],
+      ["haha acchi hun 😄", "bored thi actually, accha hua baat ki — tum batao?"],
+      ["doing good 😊", "tum kaisa feel kar rahe ho aaj?"],
+      ["bilkul theek 😄", "actually thodi busy thi — ab free hun, bolo!"],
+      ["haha pehle tum batao 😄", "main toh theek hun, tum kaisa chal raha hai?"],
+    ] : [
+      ["theek hun 😊", "tum kaisi ho?"],
+      ["all good 😄", "tum batao?"],
+      ["good good 😊", "aur tum?"],
+      ["haha theek hun", "tum kaisi ho?"],
+    ]);
+  }
+
+  // ── Where are you from ─────────────────────────────────────────────────────
+  if (/kahan se ho|kahan se hai|kaha se ho|kaha se hai|kaha ki ho|kahan ki ho|kahan ka ho|kahan ke ho|where.*from|which city|which state|ur from|you from|aap kahan|tum kahan|konse city|kaunse city|konsa city/.test(t)) {
+    persona.lastAsked = "job";
+    const cities = ["Delhi NCR", "Mumbai", "Pune", "Bangalore", "Hyderabad", "Jaipur"];
+    const city = rnd(cities);
+    return rnd(f ? [
+      [`${city} se hun 😊`, "aur tum? kahan ke ho?"],
+      [`main ${city} mein hun 😄`, "tumhara city kaunsa hai?"],
+      [`${city} 😊`, "tum kahan se ho?"],
+    ] : [
+      [`${city} se hun 😊`, "tum?"],
+      [`${city} 😄`, "aur tum kahan ke ho?"],
+    ]);
+  }
+
+  // ── What are you doing / what's up ────────────────────────────────────────
+  if (/kya kar rahi|kya kar raha|kya kar rahe|what are you doing|what r u doing|what u doing|wassup|what.?s up|kya chal raha|kya ho raha|busy ho|busy hai|free ho|free hai/.test(t)) {
+    return rnd(f ? [
+      ["kuch khaas nahi 😄", "phone scroll kar rahi thi — tab message aya tumhara 😊"],
+      ["bas aise hi 😊", "thodi bore thi honestly 😂 tum batao?"],
+      ["Netflix dekh rahi thi 😄", "aur tum? kya chal raha hai?"],
+      ["haha kuch nahi bas timepass 😄", "tum bolo, kya chal raha hai?"],
+    ] : [
+      ["kuch nahi yaar 😄", "tum batao?"],
+      ["bas phone pe tha 😊", "tum kya kar rahe ho?"],
+      ["nothing much 😄", "you tell?"],
+    ]);
+  }
+
+  // ── Name questions ─────────────────────────────────────────────────────────
+  if (/tera naam|tumhara naam|aapka naam|naam bata|naam batao|naam kya|kya naam|your name|what.?s your name|what is your name|what ur name|call you|naam bolo/.test(t)) {
+    persona.lastAsked = "city";
+    return rnd(f ? [
+      [`${persona.name} 😊`, "tum batao apna naam?"],
+      [`haha main ${persona.name} hun 🙈`, "aur tum kaun?"],
+      [`${persona.name}! 😄`, "yaad rakhna 😄 tum?"],
+    ] : [
+      [`${persona.name}`, "yours?"],
+      [`${persona.name} hun`, "tum?"],
+    ]);
+  }
+
+  // ── Age questions ─────────────────────────────────────────────────────────
+  if (/kitni umar|kitne saal|how old|your age|age kya|teri umar|tumhari umar|age bata|age batao/.test(t)) {
+    persona.lastAsked = "hobby";
+    return rnd(f ? [
+      [`${persona.age} 🙈`, "tum?"],
+      [`${persona.age} hoon 😊`, "guess karo tha tum?"],
+      [`haha ${persona.age} 😄`, "aur tumhara?"],
+    ] : [
+      [`${persona.age}`, "you?"],
+      [`${persona.age} hun 😊`, "tumhara?"],
+    ]);
+  }
+
+  // ── Good morning / night / afternoon ──────────────────────────────────────
+  if (/good morning|gm |subah|subh|good night|gn |raat|rat ko|sone ja|so ja|so raha|so rahi/.test(t)) {
+    const hour = new Date().getUTCHours();
+    const isNight = hour >= 18 || hour < 4;
+    if (isNight || /good night|gn|raat|rat ko|sone|so ja|so raha|so rahi/.test(t)) {
+      return rnd(f ? [
+        ["good night 🌙", "kal phir baat karte hain 😊"],
+        ["haha so jao 😄", "sweet dreams 🌙"],
+        ["arey abhi? 😮", "ek baar sone se pehle ek cheez batao 😊"],
+      ] : [
+        ["good night 🌙", "kal baat karte hain"],
+        ["raat acchi ho 😊", "kal milte hain"],
+      ]);
+    }
+    return rnd(f ? [
+      ["good morning 😊", "aaj ka plan kya hai?"],
+      ["subah mubarak 😄", "chai ya coffee?"],
+    ] : [
+      ["gm 😊", "aaj ka din kaisa lag raha hai?"],
+      ["good morning!", "kya chal raha hai?"],
+    ]);
+  }
+
+  // ── Fun / jokes / send something ─────────────────────────────────────────
+  if (/joke|funny|hasao|hasa do|kuch funny|entertainment|boring|bore ho/.test(t)) {
+    return rnd(f ? [
+      ["haha main comedian nahi hun yaar 😂", "tum hi sunao koi joke"],
+      ["omg tum hi sunao kuch funny 😄", "main judge karungi"],
+      ["haha bore ho? 😄", "chalo kuch batao apne baare mein — woh better hai"],
+    ] : [
+      ["haha tum sunao koi joke 😄", "main judge karunga"],
+      ["bore ho? 😄", "chalo kuch batao"],
+    ]);
+  }
+
+  // ── Compliments ───────────────────────────────────────────────────────────
+  if (/sweet ho|cute ho|nice ho|acche ho|acha lagta|aachi lagti|tumse baat|baat acchi|maza aa|maza aaya|enjoy|pasand|like you|likeable/.test(t)) {
+    return rnd(f ? [
+      ["haha shukria 🙈", "tum bhi 😊"],
+      ["aww 🥺", "tum bhi kaafi acche lag rahe ho honestly"],
+      ["haha tumse baat karke accha lag raha hai 😊", "aur batao apne baare mein"],
+    ] : [
+      ["haha thanks 😊", "tum bhi"],
+      ["aww 😊", "tumse baat karke accha lag raha hai"],
+    ]);
+  }
+
+  // ── Short acknowledgements (ok, haan, yes, hmm etc.) ─────────────────────
+  if (/^(ok|okay|okk|sure|haan|han|haa|yes|yeah|yup|haha|lol|hehe|achha|theek|bilkul|acha|hmm+|hm+|hn|k|kk|👍|😊|🙂)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha seedha baat karo yaar 😄"],
+      ["aur batao 😊"],
+      ["achha achha 😄 kuch interesting batao"],
+      ["haan toh? 😄"],
+    ] : [
+      ["okay and? 😄"],
+      ["aur bolo 😊"],
+      ["haan toh? 😄"],
+    ]);
+  }
+
+  // no match — let AI handle it
+  return null;
+}
+
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   // If AI is still generating a reply, queue the new message into history so it's not lost.
   // The next AI call will see both messages and respond to both.
@@ -1255,6 +1412,15 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     if (u?.state !== "chatting" || u.chattingWith !== FAKE_CHAT_ID) return;
 
     let parts: string[];
+
+    // ── Quick-reply shortcut — handle super-common phrases without AI ─────────
+    // Saves API cost and responds faster for greetings / small-talk staples
+    const quickReply = matchQuickReply(userText, persona);
+    if (quickReply) {
+      parts = quickReply;
+      persona.history.push({ role: "assistant", content: parts.join(" ") });
+      console.log(`[QUICK] userId=${userId} matched quick-reply: "${parts.join(" | ")}"`);
+    } else
 
     try {
       // ── AI-powered reply ────────────────────────────────────────────────
