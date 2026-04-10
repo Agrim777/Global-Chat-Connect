@@ -3256,12 +3256,62 @@ bot.onText(/\/help/, async (msg) => {
     "/stop — End current chat\n" +
     "/premium — Upgrade to Premium 💎\n" +
     "/pay — Payment info\n" +
-    "/help — Show this help",
+    "/help — Show this help\n" +
+      "/disclaimer — Terms of Use & Legal Notice",
     { parse_mode: "Markdown" }
   );
 });
 
-// ── Profile helpers ──────────────────────────────────────────────────────────
+  // ── /disclaimer ───────────────────────────────────────────────────────────────
+  bot.onText(/\/disclaimer/, async (msg) => {
+    await bot.sendMessage(msg.chat.id,
+      "📋 *DISCLAIMER / TERMS OF USE*\n" +
+      "─────────────────────────────────\n\n" +
+
+      "*1. Nature of Service*\n" +
+      "• This platform provides chat-based interactions for entertainment and social connection.\n" +
+      "• We do not guarantee real-life meetings, relationships, or outcomes.\n\n" +
+
+      "*2. Matching & Users*\n" +
+      "• We do NOT guarantee connection with any specific gender.\n" +
+      "• We do NOT guarantee connection with female users.\n" +
+      "• Matches depend on availability, activity, and system logic.\n\n" +
+
+      "*3. AI Interaction*\n" +
+      "• Initial or fallback chats may be powered by automated or AI-based systems.\n" +
+      "• These are used to maintain engagement when real users are unavailable.\n\n" +
+
+      "*4. No Guarantee of Match*\n" +
+      "• We do not guarantee that you will always be connected to a real human.\n" +
+      "• Delays or unavailability of matches may occur.\n\n" +
+
+      "*5. Payments*\n" +
+      "• Payments unlock features such as extended chat access or priority matching.\n" +
+      "• Payment does NOT guarantee a specific type of match (e.g., female users).\n" +
+      "• All payments are final and non-refundable once service is activated.\n\n" +
+
+      "*6. User Responsibility*\n" +
+      "• You agree to use respectful language and behavior.\n" +
+      "• Abuse, harassment, or misuse may result in suspension or ban without refund.\n\n" +
+
+      "*7. Privacy*\n" +
+      "• Do not share sensitive personal information (phone, address, etc.).\n" +
+      "• We are not responsible for information voluntarily shared with others.\n\n" +
+
+      "*8. Service Availability*\n" +
+      "• We do not guarantee uninterrupted or error-free service.\n" +
+      "• Features may change at any time without notice.\n\n" +
+
+      "*9. Age Requirement*\n" +
+      "• You must be 18+ to use this service.\n\n" +
+
+      "─────────────────────────────────\n" +
+      "_By continuing to use the bot, you confirm that you understand and accept these terms._",
+      { parse_mode: "Markdown" }
+    );
+  });
+
+  // ── Profile helpers ──────────────────────────────────────────────────────────
 
 const EDIT_FIELD_LABELS = [
   "📝 Change Name", "🎂 Change Age", "⚤ Change Gender",
