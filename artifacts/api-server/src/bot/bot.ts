@@ -3922,7 +3922,7 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
 
 // ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
 
-bot.onText(/\/broadcast(?!text)/, async (msg) => {
+bot.onText(/\/broadcast/, async (msg) => {
   const chatId = msg.chat.id;
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
 
