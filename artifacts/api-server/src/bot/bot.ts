@@ -3922,7 +3922,7 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
 
 // ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
 
-bot.onText(/\/broadcast/, async (msg) => {
+bot.onText(/\/broadcast(?!text)/, async (msg) => {
   const chatId = msg.chat.id;
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
 
@@ -3986,6 +3986,73 @@ bot.onText(/\/broadcast/, async (msg) => {
 
   await prodPool.end().catch(() => {});
   await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`);
+});
+
+// ── Admin: /broadcasttext <message> — send custom text to ALL users ─────────────
+
+bot.onText(/\/broadcasttext (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "⛔ Not authorized.").catch(() => {});
+    return;
+  }
+
+  const message = (match![1] ?? "").trim();
+  if (!message) {
+    await bot.sendMessage(chatId, "⚠️ Please provide a message.\nUsage: /broadcasttext Hello everyone! 😄");
+    return;
+  }
+
+  await bot.sendMessage(chatId, "📡 Fetching all users from production DB...");
+
+  const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
+  const { Pool: PgPool } = await import("pg").then((m: any) => m.default ?? m) as { Pool: typeof import("pg").Pool };
+  const prodPool = new PgPool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 3 });
+  const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
+  const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
+
+  // ALL users — paid, unpaid, inactive — everyone who ever started the bot (excluding admin)
+  const targets = await prodDb.select({ id: usersTable.id })
+    .from(usersTable)
+    .where(ADMIN_ID ? ne(usersTable.id, ADMIN_ID) : undefined);
+
+  if (targets.length === 0) {
+    await bot.sendMessage(chatId, "⚠️ No users found in the database.");
+    await prodPool.end().catch(() => {});
+    return;
+  }
+
+  await bot.sendMessage(chatId, `📤 Starting broadcast to ${targets.length} users...\nProgress updates every 100 messages.`);
+
+  let sent = 0, failed = 0;
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+  for (const row of targets) {
+    try {
+      await bot.sendMessage(row.id, message);
+      sent++;
+    } catch {
+      failed++; // user blocked bot or other error — skip and continue
+    }
+
+    // Progress update every 100 users
+    if ((sent + failed) % 100 === 0) {
+      await bot.sendMessage(
+        chatId,
+        `⏳ Progress: ${sent + failed}/${targets.length} — ✅ ${sent} sent, ❌ ${failed} failed`
+      ).catch(() => {});
+    }
+
+    await sleep(50); // ~20 messages/second — safe for Telegram rate limits
+  }
+
+  await prodPool.end().catch(() => {});
+
+  logger.info({ sent, failed, total: targets.length }, "broadcasttext complete");
+  await bot.sendMessage(
+    chatId,
+    `✅ Broadcast complete!\n\n📊 Total users: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`
+  );
 });
 
 // ── Admin: /users ─────────────────────────────────────────────────────────────
