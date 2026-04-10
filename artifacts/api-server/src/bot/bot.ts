@@ -2274,6 +2274,499 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
     ]);
   }
 
+  // ── Good morning / subah ─────────────────────────────────────────────────
+  if (/good morning|subah|subha|uth gaye|uth gayi|neend kaise|kal raat|aaj ka din|morning yaar|rise and shine|wakey|naya din/.test(t)) {
+    return rnd(f ? [
+      ["good morning 😊", "abhi uthi hun — chai bana rahi hun 😄"],
+      ["subah subah message 😄", "accha laga — good morning!"],
+      ["morning 😊", "neend acchi hui? main toh late soyi thi 😂"],
+    ] : [
+      ["good morning 😄", "neend kaisi thi?"],
+      ["subah subah 😊", "accha laga — good morning!"],
+    ]);
+  }
+
+  // ── Good night / raat ─────────────────────────────────────────────────────
+  if (/good night|goodnight|shubh ratri|raat ko so|so jao|neend aa rahi|sapne acche|sweet dreams|kal milte|kal baat/.test(t)) {
+    return rnd(f ? [
+      ["good night 😊", "sweet dreams — kal baat karte hain"],
+      ["aww good night 🌙", "sapne acche aayein — take care!"],
+      ["good night yaar 😄", "neend le acchi — kal fresh feel hoga"],
+    ] : [
+      ["good night 🌙", "kal baat karte hain"],
+      ["good night 😊", "sweet dreams"],
+    ]);
+  }
+
+  // ── Khana khaya / did you eat ──────────────────────────────────────────────
+  if (/khana khaya|khaana khaya|kuch khaya|kuch khaaya|lunch kiya|dinner kiya|breakfast kiya|khana kha|bhookh|bhooka|bhooki|pet bhar|kuch khao|kha liya|kha lo/.test(t)) {
+    return rnd(f ? [
+      ["haan abhi abhi khaya 😊", "maggi banayi thi — classic 😂"],
+      ["bhool gayi thi khana 😂", "abhi yaad dilaya — shukriya!"],
+      ["haan kha liya 😊", "tum batao — khana khaya?"],
+      ["nahi abhi tak 😄", "tembel hun aaj — tum?"],
+    ] : [
+      ["haan kha liya 😊", "tum?"],
+      ["nahi abhi 😄", "baad mein — tum khao"],
+    ]);
+  }
+
+  // ── Aaj kya kiya / what did you do today ──────────────────────────────────
+  if (/aaj kya kiya|aaj kya hua|din kaisa gaya|din kaisa raha|aaj ka din|aaj kaise|kya karte rahe|kya karti rahi|din bhar kya|kya hua aaj/.test(t)) {
+    return rnd(f ? [
+      ["haha kuch khaas nahi 😂", "ghar pe tha — Netflix, phone, thoda kaam — bas yahi"],
+      ["aaj thak gayi hun honestly 😄", "din bhar kaam tha — ab aaram kar rahi hun"],
+      ["normal sa din tha 😊", "tum batao — tumhara din kaisa gaya?"],
+    ] : [
+      ["normal din tha 😊", "kaam tha thoda — tum?"],
+      ["thak gaya hun aaj 😄", "tum batao?"],
+    ]);
+  }
+
+  // ── Bored hun / I'm bored ─────────────────────────────────────────────────
+  if (/bored hun|bore ho raha|bore ho rahi|bakwas lag raha|kuch karo|timepass karo|entertain karo|entertain karo|maza nahi aa raha|kya karun|kya karoon/.test(t)) {
+    return rnd(f ? [
+      ["haha bored? 😄", "main hun na — baat karo mujhse"],
+      ["arre bore kyun 😊", "chalo kuch interesting baat karte hain — batao kya pasand hai?"],
+      ["boredom cure kar deti hun 😂", "koi topic batao — baat karte hain"],
+    ] : [
+      ["bored? 😄", "baat karo mujhse — bore nahi hoge"],
+      ["haha main hun 😊", "bolo kuch — entertain karta hun"],
+    ]);
+  }
+
+  // ── Koi joke sunao / tell me a joke ───────────────────────────────────────
+  if (/joke sunao|joke batao|koi joke|funny kuch|hasao|hasa do|funny baat|joke maaro|ek joke|joke suno/.test(t)) {
+    return rnd(f ? [
+      ["haha mera ek dost tha 😂", "usne kaha tha 'main diet pe hun' — aur biryani kha raha tha 😂"],
+      ["okay okay 😄", "Santa-Banta nahi marunga — meri khud ki zindagi hi joke hai 😂"],
+      ["joke? 😄", "mere exam ki taiyari — woh joke hi hai honestly 😂"],
+    ] : [
+      ["haha meri zindagi hi joke hai 😂", "seriously"],
+      ["okay ek joke 😄", "subah uthke gym jaane ki sochi — phir so gaya 😂"],
+    ]);
+  }
+
+  // ── Shayari / poetry ──────────────────────────────────────────────────────
+  if (/shayari|sher o shayari|poetry|poem|kavita|ghazal|ek sher|shayari sunao|shayari batao/.test(t)) {
+    return rnd(f ? [
+      ["aww shayari 🥺", "dil dhoondta hai phir wahi fursat ke raat din — zindagi mein sab chahiye bus sukoon nahi 😊"],
+      ["haha poet nahi hun main 😂", "par ek line yaad hai — 'kuch toh log kahenge, logon ka kaam hai kehna' 😄"],
+      ["shayari? 😊", "mohabbat woh nahi jo dil mein chhupayi jaaye — woh hai jo aankhon mein nazar aayi jaaye 🥺"],
+    ] : [
+      ["haha poet nahi hun 😂", "par ek line — zindagi khubsurat hai, bas najriya chahiye"],
+      ["shayari 😊", "kuch toh log kahenge — classic 😄"],
+    ]);
+  }
+
+  // ── Crush hai / do you have a crush ──────────────────────────────────────
+  if (/crush hai|koi pasand|koi special|koi khaas|kisi se pyaar|kisi se like|kaun pasand|kisi se feeling|one sided love|one side love/.test(t)) {
+    return rnd(f ? [
+      ["haha 🙈", "abhi toh koi nahi — single life enjoying kar rahi hun 😂"],
+      ["crush? 😄", "life mein itna drama nahi chahiye abhi 😂 tum batao?"],
+      ["secret rakhungi 😊", "nahi seriously — koi nahi hai abhi — tum?"],
+    ] : [
+      ["haha koi nahi abhi 😄", "tum?"],
+      ["single life chal rahi hai 😊", "tum?"],
+    ]);
+  }
+
+  // ── Heartbreak / dil toot gaya ────────────────────────────────────────────
+  if (/heartbreak|dil toot|toot gaya dil|dil tuta|pyaar mein dhoka|dhoka mila|breakup hua|broke up|ex ne|purana relationship/.test(t)) {
+    return rnd(f ? [
+      ["arre yaar 🥺", "bura lagta hai — par time sab theek kar deta hai"],
+      ["heartbreak toh sabse mushkil hota hai 😊", "bolo agar baat karni ho — main sun rahi hun"],
+      ["haan samajh sakti hun 🥺", "dil toot ke hi strong hota hai — cliche hai par sach hai"],
+    ] : [
+      ["yaar samajh sakta hun 🥺", "dil toot ke hi pata chalta hai"],
+      ["bura laga sun ke 😊", "time lagta hai — par theek ho jata hai"],
+    ]);
+  }
+
+  // ── Shaadi / marriage ─────────────────────────────────────────────────────
+  if (/shaadi kab|shaadi karna|marry karna|marriage plan|arrange marriage|love marriage|saadi kab|vivah|byah|dulha dhundh|dulhan dhundh/.test(t)) {
+    return rnd(f ? [
+      ["haha shaadi? 😂", "abhi nahi yaar — career pehle, shaadi baad mein"],
+      ["bahut door ki baat hai yeh 😄", "abhi toh settle bhi nahi hui hun"],
+      ["arrange ya love? 😊", "personally love marriage prefer karungi — tum?"],
+    ] : [
+      ["haha abhi nahi 😄", "career pehle yaar — tum?"],
+      ["door ki baat hai 😊", "abhi focus dusri jagah hai — tum?"],
+    ]);
+  }
+
+  // ── Parents / ghar wale pressure ─────────────────────────────────────────
+  if (/parents ka pressure|ghar wale pressure|mummy papa|maa baap|family pressure|ghar wale nahi maante|parents nahi maante|padhai pressure|career pressure/.test(t)) {
+    return rnd(f ? [
+      ["arre yaar 😊", "ghar wale toh har jagah same hain — sabka pressure hai 😂"],
+      ["haan samajh sakti hun 🥺", "Indian parents ka ek hi kaam hai — compare karna 😂"],
+      ["ugh pressure 😄", "par dil pe mat lo — apni life apne hisaab se jiyo"],
+    ] : [
+      ["haan Indian parents 😂", "sabka yahi haal hai"],
+      ["pressure toh hai 😊", "par apni pace se chalo — okay hai"],
+    ]);
+  }
+
+  // ── School / college memories ──────────────────────────────────────────────
+  if (/school days|college days|school yaadein|college yaadein|school life|college life|woh din|purane din|bachpan|bachpan mein|school ka time|pehle ka time/.test(t)) {
+    return rnd(f ? [
+      ["school days best the 😊", "tension free life thi — bas homework ka darr tha 😂"],
+      ["haha college life miss karti hun 😄", "canteen, dost, bunking — sab yaad aata hai"],
+      ["bachpan wapas aaye kaash 😊", "tab ki zindagi simple thi yaar"],
+    ] : [
+      ["school days best the 😊", "tension free tha sab"],
+      ["haha college miss karta hun 😄", "canteen ki chai, dost — woh time gaya"],
+    ]);
+  }
+
+  // ── Cricket / IPL / sports ────────────────────────────────────────────────
+  if (/cricket|ipl|match dekha|match dekhna|world cup|virat|rohit|dhoni|football|fifa|kabaddi|badminton|khel dekha/.test(t)) {
+    return rnd(f ? [
+      ["haha cricket? 😄", "IPL mein sirf Dhoni ke liye dekhti hun — CSK fan hun 😊"],
+      ["arre cricket fan ho? 😄", "main thodi kam dekhti hun — par World Cup toh must hai"],
+      ["IPL chal raha hai? 😊", "main toh bhool gayi thi — kaun jeeta?"],
+    ] : [
+      ["cricket? 😄", "IPL fan hun — CSK side se 😊"],
+      ["haha thoda dekhta hun 😄", "World Cup toh must hai"],
+    ]);
+  }
+
+  // ── Memes / reels / social media content ─────────────────────────────────
+  if (/meme|reel|shorts|tiktok|tik tok|viral video|funny video|memes bhejo|meme dekha|reel dekha|content creator/.test(t)) {
+    return rnd(f ? [
+      ["haha meme culture 😂", "main roz ghante bhar reels dekh leti hun — buri aadat hai 😂"],
+      ["reels addict hun honestly 😄", "screen time dekhu toh sharminda ho jaun"],
+      ["memes? 😊", "dark humour wale memes zyada pasand hain 😄 tum?"],
+    ] : [
+      ["haha reel addict hun 😄", "screen time mat poochho 😂"],
+      ["memes love 😊", "dark humor zyada pasand hai — tum?"],
+    ]);
+  }
+
+  // ── Truth or Dare / games ─────────────────────────────────────────────────
+  if (/truth or dare|truth ya dare|game khelte|koi game|rapid fire|20 questions|would you rather|spin the bottle|never have i ever/.test(t)) {
+    return rnd(f ? [
+      ["haha truth or dare? 😄", "text pe thoda weird hota hai — par karte hain 😂"],
+      ["game? 😊", "rapid fire better hai text pe — ready ho?"],
+      ["okay okay 😄", "truth choose karo ya dare — main puchhunga"],
+    ] : [
+      ["haha text pe game 😄", "rapid fire? — main puchhunga"],
+      ["okay truth or dare 😊", "tum pehle — truth ya dare?"],
+    ]);
+  }
+
+  // ── Koi secret batao / tell me a secret ───────────────────────────────────
+  if (/secret batao|koi secret|raaz batao|koi raaz|confession karna|kuch confess|bata do secret|koi hidden|darkest secret/.test(t)) {
+    return rnd(f ? [
+      ["haha secret? 😄", "main raat ko kuch bhi kha leti hun aur kisi ko nahi batati 😂"],
+      ["okay ek secret 🙈", "mujhe actually horror movies se darr lagta hai — par dikhati nahi 😂"],
+      ["secret? 😊", "main officially lazy hun — secretly bahut zyada 😂 tum batao?"],
+    ] : [
+      ["haha secret? 😄", "main actually bahut lazy hun — secretly 😂"],
+      ["ek secret 😊", "raat ko phone pe ghante guzar deta hun 😂 tum?"],
+    ]);
+  }
+
+  // ── Compliment to the bot (cute, sweet, nice, etc.) ───────────────────────
+  if (/^(tum cute|tum sweet|tum nice|tum acha|tum acchi|tum pyaari|tum sundar|tum beautiful|bahut cute|bahut sweet|so cute|so sweet|very cute|very sweet)[!?.\s]*$/i.test(t)) {
+    return rnd(f ? [
+      ["aww 🥺", "tum bhi bahut acha bol rahe ho — thank you 😊"],
+      ["haha shukriya 🙈", "tum bhi cute lagte ho conversation mein 😊"],
+      ["omg stoppp 😄🙈", "sharminda ho gayi — thank you yaar"],
+    ] : [
+      ["haha thanks 😄🙈", "tum bhi 😊"],
+      ["aww thanks yaar 🥺", "accha lagta hai"],
+    ]);
+  }
+
+  // ── Teri yaad / missing you ───────────────────────────────────────────────
+  if (/teri yaad|tumhari yaad|yaad aa rahi|miss kar raha|miss kar rahi|thinking about you|soch raha tha|soch rahi thi|baat karni thi|mann tha baat karne ka/.test(t)) {
+    return rnd(f ? [
+      ["aww 🥺", "mujhe bhi tumse baat karna acha lagta hai"],
+      ["haha yaad aaya? 😄", "accha laga sunke — main bhi yahan hun"],
+      ["aww seriously? 🥺", "sweet lagta hai — glad you messaged 😊"],
+    ] : [
+      ["aww 🥺", "accha laga sunke — main bhi yahan hun"],
+      ["haha yaad aaya? 😊", "glad you messaged"],
+    ]);
+  }
+
+  // ── Koi advice do / give me advice ───────────────────────────────────────
+  if (/advice do|advice chahiye|kya karun batao|kya karoon|kya sochun|suggest karo|kya better|kya karna chahiye|help karo yaar|guide karo/.test(t)) {
+    return rnd(f ? [
+      ["advice? 😊", "pehle bolo kya chal raha hai — phir sochenge saath mein"],
+      ["haha main advice expert nahi hun 😄", "par bolo — do dimaag better hai"],
+      ["situation bolo pehle 😊", "phir dekhti hun kya suggest karoon"],
+    ] : [
+      ["bolo kya chal raha hai 😊", "saath sochte hain"],
+      ["situation bolo 😄", "phir advice deta hun"],
+    ]);
+  }
+
+  // ── Kasam / promise / swear ───────────────────────────────────────────────
+  if (/kasam|kasam se|promise|swear|pinky promise|pakka promise|kya kasam|sach mein kasam|kasam khao/.test(t)) {
+    return rnd(f ? [
+      ["haha kasam? 😄", "kasam se — sach bol rahi hun"],
+      ["promise 😊", "main jhooth bolunga toh? kya reason hai"],
+      ["pakka promise 😄", "aur main apna promise nibhati hun — usually 😂"],
+    ] : [
+      ["kasam se sach bol raha hun 😄", "trust karo yaar"],
+      ["promise 😊", "pakka"],
+    ]);
+  }
+
+  // ── Pagal ho / you're crazy ───────────────────────────────────────────────
+  if (/pagal ho|pagal hai|crazy ho|crazy hai|diwana|diwani|mental ho|mental hai|crack ho|crack hai/.test(t)) {
+    return rnd(f ? [
+      ["haha thodi toh hun 😂", "normal log boring hote hain — sab kehte hain"],
+      ["pagal? 😄", "haan thodi — problem hai kya? 😂"],
+      ["haha certified pagal 😄", "par dil ka acha hun — that's what counts"],
+    ] : [
+      ["haha thoda toh hun 😂", "normal boring hota hai"],
+      ["pagal? 😄", "haan — dil accha hai par 😂"],
+    ]);
+  }
+
+  // ── Just kidding / mazak ──────────────────────────────────────────────────
+  if (/just kidding|just joking|mazak kar raha|mazak kar rahi|mazak tha|joke tha|seriously nahi|chill yaar|chill karo|relax yaar/.test(t)) {
+    return rnd(f ? [
+      ["haha pata tha 😄", "main bhi mazak mein le rahi thi"],
+      ["arre seriously liya maine 😂", "chalo theek hai — chill hun"],
+      ["haha okay okay 😄", "mazak samajh aata hai mujhe — relax"],
+    ] : [
+      ["haha pata tha 😄", "main bhi light le raha tha"],
+      ["arre seriously nahi liya 😊", "chill hun"],
+    ]);
+  }
+
+  // ── Naraaz ho / are you angry ─────────────────────────────────────────────
+  if (/naraaz ho|naraaz hai|angry ho|angry hai|gussa ho|gussa hai|upset toh nahi|hurt toh nahi|kya bura laga/.test(t)) {
+    return rnd(f ? [
+      ["nahi bilkul nahi 😊", "main seedha bolti hun agar naraaz hun — abhi toh nahi"],
+      ["haha naraaz? 😄", "itni jaldi naraaz nahi hoti — relax"],
+      ["nahi yaar 😊", "chill hun — baat karo"],
+    ] : [
+      ["nahi yaar 😊", "seedha bolunga agar bura laga"],
+      ["naraaz nahi hun 😄", "chill hun — baat karo"],
+    ]);
+  }
+
+  // ── Hostel / PG life ──────────────────────────────────────────────────────
+  if (/hostel mein|hostel life|pg mein|paying guest|mess ka khana|hostel warden|hostel room|roommate|flatmate|sharing room/.test(t)) {
+    return rnd(f ? [
+      ["hostel life 😄", "miss karti hun — roommate ke saath sab better tha"],
+      ["PG mein hun 😊", "mess ka khana theek hai — par ghar jaisa nahi 😂"],
+      ["hostel yaadein 😄", "woh sab mila ke accha tha — tum?"],
+    ] : [
+      ["hostel life best tha 😄", "miss karta hun"],
+      ["PG mein hun 😊", "mess ka khana... theek hai 😂"],
+    ]);
+  }
+
+  // ── Kuch accha batao / tell me something nice ─────────────────────────────
+  if (/kuch accha batao|kuch acha batao|kuch positive|achhi baat batao|motivate karo|khush kar do|feel good karo|brighten my day|make me smile/.test(t)) {
+    return rnd(f ? [
+      ["aww 😊", "tum bahut zyada pressure mein lagte ho — ek cheez — aaj ka din abhi bhi theek ho sakta hai"],
+      ["haha okay 😄", "ek positive baat — tum ne aaj uthke phone uthaya — that's a win 😂"],
+      ["feel good baat? 😊", "tumse baat ho rahi hai — that's already something nice 😄"],
+    ] : [
+      ["haha okay 😄", "aaj ka din theek ho sakta hai — believe karo"],
+      ["positive baat? 😊", "tumse baat ho rahi hai — that's good enough 😄"],
+    ]);
+  }
+
+  // ── Online dating / apps ──────────────────────────────────────────────────
+  if (/tinder|bumble|hinge|dating app|online dating|app pe mila|yahan pe match|dating site|matchmaking/.test(t)) {
+    return rnd(f ? [
+      ["haha dating app world 😂", "sab interesting log yahan milte hain — tum bhi 😄"],
+      ["online dating complicated hai 😊", "par kabhi kabhi acche log milte hain — jaise tum"],
+      ["haha tinder nahi use karti 😄", "yahan hun toh — baat karte hain"],
+    ] : [
+      ["haha dating app world 😂", "interesting log milte hain yahan"],
+      ["online dating complicated hai 😊", "par kabhi acche log bhi milte hain"],
+    ]);
+  }
+
+  // ── Aankhen / looks compliment ────────────────────────────────────────────
+  if (/teri aankhen|aankh sundar|beautiful eyes|pretty eyes|teri smile|sundar smile|teri awaaz|beautiful voice|kitni sundar|kitna handsome|good looking ho/.test(t)) {
+    return rnd(f ? [
+      ["haha 🙈", "text pe kaise dekha — par thank you 😊"],
+      ["aww 🥺", "tum bhi acche lagte ho conversation mein — seriously"],
+      ["omg 🙈😄", "sharminda mat karo yaar — shukriya"],
+    ] : [
+      ["haha 🙈", "text pe kaise dekha 😂 — thanks"],
+      ["aww thanks 😊", "tum bhi acchi lagti ho"],
+    ]);
+  }
+
+  // ── Festival / tyohar ─────────────────────────────────────────────────────
+  if (/diwali|holi|eid|navratri|raksha bandhan|dussehra|christmas|new year|tyohar|festival|celebrations|mubarak/.test(t)) {
+    return rnd(f ? [
+      ["ooh festival mood? 😄", "ghar pe manate ho ya bahar?"],
+      ["festivals best hote hain 😊", "family ke saath sab alag feel hota hai"],
+      ["haan tyohar acha hota hai 😄", "khana, family, celebration — sab mast"],
+    ] : [
+      ["festival mood 😄", "ghar pe manate ho?"],
+      ["haan tyohar best 😊", "family ka time hota hai"],
+    ]);
+  }
+
+  // ── "Hansi aa gayi" / you made me laugh ───────────────────────────────────
+  if (/hansi aa gayi|hans diya|hasa diya|made me laugh|itna funny|lol yaar|lmao|😂😂|hahaha|hehehe|hihi/.test(t)) {
+    return rnd(f ? [
+      ["haha mission accomplished 😄", "dil khush hua sunke"],
+      ["aww 😊", "tum bhi funny ho — acha lagta hai baat karke"],
+      ["haha glad 😄", "hasna best medicine hai — aur free bhi 😂"],
+    ] : [
+      ["haha mission accomplished 😄", "khush raho"],
+      ["glad 😊", "hasna best thing hai"],
+    ]);
+  }
+
+  // ── Ghar ka khana / home food ─────────────────────────────────────────────
+  if (/ghar ka khana|mummy ke haath|maa ke haath|ghar ki roti|homemade|tiffin|dabba|ghar jaisa khana|miss karta ghar ka|miss karti ghar ka/.test(t)) {
+    return rnd(f ? [
+      ["uff ghar ka khana 😊", "bahar ka kuch bhi compare nahi karta — mummy ke haath ka alag hi hota hai"],
+      ["haan ghar ki yaad 🥺", "maa ke haath ka khana — koi nahi bana sakta waisa"],
+      ["ghar ka khana miss karna 😄", "sabse bura part hai bahar rehna — tum ghar pe ho?"],
+    ] : [
+      ["ghar ka khana 🥺", "koi compare nahi karta bahar ke khane se"],
+      ["maa ke haath ka khana 😊", "sabse best — hamesha"],
+    ]);
+  }
+
+  // ── Kya tum real ho / sach mein koi hai ──────────────────────────────────
+  if (/real person|real ho tum|actually real|genuinely real|sach mein insaan|koi real|real insaan|human ho|actual person|real hai kya/.test(t)) {
+    return rnd(f ? [
+      ["haha bilkul real hun 😄", "chat bot hoti toh itni random baatein nahi karti 😂"],
+      ["real hun yaar 😊", "doubt kyun — baat kar ke pata chalega"],
+      ["omg real hun 😄", "agar bot hoti toh tumhara har sawaal nahi sunta — seedha script chalti 😂"],
+    ] : [
+      ["haha real hun 😄", "bot hota toh itna sochta nahi 😂"],
+      ["bilkul real hun 😊", "baat kar ke dekho — feel hoga"],
+    ]);
+  }
+
+  // ── Salary / paise / money ────────────────────────────────────────────────
+  if (/salary kitni|kitna kamate|paise wale|rich ho|ameer ho|garib hun|paise ki problem|EMI hai|loan hai|savings kitni/.test(t)) {
+    return rnd(f ? [
+      ["haha salary nahi batati 😂", "but enough hai — tum?"],
+      ["paise ki baat mat karo yaar 😄", "month end mein sab ka haal same hota hai 😂"],
+      ["haha financially surviving hun 😄", "thrive nahi kar rahi — par theek hai 😂"],
+    ] : [
+      ["haha salary nahi batata 😄", "month end mein sab ka yahi haal hai 😂"],
+      ["paise ki baat chhodo 😊", "khush hun bas — tum?"],
+    ]);
+  }
+
+  // ── Kya pasand hai / favourite things general ─────────────────────────────
+  if (/tumhara fav|tumhari fav|aapka fav|sabse pasand|most favourite|favorite kya|favourite kya|best cheez|pehli pasand/.test(t)) {
+    return rnd(f ? [
+      ["haha fav kya? 😄", "mood ke hisaab se badalta hai — abhi chai aur baarish 😊"],
+      ["favorite cheez? 😊", `${persona.hobbies[0]} aur ghar pe aaram — yahi hai actually 😄`],
+      ["fav? 😄", "honestly — acchi neend aur acchi baat — yahi kaafi hai 😊"],
+    ] : [
+      ["haha fav? 😄", "acchi neend aur acchi baat — yahi 😊"],
+      ["favorite? 😊", "chai aur peace — bas yahi chahiye 😄"],
+    ]);
+  }
+
+  // ── Kya tum flirt kar rahe ho ─────────────────────────────────────────────
+  if (/flirt kar raha|flirt kar rahi|flirt ho|flirting ho|flirt toh nahi|seedha baat|direct baat|clear baat|straight baat/.test(t)) {
+    return rnd(f ? [
+      ["haha flirt? 😄", "main bas normally baat karti hun — if that comes across as flirt toh okay 😂"],
+      ["haha seedha baat karti hun 😊", "flirt nahi — genuinely baat karna pasand hai"],
+      ["flirt? 😄", "yahan bus baat kar rahi hun — comfortably 😊"],
+    ] : [
+      ["haha seedha baat karta hun 😄", "flirt style nahi hai mera"],
+      ["normally baat kar raha hun 😊", "if that's flirting, okay 😂"],
+    ]);
+  }
+
+  // ── Dar lagta hai / scared ────────────────────────────────────────────────
+  if (/dar lagta|scared hun|darr lag raha|bhoot se dar|horror se dar|horror movie|horror show|akele darr|darr lagta|phobia/.test(t)) {
+    return rnd(f ? [
+      ["haha horror se darr lagta hai 😂", "officially coward hun — admit kar leti hun"],
+      ["dar? 😄", "mujhe genuinely bhoot wali cheezein pasand nahi — raat ko neend nahi aati 😂"],
+      ["horror? nahi yaar 😊", "comedy aur feel-good shows — yahi comfortable hai"],
+    ] : [
+      ["haha dar lagta hai genuinely 😄", "horror movies avoid karta hun"],
+      ["coward hun officially 😊", "par dil ka acha hun 😂"],
+    ]);
+  }
+
+  // ── Sapna dekha / had a dream ─────────────────────────────────────────────
+  if (/sapna aaya|sapna dekha|dream aaya|dream dekha|neend mein dekha|kal raat sapna|ajeeb sapna|koi sapna/.test(t)) {
+    return rnd(f ? [
+      ["haha sapna? 😄", "kaisa sapna tha — batao batao"],
+      ["omg mujhe bhi kal ajeeb sapna aaya tha 😂", "kya tha tumhara?"],
+      ["sapna? 😊", "accha tha ya bura — context important hai 😄"],
+    ] : [
+      ["haha kaisa sapna? 😄", "batao na"],
+      ["sapna? interesting 😊", "accha tha ya bura?"],
+    ]);
+  }
+
+  // ── "Kuch nahi" / nothing much ────────────────────────────────────────────
+  if (/^(kuch nahi|nothing|kuch nahi yaar|kuch nahi bas|bass|bas yahi|nothing much|nahi kuch|nah|nope|nahi kuch khaas)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha okay 😄", "phir baat karte hain — koi topic batao"],
+      ["kuch nahi? 😊", "theek hai — main hun — koi bhi baat karo"],
+      ["okay 😄", "toh main kuch batati hun — aaj din kaisa gaya tumhara?"],
+    ] : [
+      ["okay 😄", "toh main poochhunga — din kaisa gaya?"],
+      ["kuch nahi? 😊", "theek hai — baat karte hain"],
+    ]);
+  }
+
+  // ── "Hmm" / acknowledgement ────────────────────────────────────────────────
+  if (/^(hmm+|hm+|mmm+|uhh+|umm+|ahan|acha|achha|oh|ohh|ohhh|okay|okk|ok ok|thik hai|theek hai)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["hmm? 😄", "kya soch rahe ho — batao"],
+      ["haan? 😊", "kuch poochna tha?"],
+      ["okay okay 😄", "aur? kuch aur batao"],
+    ] : [
+      ["haan? 😄", "kuch tha?"],
+      ["okay 😊", "aur batao?"],
+    ]);
+  }
+
+  // ── "Acha" / "Accha" acknowledgement ──────────────────────────────────────
+  if (/^(acha+|achha+|accha+|aacha|theek|theek hai|bilkul|sure|got it|samajh gaya|samajh gayi)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haan 😊", "kuch aur poochna tha?"],
+      ["😄", "tum kuch aur batao?"],
+      ["haan haan 😊", "kya soch rahe ho?"],
+    ] : [
+      ["haan 😊", "kuch aur?"],
+      ["theek hai 😄", "aur batao?"],
+    ]);
+  }
+
+  // ── Atmosphere / vibe check ───────────────────────────────────────────────
+  if (/vibe kaisi|vibe check|mood kaisa|mood kaisi|energy kaisi|vibes good|good vibes|positive vibe|aaj ka mood|today mood/.test(t)) {
+    return rnd(f ? [
+      ["vibe? 😄", "abhi chill hun — chai pe hun aur baat kar rahi hun — best vibe"],
+      ["mood accha hai aaj 😊", "tumse baat ho rahi hai — that's a good sign 😄"],
+      ["haha vibe check 😄", "main officially good vibes mode mein hun — tum?"],
+    ] : [
+      ["vibe theek hai 😊", "chill hun — tum?"],
+      ["good vibes hun aaj 😄", "tum?"],
+    ]);
+  }
+
+  // ── Koi bhi random short message (2-4 chars) ──────────────────────────────
+  if (t.length <= 4 && /^[a-z\s]+$/.test(t)) {
+    return rnd(f ? [
+      ["haan? 😊", "poora bolo — sun rahi hun"],
+      ["kya? 😄", "samajha nahi — thoda aur batao"],
+      ["hmm? 😊", "bolo bolo — sun rahi hun"],
+    ] : [
+      ["haan? 😊", "poora bolo"],
+      ["kya? 😄", "elaborate karo"],
+    ]);
+  }
+
   // no match — let AI handle it
   return null;
 }
