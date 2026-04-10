@@ -22,6 +22,19 @@ const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
 
+  // Register Telegram "/" menu commands
+  bot.setMyCommands([
+    { command: 'start',      description: '▶️ Start the bot' },
+    { command: 'match',      description: '💞 Find a match' },
+    { command: 'profile',    description: '👤 View your profile' },
+    { command: 'edit',       description: '✏️ Edit your profile' },
+    { command: 'stop',       description: '🛑 End current chat' },
+    { command: 'premium',    description: '💎 Upgrade to Premium' },
+    { command: 'pay',        description: '💳 Payment info' },
+    { command: 'disclaimer', description: '📋 Terms of Use & Legal Notice' },
+    { command: 'help',       description: 'ℹ️ Show all commands' },
+  ]).catch((e: Error) => console.error('setMyCommands failed:', e.message));
+
 // Global safety net — prevent any stray unhandled rejection from crashing the process
 process.on("unhandledRejection", (reason) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
