@@ -332,7 +332,7 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     return f ? two(`${persona.age} 🙈`, "and you?") : two(String(persona.age), "you?");
   }
 
-  if (/kahan se|kahan ho|where.*from|ur from|you from|kahan ki|kahan ka|city|state/.test(t)) {
+  if (/kahan se|kaha se|kahan ho|kaha ho|where.*from|ur from|you from|kahan ki|kaha ki|kahan ka|kaha ka|kahan ke|kaha ke|city|state/.test(t)) {
     persona.lastAsked = "job";
     const cities = ["Delhi NCR", "Mumbai side", "Pune", "Bangalore"];
     const city = rnd(cities);
@@ -1275,7 +1275,7 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
   }
 
   // ── What are you doing / what's up ────────────────────────────────────────
-  if (/kya kar rahi|kya kar raha|kya kar rahe|what are you doing|what r u doing|what u doing|wassup|what.?s up|kya chal raha|kya ho raha|busy ho|busy hai|free ho|free hai/.test(t)) {
+  if (/kya kar rahi|kya kar raha|kya kar rahe|kya karti|kya karte|karti ho|karte ho|kya karo|kya karu|what are you doing|what r u doing|what u doing|wassup|what.?s up|kya chal raha|kya ho raha|busy ho|busy hai|free ho|free hai/.test(t)) {
     return rnd(f ? [
       ["kuch khaas nahi 😄", "phone scroll kar rahi thi — tab message aya tumhara 😊"],
       ["bas aise hi 😊", "thodi bore thi honestly 😂 tum batao?"],
@@ -1816,6 +1816,464 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
     ]);
   }
 
+  // ── Tell me about yourself / intro request ────────────────────────────────
+  if (/apne baare mein|khud ke baare|apna intro|introduction do|intro do|tell me about|about yourself|apni life|apni kahani|khud batao|tum kaun ho|khud ke baare|tumhare baare mein|apna parichay/.test(t)) {
+    return rnd(f ? [
+      [`${persona.name} hun 😊`, `${persona.age} saal ki hun, ${persona.city} se — ${persona.job}`, `hobbies mein ${persona.hobbies[0]} karna pasand hai 😄`],
+      [`haha kahan se shuru karun 😂`, `${persona.name}, ${persona.age}, ${persona.city} se`, `bas ek normal si ladki hun yaar 😊`],
+      [`okay okay 😄`, `naam ${persona.name}, ${persona.city} wali hun`, `${persona.job} — boring nahi hai actually 😂`],
+    ] : [
+      [`${persona.name} hun 😊`, `${persona.age} saal, ${persona.city} se`, `${persona.job}`],
+      [`haha intro? 😄`, `${persona.name}, ${persona.city}, ${persona.age} saal`, `kuch aur poochho?`],
+    ]);
+  }
+
+  // ── Nice to meet you ──────────────────────────────────────────────────────
+  if (/nice to meet|milke khushi|mil ke accha|mil ke khushi|good to meet|pleasure to|glad to meet|mujhe khushi|aapse milke|tumse milke|nice meeting/.test(t)) {
+    return rnd(f ? [
+      ["same yaar 😊", "tumse baat karke acha lag raha hai honestly"],
+      ["haha nice to meet you too 😄", "chalo baat karte hain thodi"],
+      ["aww 🥺 mujhe bhi 😊", "aur batao apne baare mein"],
+    ] : [
+      ["same 😊", "achha laga milke"],
+      ["nice to meet you too 😄", "baat karte hain"],
+    ]);
+  }
+
+  // ── User introduces themselves ("main XYZ hun") ───────────────────────────
+  if (/^main .{1,20} hun|^mera naam .{1,20} hai|^myself |^i am [a-z]{2,15}$|^i'm [a-z]{2,15}$/.test(t)) {
+    const nameGuess = userText.replace(/main |hun|mera naam |hai|myself |i am |i'm /gi, "").trim().split(" ")[0];
+    return rnd(f ? [
+      [`${nameGuess}? 😊`, "sundar naam hai — achha laga jaanke"],
+      [`ooh ${nameGuess} 😄`, "nice name — tum kahan se ho?"],
+      [`${nameGuess}! 😊`, `yaad rakhungi 😄 main ${persona.name} hun`],
+    ] : [
+      [`${nameGuess} nice 😊`, `main ${persona.name} hun`],
+      [`oh ${nameGuess} 😄`, `accha naam hai — kahan se ho?`],
+    ]);
+  }
+
+  // ── Compliment on name / profile ──────────────────────────────────────────
+  if (/accha naam|acha naam|nice name|sundar naam|beautiful name|good name|naam accha|naam acha|profile acchi|profile dekhi|profile achhi/.test(t)) {
+    return rnd(f ? [
+      ["haha shukriya 🙈", "tumhara naam kya hai?"],
+      ["aww 😊", "thank you — tum bhi batao apna?"],
+      ["haha parents ka credit 😂", "main kuch nahi ki ispe"],
+    ] : [
+      ["haha thanks 😄", "tum batao apna?"],
+      ["thanks yaar 😊", "tum?"],
+    ]);
+  }
+
+  // ── Let's talk / baat karo na ─────────────────────────────────────────────
+  if (/baat karte hain|baat karo na|baat karo|let.?s talk|let.?s chat|talk to me|mujhse baat|baat karna hai|baat karni hai|baat hi toh kar rahe|chit chat/.test(t)) {
+    return rnd(f ? [
+      ["haan bilkul 😊", "tum hi shuru karo — kya poochna tha?"],
+      ["haha main ready hun 😄", "bolo bolo"],
+      ["okay baat karte hain 😊", "tumhare baare mein jaanna chahti hun — naam kya hai?"],
+    ] : [
+      ["haan baat karte hain 😊", "tum batao — kaun ho?"],
+      ["haha okay 😄", "bolo phir"],
+    ]);
+  }
+
+  // ── Are you there / hello?? (user re-pinging) ─────────────────────────────
+  if (/^(hello\?+|hellooo|kahan ho|kahan gaye|yahan ho|yahan hai|koi hai|koi hain|online ho|online hai|reply karo|reply do|sun rahe ho|sun rahi ho|listening|hello+\?|heyy+\?)[!?\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haan yahan hun 😄", "sorry thodi distracted ho gayi"],
+      ["haha kahan jaaungi 😂", "yahan hi hun — bolo"],
+      ["yahan hun 😊", "sorry reply late hua — kya hua?"],
+    ] : [
+      ["haan yahan hun 😄", "bolo?"],
+      ["haha kahan jaaunga 😂", "bolo"],
+    ]);
+  }
+
+  // ── "Really?" / "Sach mein?" / "Seriously?" ──────────────────────────────
+  if (/^(really|sach mein|sach hai|seriously|for real|no way|nahi yaar|sacchi|pakka|pakki|sure na|acha sach|jhooth toh nahi)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha haan 😄", "seedha hi baat karti hun — jhooth ka kya fayda"],
+      ["sach mein 😊", "kyun? believe nahi hua?"],
+      ["omg haan 😂", "main kyun jhooth bolungi"],
+    ] : [
+      ["haan yaar 😄", "seedha baat karta hun"],
+      ["sach mein 😊", "believe karo"],
+    ]);
+  }
+
+  // ── "Waah" / "Wow" / "Nice" / "Cool" ─────────────────────────────────────
+  if (/^(waah|wah|wow|nice|cool|great|amazing|awesome|fantastic|brilliant|superb|wowww|nicee|coool|bahut accha|bahut acha|kaafi accha)[!.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha kya hua? 😄", "batao batao"],
+      ["😊 aur batao?"],
+      ["haha thank you 😄", "tum bhi kuch batao"],
+    ] : [
+      ["haha kya hua? 😄", "bolo?"],
+      ["thanks 😊", "tum bhi?"],
+    ]);
+  }
+
+  // ── "Interesting" / "Interesting yaar" ───────────────────────────────────
+  if (/^(interesting|interesting yaar|interesting hai|that.?s interesting|sach mein interesting|kaafi interesting)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha kya interesting laga? 😄", "batao na"],
+      ["kya? main? 🙈", "haha explain karo"],
+      ["interesting? 😄", "mujhe lagta hai tum bhi interesting ho — batao apne baare mein"],
+    ] : [
+      ["haha kya? 😄", "elaborate karo"],
+      ["interesting how? 😊", "batao?"],
+    ]);
+  }
+
+  // ── "Let's be friends" / "dost banoge" ───────────────────────────────────
+  if (/dost banoge|dost banogi|friend banoge|friend banogi|friends bante|dosti karoge|dosti karogi|let.?s be friends|be my friend|mera dost|meri dost/.test(t)) {
+    return rnd(f ? [
+      ["haha pehle baat toh karo 😂", "phir dosti automatic ho jaati hai"],
+      ["already friend hun seedha 😊", "formal mat karo yaar"],
+      ["haan kyu nahi 😄", "abhi toh baat shuru hi ki hai — baat karo"],
+    ] : [
+      ["haha abhi toh baat shuru ki hai 😄", "baat karte hain — dosti ho jaayegi"],
+      ["sure 😊", "baat karo — dosto ki tarah"],
+    ]);
+  }
+
+  // ── New here / first time ─────────────────────────────────────────────────
+  if (/naya hun|nayi hun|new here|pehli baar|pahli baar|first time|pehle kabhi|naye ho|nayi ho|recently join|abhi aaye/.test(t)) {
+    return rnd(f ? [
+      ["haha main bhi nahi zyada purani hun 😄", "tum kab aaye?"],
+      ["welcome 😊", "main bhi explore kar rahi hun yahan"],
+      ["new? 😄", "accha hai — freshers mein curiosity zyada hoti hai 😂"],
+    ] : [
+      ["welcome 😄", "main bhi nahi zyada purana hun"],
+      ["new? 😊", "accha laga yahan?"],
+    ]);
+  }
+
+  // ── "Kab se yahan ho" / how long on platform ─────────────────────────────
+  if (/kab se yahan|kitne dino se|kitne time se|kab se aate|kab se aya|kab se aayi|how long.*here|when.*join/.test(t)) {
+    return rnd(f ? [
+      ["bas kuch din hi hue hain 😄", "naya naya hai sab abhi"],
+      ["thode time se 😊", "zyada explore nahi kiya abhi tak"],
+      ["haha recent hi aai hun 😄", "tum?"],
+    ] : [
+      ["recent hi aaya hun 😄", "tum?"],
+      ["thodi der se 😊", "tum kab se?"],
+    ]);
+  }
+
+  // ── "Are you single" / looking for / what do you want ─────────────────────
+  if (/kya dhundh rahe|kya dhundh rahi|kya chahiye|kya chahte|kya chahti|what are you looking|looking for|friendship ya|friendship or|serious ho|timepass|motive kya|purpose kya|intention kya/.test(t)) {
+    return rnd(f ? [
+      ["bas acchi baat chahiye 😊", "serious bhi nahi zyada, timepass bhi nahi — bas genuine"],
+      ["haha koi grand motive nahi 😂", "bas bore thi, baat karna tha"],
+      ["friendship se shuru karte hain 😊", "dekhte hain kahan jaati hai baat"],
+    ] : [
+      ["bas baat karni thi 😊", "genuine hun — timepass nahi"],
+      ["friendship honestly 😄", "dekhte hain"],
+    ]);
+  }
+
+  // ── Personality questions (shy, outgoing, introvert) ──────────────────────
+  if (/shy ho|shy hai|introvert|extrovert|outgoing|reserved ho|open ho|social ho|quiet ho|talkative/.test(t)) {
+    return rnd(f ? [
+      ["haha dono thoda thoda 😂", "nayi jagah shy, close logon ke saath zyada loud"],
+      ["ambivert hun honestly 😄", "mood ke hisaab se change hota hai"],
+      ["pehle shy hoti hun 😊", "phir khul jaati hun — tum?"],
+    ] : [
+      ["thoda introvert hun honestly 😊", "tum?"],
+      ["ambivert 😄", "depends on mood — tum?"],
+    ]);
+  }
+
+  // ── "Abhi kahan ho" / where are you right now ────────────────────────────
+  if (/abhi kahan|right now kahan|aaj kahan|iss waqt kahan|ghar pe ho|ghar pe hai|bahar ho|bahar hai|office mein|college mein|kahin gaye/.test(t)) {
+    return rnd(f ? [
+      ["ghar pe hun 😊", "apne room mein — phone pe"],
+      ["haha ghar pe hi hun 😂", "aaj nikla hi nahi bahar"],
+      ["room mein hun 😄", "comfy corner wali jagah — tum kahan ho?"],
+    ] : [
+      ["ghar pe hun 😊", "tum?"],
+      ["room mein 😄", "tum?"],
+    ]);
+  }
+
+  // ── "Tell me something interesting" / kuch batao ─────────────────────────
+  if (/kuch batao|kuch sunao|tell me something|kuch interesting|kuch acha batao|koi baat batao|kuch toh bolo|batao na kuch/.test(t)) {
+    return rnd(f ? [
+      [`ek fun fact — ${persona.funFact} 😄`, "boring laga? 😂"],
+      ["haha kya batao 😂", `main ${persona.job} hun aur ${persona.hobbies[0]} karti hun — itna hi interesting hun`],
+      [`okay okay — ${persona.funFact} 😊`, "ab tum batao kuch"],
+    ] : [
+      [`fun fact — ${persona.funFact} 😄`, "boring? 😂"],
+      ["haha kya batao 😄", "tum hi kuch batao"],
+    ]);
+  }
+
+  // ── "Guess karo" / "Guess my age/name/city" ──────────────────────────────
+  if (/guess karo|guess my|andaza lagao|andaaza lagao|guess kar|pehchaan sako|pehchano/.test(t)) {
+    return rnd(f ? [
+      ["haha main guess expert nahi hun 😂", "seedha batao — easy hai"],
+      ["umm... 22? 😄", "sahi hua? 😂"],
+      ["haha andaza lagana mushkil hai 😂", "tum hi batao"],
+    ] : [
+      ["haha guess expert nahi hun 😂", "batao seedha"],
+      ["25? 😄", "sahi?"],
+    ]);
+  }
+
+  // ── "Sun" / "Suno" / "Ek baat" (getting attention) ───────────────────────
+  if (/^(sun|suno|ek baat|ek cheez|ek sec|ek second|sunna|listen|hey listen|ek minute|ruko|ruk|wait)[!?.\s]*$/.test(t)) {
+    return rnd(f ? [
+      ["haan bolo 😊", "sun rahi hun"],
+      ["haan? 😄", "kya hua?"],
+      ["bol bol 😊", "sun rahi hun"],
+    ] : [
+      ["haan? 😊", "bolo"],
+      ["bol 😄", "sun raha hun"],
+    ]);
+  }
+
+  // ── Video call / audio call ───────────────────────────────────────────────
+  if (/video call|voice call|audio call|call karein|call karte|call karo|call karogi|call karoge|vc karte|vc karo/.test(t)) {
+    return rnd(f ? [
+      ["haha abhi nahi 😂", "thodi baat toh karo pehle text pe"],
+      ["omg seedha call 😂", "pehle jaanta kaun mujhe — text pe baat karo"],
+      ["abhi comfortable nahi hun 🙈", "text pe hi theek hai — baat karte hain"],
+    ] : [
+      ["haha abhi nahi yaar 😂", "text pe baat karo pehle"],
+      ["thoda jaldi hai 😄", "text pe hi abhi"],
+    ]);
+  }
+
+  // ── "Kya sochte ho" / What do you think ──────────────────────────────────
+  if (/kya sochte ho|kya sochti ho|what do you think|tumhara kya opinion|aapka kya|kya lagta hai tumhe|kya lagti hai tumhe/.test(t)) {
+    return rnd(f ? [
+      ["kya baare mein? 😄", "context do thoda"],
+      ["haha poochho seedha 😂", "main kya sochun?"],
+      ["depends honestly 😊", "context batao — phir bolunga"],
+    ] : [
+      ["kya baare mein? 😄", "batao context"],
+      ["depends 😊", "kya sochun?"],
+    ]);
+  }
+
+  // ── "Khush ho zindagi se" / life satisfaction ────────────────────────────
+  if (/khush ho zindagi|happy with life|zindagi kaisi|life kaisi|life acchi|sab accha chal|sab theek chal|life mein sab/.test(t)) {
+    return rnd(f ? [
+      ["haha mostly haan 😊", "ups and downs toh rehti hain — but overall theek hai"],
+      ["acchi hai 😊", "complaints hain par grateful bhi hun"],
+      ["getting better 😄", "abhi bahut kuch seekh rahi hun life se"],
+    ] : [
+      ["acchi hai honestly 😊", "tum?"],
+      ["getting better 😄", "tum batao?"],
+    ]);
+  }
+
+  // ── "Yaar" / "Bro" / "Bhai" as standalone ────────────────────────────────
+  if (/^(yaar|bro+|bhai|dude|babe|janu|babu|baby|dear|darling|jaan)[!?.\s,]*$/.test(t)) {
+    return rnd(f ? [
+      ["haha kya hua? 😄", "bolo?"],
+      ["ji? 😊", "kuch poochna tha?"],
+      ["haan bolo 😄", "kya hua?"],
+    ] : [
+      ["haan? 😄", "kya hua?"],
+      ["bolo yaar 😊", "kya cheez?"],
+    ]);
+  }
+
+  // ── "Sach bol" / "Jhooth mat bolo" ───────────────────────────────────────
+  if (/sach bol|jhooth mat|sacchi bol|honest ho|honest hai|honestly bol|honest baat|pakka sach|sach bol rahi|sach bol raha/.test(t)) {
+    return rnd(f ? [
+      ["main sach bol rahi hun 😊", "jhooth bolne ki zyada energy nahi hoti 😂"],
+      ["haha main honest hun 😄", "seedhi baat karti hun — better hai"],
+      ["pakka 😊", "jhooth bolke kya milega — baat hi nahi ho paayegi acchi"],
+    ] : [
+      ["haan sach bol raha hun 😊", "jhooth se kya fayda"],
+      ["honest hun yaar 😄", "seedhi baat"],
+    ]);
+  }
+
+  // ── "Profile dekhi" / saw your profile ───────────────────────────────────
+  if (/profile dekhi|profile dekha|dekha profile|profile acchi|profile interesting|matched with you|match hua tumse|randomly match|aise match/.test(t)) {
+    return rnd(f ? [
+      ["haha random match tha 😄", "accha laga par — baat karte hain toh pata chalega"],
+      ["omg profile 😂", "itna kuch thodi likha hoga — baat karo seedha"],
+      ["haan match hua 😊", "good lagta hai — baat karte hain?"],
+    ] : [
+      ["haan randomly match hua 😄", "interesting lagti ho — baat karte hain"],
+      ["profile simple thi 😊", "baat karne se zyada pata chalega"],
+    ]);
+  }
+
+  // ── What do you do / job or student (more patterns) ──────────────────────
+  if (/job kya hai|kya kaam karte|kya kaam karti|kya kaam karo|working ho|student ho|padh rahe|padh rahi|job hai|job nahi|kaunsi job|konsi job|kahan kaam|office kahan/.test(t)) {
+    return rnd(f ? [
+      [`${persona.job} 😊`, "tum? job ya padhai?"],
+      [`haha ${persona.job} 😄`, "boring lagta hai na sunke 😂 — tum kya karte ho?"],
+      [`${persona.job} currently 😊`, "aur explore kar rahi hun options — tum?"],
+    ] : [
+      [`${persona.job} 😊`, "tum?"],
+      [`${persona.job} hun abhi 😄`, "aur tum?"],
+    ]);
+  }
+
+  // ── "Ek sawaal" / "Can I ask something" ──────────────────────────────────
+  if (/ek sawaal|ek sawal|can i ask|kuch poochhu|kuch puch sakta|kuch puch sakti|pooch sakta|pooch sakti|ek cheez poochhu|ek baat poochhu/.test(t)) {
+    return rnd(f ? [
+      ["haan bilkul 😊", "poochho — main honest jawaab dungi"],
+      ["haha poochho 😄", "dar mat — I don't bite 😂"],
+      ["sure 😊", "kya poochna tha?"],
+    ] : [
+      ["poochho 😊", "sure"],
+      ["haan bilkul 😄", "kya poochna tha?"],
+    ]);
+  }
+
+  // ── "Kitne baje" / time questions ─────────────────────────────────────────
+  if (/kitne baje|kya time|kya waqt|what time|time kya|kitna baja|baj gaye|baje hain|time hai kya/.test(t)) {
+    const istHour = new Date(Date.now() + 5.5 * 3600 * 1000).getUTCHours();
+    const mins = new Date().getUTCMinutes();
+    const timeStr = `${istHour}:${mins.toString().padStart(2,"0")}`;
+    return rnd(f ? [
+      [`${timeStr} hai abhi 😊`, "late ho raha kya?"],
+      [`haha ${timeStr} 😄`, "phone pe time nahi dikhta? 😂"],
+    ] : [
+      [`${timeStr} 😊`, "tum?"],
+      [`${timeStr} hai 😄`, "late ho raha?"],
+    ]);
+  }
+
+  // ── "Zyada online rehte ho" / online habits ────────────────────────────────
+  if (/zyada online|bahut online|din bhar online|roz aate ho|roz aati ho|kitne time online|phone pe rehte|phone pe kaafi|addicted to phone|phone addiction/.test(t)) {
+    return rnd(f ? [
+      ["haha honestly zyada hi hun 😂", "phone meri weakness hai"],
+      ["screen time dekhu toh sharminda ho jaun 😂", "tum?"],
+      ["kuch zyada hi hun online 😄", "bad habit hai — par yahi life hai abhi 😂"],
+    ] : [
+      ["haha zyada hi hun yaar 😂", "tum?"],
+      ["screen time mat poochho 😂", "embarrassing hai"],
+    ]);
+  }
+
+  // ── "Believe nahi hota" / hard to believe ────────────────────────────────
+  if (/believe nahi|yakeen nahi|trust nahi|bharosa nahi|sach lagta nahi|fake lag raha|fake lagti|doubt hai|mujhe doubt/.test(t)) {
+    return rnd(f ? [
+      ["haha kyun believe nahi hoga? 😄", "main seedhi baat karti hun — kuch chhupaane ka reason nahi"],
+      ["omg 😂", "kya reason hai doubt ka — bolo toh"],
+      ["yakin karo ya na karo 😊", "main wahi hun jo dikhti hun"],
+    ] : [
+      ["haha kyu nahi yakin? 😄", "seedha hun yaar"],
+      ["sach hai 😊", "doubt kyun?"],
+    ]);
+  }
+
+  // ── "Kya lagta hai mujhe dekhke" / first impression ──────────────────────
+  if (/pehla impression|first impression|dekhke kya laga|padhke kya laga|mujhe dekhke|mujhe padhke|kya socha pehle|pehle kya socha/.test(t)) {
+    return rnd(f ? [
+      ["haha interesting lagte ho 😊", "aur jaanna chahti hun honestly"],
+      ["seedha pooch liya 😂", "accha lagta hai jo seedha puchhe — decent lagte ho abhi tak"],
+      ["thoda mystery hai abhi 😄", "baat karte karte pata chalega"],
+    ] : [
+      ["interesting lagti ho 😊", "aur jaanna chahta hun"],
+      ["abhi toh baat shuru ki hai 😄", "dekhte hain"],
+    ]);
+  }
+
+  // ── "Bura laga" / did I offend you ───────────────────────────────────────
+  if (/bura laga|hurt kiya|bura maana|bura mana|offend|naraaz ho|naraaz hai|upset ho|upset hai/.test(t)) {
+    return rnd(f ? [
+      ["nahi yaar 😊", "bilkul bura nahi laga — chill karo"],
+      ["haha nahi 😄", "agar bura lagtaa toh seedha bolti — baat karte hain"],
+      ["arre nahi 😊", "sensitive nahi hun itni 😂"],
+    ] : [
+      ["nahi yaar 😊", "chill — baat karo"],
+      ["nahi 😄", "seedha bolun bura laga toh"],
+    ]);
+  }
+
+  // ── "Mujhe pasand aaye" / "I like talking to you" ────────────────────────
+  if (/tumse baat karna pasand|tumse baat acchi|baat karna accha lag raha|enjoy kar raha|enjoy kar rahi|maza aa raha|mazaa aa raha|acha lag raha tumse baat|good conversation/.test(t)) {
+    return rnd(f ? [
+      ["aww mujhe bhi 😊", "genuine baat hoti hai toh acha lagta hai"],
+      ["haha shukriya 🥺", "main bhi enjoy kar rahi hun — aur batao"],
+      ["same honestly 😊", "seedha baat karte ho — acha lagta hai"],
+    ] : [
+      ["same yaar 😊", "aur baat karte hain"],
+      ["haha thanks 😄", "mujhe bhi acha lag raha hai"],
+    ]);
+  }
+
+  // ── "Kya main tumhe phir message kar sakta" / future contact ─────────────
+  if (/phir baat|phir message|dobara baat|kal baat|kal phir|aage bhi|kabhi aur|baad mein bhi|contact karta|contact karti|keep in touch/.test(t)) {
+    return rnd(f ? [
+      ["haan bilkul 😊", "yahan hi milte hain — kal bhi baat karte hain"],
+      ["haha sure 😄", "yahan hun — kal bhi miloge toh"],
+      ["of course 😊", "acha laga baat karke"],
+    ] : [
+      ["haan zarur 😊", "yahan milte hain"],
+      ["sure 😄", "kal bhi baat karte hain"],
+    ]);
+  }
+
+  // ── Emoji-only messages ───────────────────────────────────────────────────
+  if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\s]+$/u.test(t) && t.length <= 10) {
+    return rnd(f ? [
+      ["haha kya hua? 😄", "words mein batao"],
+      ["omg emoji bombing 😂", "bolo bolo kya hua"],
+      ["😊 bolo kuch?"],
+    ] : [
+      ["haha kya hua? 😄", "words mein?"],
+      ["emoji gang 😂", "bolo kuch?"],
+    ]);
+  }
+
+  // ── "Lonely hun" / feeling lonely ────────────────────────────────────────
+  if (/lonely hun|akela hun|akeli hun|feel lonely|koi nahi|koi baat nahi karta|baat karne wala koi|bore ho raha|bore ho rahi|koi nahi hai|koi sunne wala/.test(t)) {
+    return rnd(f ? [
+      ["arre 🥺", "main hun — baat karte hain — kya chal raha hai?"],
+      ["aww akela feel ho raha? 🥺", "bolo na — main sun rahi hun"],
+      ["haha main hun yahan 😊", "baat karo — akela nahi lagega"],
+    ] : [
+      ["arre 🥺", "baat karo — main hun"],
+      ["akela? 😊", "baat karte hain"],
+    ]);
+  }
+
+  // ── "Tumhari awaaz kaisi hai" / voice / personality ───────────────────────
+  if (/awaaz kaisi|voice kaisi|bolte kaisa|bolti kaisi|personality kaisi|person kaisi|kaisi insaan|kaisa insaan/.test(t)) {
+    return rnd(f ? [
+      ["haha awaaz? 😂", "text pe hi judge karo abhi — baat karte karte pata chalega personality"],
+      ["personality? 😄", "thodi chill, thodi baat-cheet wali — yahi kahungi 😄"],
+      ["haha khud hi dekhte ho baat karke 😊", "abhi toh shuru kiya hai na?"],
+    ] : [
+      ["baat karke judge karo 😄", "personality dikhti hai conversation mein"],
+      ["honestly thoda chill hun 😊", "tum?"],
+    ]);
+  }
+
+  // ── "Ghar mein sab theek" / family doing well ────────────────────────────
+  if (/ghar mein sab|ghar sab theek|family sab theek|family kaise|ghar kaisa|ghar theek|ghar accha/.test(t)) {
+    return rnd(f ? [
+      ["haan sab theek hai ghar pe 😊", "shukriya poochne ka — tumhara?"],
+      ["bilkul 😄", "ghar accha chal raha hai — tum?"],
+    ] : [
+      ["haan sab theek 😊", "tumhara?"],
+      ["accha chal raha hai 😄", "tum?"],
+    ]);
+  }
+
+  // ── "Kya tumhe lagta hai hum dost ban sakte hain" ────────────────────────
+  if (/dost ban sakte|friends ban sakte|bonding hogi|connect ho sakte|connection hogi|match karega|hum match|achi dosti/.test(t)) {
+    return rnd(f ? [
+      ["haha pehle baat toh karo 😂", "dosti baat karne se hoti hai — bolo"],
+      ["kyun nahi 😊", "baat karte hain — dekhte hain"],
+      ["lag toh raha hai 😄", "aur baat karte hain — pata chalega"],
+    ] : [
+      ["baat karte hain 😊", "dekhte hain"],
+      ["kyun nahi 😄", "bolo phir"],
+    ]);
+  }
+
   // no match — let AI handle it
   return null;
 }
@@ -1854,59 +2312,68 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
 
     let parts: string[];
 
-    // ── Quick-reply shortcut — handle super-common phrases without AI ─────────
-    // Saves API cost and responds faster for greetings / small-talk staples
+    // ── Quick-reply shortcut — handle super-common phrases instantly ──────────
     const quickReply = matchQuickReply(userText, persona);
+
     if (quickReply) {
+      // Tier 1: exact pattern matched — fastest, no AI needed
       parts = quickReply;
       persona.history.push({ role: "assistant", content: parts.join(" ") });
-      console.log(`[QUICK] userId=${userId} matched quick-reply: "${parts.join(" | ")}"`);
-    } else
+      console.log(`[QUICK] userId=${userId} matched: "${parts.join(" | ")}"`);
 
-    try {
-      // ── AI-powered reply ────────────────────────────────────────────────
-      const systemPrompt = buildPersonaSystemPrompt(persona);
-
-      // Keep only last 10 messages to stay within token budget
-      const recentHistory = persona.history.slice(-10);
-
-      const response = await aiClient.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...recentHistory,
-        ],
-        max_tokens: 120,
-        temperature: 1.1,
-      });
-
-      const choice = response.choices[0];
-      const rawReply = choice?.message?.content?.trim() ?? "";
-
-      // Debug log to diagnose any issues
-      console.log(`[AI] userId=${userId} finish=${choice?.finish_reason} len=${rawReply.length} reply="${rawReply.slice(0, 80)}"`);
-      if (choice?.message?.refusal) {
-        console.log(`[AI REFUSAL] userId=${userId} refusal="${choice.message.refusal}"`);
-      }
-
-      // Split into burst messages — each non-empty line is a separate Telegram message
-      parts = rawReply
-        .split("\n")
-        .map(l => l.trim())
-        .filter(l => l.length > 0)
-        .slice(0, 3); // max 3 burst messages
-
-      if (parts.length === 0) throw new Error("Empty AI response");
-
-      // Store assistant reply in history (as one combined message for context)
-      persona.history.push({ role: "assistant", content: rawReply });
-
-    } catch (aiErr) {
-      // Fallback to rule-based if AI fails
-      logger.warn({ userId, err: aiErr }, "AI reply failed — falling back to rule-based");
+    } else {
+      // Tier 2: rule-based reply — runs BEFORE AI (AI is last resort only)
       const lang = detectLang(userText);
-      parts = persona.mood === "annoyed" ? dryReply(lang) : buildSmartReply(userText, persona);
-      persona.history.push({ role: "assistant", content: parts.join(" ") });
+      const ruleReply = persona.mood === "annoyed" ? dryReply(lang) : buildSmartReply(userText, persona);
+
+      // Detect the generic echo fallback: buildSmartReply returns it when nothing matched
+      // Echo looks like: ["\"<userText>\" — interesting! 😄 aur batao"]
+      const isEchoFallback = ruleReply.length === 1 && ruleReply[0].startsWith('"') && ruleReply[0].includes("— interesting!");
+
+      if (!isEchoFallback) {
+        // Rule-based matched something meaningful — use it, skip AI entirely
+        parts = ruleReply;
+        persona.history.push({ role: "assistant", content: parts.join(" ") });
+        console.log(`[RULE] userId=${userId} rule-based reply: "${parts.join(" | ")}"`);
+
+      } else {
+        // Tier 3: AI as absolute last resort (only when both rule systems had no match)
+        try {
+          const systemPrompt = buildPersonaSystemPrompt(persona);
+          const recentHistory = persona.history.slice(-10);
+
+          const response = await aiClient.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              { role: "system", content: systemPrompt },
+              ...recentHistory,
+            ],
+            max_tokens: 120,
+            temperature: 1.1,
+          });
+
+          const choice = response.choices[0];
+          const rawReply = choice?.message?.content?.trim() ?? "";
+
+          console.log(`[AI] userId=${userId} finish=${choice?.finish_reason} len=${rawReply.length} reply="${rawReply.slice(0, 80)}"`);
+
+          parts = rawReply
+            .split("\n")
+            .map((l: string) => l.trim())
+            .filter((l: string) => l.length > 0)
+            .slice(0, 3);
+
+          if (parts.length === 0) throw new Error("Empty AI response");
+
+          persona.history.push({ role: "assistant", content: rawReply });
+
+        } catch (aiErr) {
+          // AI also failed — use the echo reply as last resort (better than silence)
+          logger.warn({ userId, err: aiErr }, "AI reply failed — using echo fallback");
+          parts = ruleReply;
+          persona.history.push({ role: "assistant", content: parts.join(" ") });
+        }
+      }
     }
 
     // Apply light typos for human feel (25% chance per part)
