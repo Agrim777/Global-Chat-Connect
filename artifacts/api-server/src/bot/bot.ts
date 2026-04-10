@@ -17,7 +17,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 1 * 60 * 1000; // 1 minute free trial
+const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -867,9 +867,27 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     ]);
   }
 
-  // ── Ultimate fallback — signal to AI layer that no rule matched ────────────
-  // "__NEEDS_AI__" is a sentinel that fakeAutoReply detects and escalates to GPT
-  return ["__NEEDS_AI__"];
+  // ── Ultimate fallback — natural human-sounding replies when no rule matched ──
+  const naturalF = [
+    ["haha interesting 😄", "aur batao apne baare mein?"],
+    ["sach mein? 😊", "achha lagaa sunke"],
+    ["haha yaar 😂", "tum bhi na 😄"],
+    ["omg seriously? 😄", "aur?"],
+    ["haha achha 😊", "tum bahut fun lagte ho"],
+    ["hm 😄", "interesting"],
+    ["haha kya baat hai 😊", "aur kya chal raha hai?"],
+    ["lol 😂", "seedha bolo yaar"],
+    ["aww 😊", "sach mein nice laga"],
+    ["haha okay okay 😄", "bolo bolo"],
+  ];
+  const naturalM = [
+    ["haha nice 😄", "tell me more?"],
+    ["sach mein? 😊", "interesting"],
+    ["haha go on 😄"],
+    ["okay okay 😊", "aur?"],
+    ["haha yaar 😂", "different type ho tum"],
+  ];
+  return rnd(f ? naturalF : naturalM);
 }
 // ── 5-minute pay reminder after free trial ends ───────────────────────────────
 const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha"];
@@ -2808,73 +2826,10 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
       const lang = detectLang(userText);
       const ruleReply = persona.mood === "annoyed" ? dryReply(lang) : buildSmartReply(userText, persona);
 
-      // Detect the generic echo fallback: buildSmartReply returns it when nothing matched
-      // Echo looks like: ["\"<userText>\" — interesting! 😄 aur batao"]
-      const isEchoFallback = ruleReply.length === 1 && ruleReply[0] === "__NEEDS_AI__";
-
-      if (!isEchoFallback) {
-        // Rule-based matched something meaningful — use it, skip AI entirely
-        parts = ruleReply;
-        persona.history.push({ role: "assistant", content: parts.join(" ") });
-        console.log(`[RULE] userId=${userId} rule-based reply: "${parts.join(" | ")}"`);
-
-      } else {
-        // Tier 3: AI as absolute last resort (only when both rule systems had no match)
-        try {
-          const systemPrompt = buildPersonaSystemPrompt(persona);
-          const recentHistory = persona.history.slice(-10);
-
-          const response = await aiClient.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-              { role: "system", content: systemPrompt },
-              ...recentHistory,
-            ],
-            max_tokens: 120,
-            temperature: 1.1,
-          });
-
-          const choice = response.choices[0];
-          const rawReply = choice?.message?.content?.trim() ?? "";
-
-          console.log(`[AI] userId=${userId} finish=${choice?.finish_reason} len=${rawReply.length} reply="${rawReply.slice(0, 80)}"`);
-
-          parts = rawReply
-            .split("\n")
-            .map((l: string) => l.trim())
-            .filter((l: string) => l.length > 0)
-            .slice(0, 3);
-
-          if (parts.length === 0) throw new Error("Empty AI response");
-
-          persona.history.push({ role: "assistant", content: rawReply });
-
-        } catch (aiErr) {
-          // AI failed — use natural human reactions (never show __NEEDS_AI__ sentinel to user)
-          logger.warn({ userId, err: aiErr }, "AI reply failed — using natural fallback");
-          const naturalFallbacks_f = [
-            ["haha achha 😄", "aur batao apne baare mein?"],
-            ["sach mein? 😊", "interesting — go on"],
-            ["omg wait 😂", "seedha bolo yaar"],
-            ["hm... 😄", "thoda aur detail mein bolo na"],
-            ["haha okay okay 😊", "matlab?"],
-            ["interesting 👀", "aur?"],
-            ["haha kya bol rahe ho 😂", "dheere explain karo"],
-          ];
-          const naturalFallbacks_m = [
-            ["haha interesting 😄", "go on?"],
-            ["sach mein? 😊", "aur batao"],
-            ["hm okay 😄", "elaborate?"],
-            ["achha? 😊", "aur?"],
-            ["haha yaar 😄", "thoda clear karo"],
-          ];
-          const fb = persona.isFemale
-            ? naturalFallbacks_f[Math.floor(Math.random() * naturalFallbacks_f.length)]
-            : naturalFallbacks_m[Math.floor(Math.random() * naturalFallbacks_m.length)];
-          parts = fb;
-          persona.history.push({ role: "assistant", content: parts.join(" ") });
-        }
-      }
+      // Rule-based reply used directly — no AI dependency
+      parts = ruleReply;
+      persona.history.push({ role: "assistant", content: parts.join(" ") });
+      console.log(`[RULE] userId=${userId} reply: "${parts.join(" | ")}"`);
     }
 
     // Apply light typos for human feel (25% chance per part)
@@ -2886,7 +2841,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
       bot.sendChatAction(chatId, "typing").catch(() => {});
 
       // Typing delay = chars × 50ms + jitter, min 700ms, max 2800ms (snappy but human)
-      const typingMs = Math.min(Math.max(parts[i].length * 50, 700), 2800) + Math.random() * 300;
+      const typingMs = Math.min(Math.max(parts[i].length * 30, 400), 1200) + Math.random() * 200;
       await delay(typingMs);
 
       // Guard — user may have stopped mid-burst
