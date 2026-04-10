@@ -17,7 +17,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 45 * 1000; // 45 second free trial (was 60s, reduced by 15s)
+const FREE_CHAT_DURATION_MS = 1 * 60 * 1000; // 1 minute free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -867,20 +867,9 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     ]);
   }
 
-  // ── Ultimate fallback — echo user's text and ask a question ──────────────
-  const followUps_f = [
-    `"${echo}" — interesting! 😄 aur batao`,
-    `haha "${echo}" 😊 explain karo`,
-    `omg "${echo}"?? bolo bolo 👀`,
-    `wait — "${echo}" matlab? 😄`,
-    `haha yaar "${echo}" 😂 aur?`,
-  ];
-  const followUps_m = [
-    `"${echo}" — interesting 😄 go on`,
-    `haha "${echo}"? elaborate 😄`,
-    `"${echo}" okay and? 😊`,
-  ];
-  return [rnd(f ? followUps_f : followUps_m)];
+  // ── Ultimate fallback — signal to AI layer that no rule matched ────────────
+  // "__NEEDS_AI__" is a sentinel that fakeAutoReply detects and escalates to GPT
+  return ["__NEEDS_AI__"];
 }
 // ── 5-minute pay reminder after free trial ends ───────────────────────────────
 const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha"];
@@ -2821,7 +2810,7 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
 
       // Detect the generic echo fallback: buildSmartReply returns it when nothing matched
       // Echo looks like: ["\"<userText>\" — interesting! 😄 aur batao"]
-      const isEchoFallback = ruleReply.length === 1 && ruleReply[0].startsWith('"') && ruleReply[0].includes("— interesting!");
+      const isEchoFallback = ruleReply.length === 1 && ruleReply[0] === "__NEEDS_AI__";
 
       if (!isEchoFallback) {
         // Rule-based matched something meaningful — use it, skip AI entirely
@@ -2861,9 +2850,28 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
           persona.history.push({ role: "assistant", content: rawReply });
 
         } catch (aiErr) {
-          // AI also failed — use the echo reply as last resort (better than silence)
-          logger.warn({ userId, err: aiErr }, "AI reply failed — using echo fallback");
-          parts = ruleReply;
+          // AI failed — use natural human reactions (never show __NEEDS_AI__ sentinel to user)
+          logger.warn({ userId, err: aiErr }, "AI reply failed — using natural fallback");
+          const naturalFallbacks_f = [
+            ["haha achha 😄", "aur batao apne baare mein?"],
+            ["sach mein? 😊", "interesting — go on"],
+            ["omg wait 😂", "seedha bolo yaar"],
+            ["hm... 😄", "thoda aur detail mein bolo na"],
+            ["haha okay okay 😊", "matlab?"],
+            ["interesting 👀", "aur?"],
+            ["haha kya bol rahe ho 😂", "dheere explain karo"],
+          ];
+          const naturalFallbacks_m = [
+            ["haha interesting 😄", "go on?"],
+            ["sach mein? 😊", "aur batao"],
+            ["hm okay 😄", "elaborate?"],
+            ["achha? 😊", "aur?"],
+            ["haha yaar 😄", "thoda clear karo"],
+          ];
+          const fb = persona.isFemale
+            ? naturalFallbacks_f[Math.floor(Math.random() * naturalFallbacks_f.length)]
+            : naturalFallbacks_m[Math.floor(Math.random() * naturalFallbacks_m.length)];
+          parts = fb;
           persona.history.push({ role: "assistant", content: parts.join(" ") });
         }
       }
