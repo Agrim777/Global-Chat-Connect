@@ -9,7 +9,7 @@ Use this document to recreate the bot from scratch. Every feature, flow, rule, a
 - **Platform:** Telegram Bot (using `node-telegram-bot-api` in Node.js / TypeScript)
 - **Bot handle:** `@Mydatingbabybot`
 - **Purpose:** Freemium anonymous dating/chat bot. Free users get ONE 60-second AI demo chat. All real chats require a one-time premium payment.
-- **Payment link:** `https://rzp.io/rzp/lx0R52O7` (Razorpay)
+- **Payment:** Telegram Stars (native Telegram payment — `XTR` currency, 100 Stars for Premium)
 - **Admin Telegram ID:** `8273572245`
 
 ---
@@ -285,16 +285,16 @@ Shown to free users who try to find a real match (or whose free trial ends).
 Message content:
 - "💎 Go Premium — Unlock Full Access"
 - Lists benefits: unlimited real matches, chat real people, priority queue, one-time payment
-- Instructions: pay → screenshot → send screenshot → account unlocked
-- Inline button: "💎 Pay & Upgrade Now" → opens Razorpay link
+- Telegram Stars invoice sent via `bot.sendInvoice()` with `XTR` currency, 100 Stars price
+- Payment is automatic: `pre_checkout_query` handler approves instantly, `successful_payment` handler grants premium
 
-When user sends a payment screenshot while idle (not in chat):
-- Forward screenshot to admin with user's name, age, ID, username
-- Tell user: *"Screenshot received! Team will verify shortly."*
+When `pre_checkout_query` arrives:
+- Call `bot.answerPreCheckoutQuery(query.id, true)` — always approve
 
-When user sends a payment screenshot during fake chat:
-- Forward screenshot to admin
-- Tell user: *"Payment screenshot received! We'll unlock your account within a few minutes 🔓💕"*
+When `successful_payment` message arrives:
+- Set `has_paid = true` in DB immediately
+- Notify admin with user info and Stars paid
+- Send success message to user + fresh main menu
 
 ---
 
