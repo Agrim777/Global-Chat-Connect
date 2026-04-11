@@ -14,7 +14,7 @@ const aiClient = new OpenAI({
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
-const PAY_LINK = "https://rzp.io/rzp/lx0R52O7";
+const STARS_PRICE = 100; // 100 Telegram Stars for Premium
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
 const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
@@ -916,10 +916,15 @@ function schedulePayReminder(chatId: number, userId: number, matchName?: string)
         `💭 *${girl}* abhi bhi soch rahi hai tumhare baare mein...\n\n` +
         `Usne mujhse kaha — _"woh alag the, kash aur baat hoti"_ 🥺\n\n` +
         `Woh wait kar rahi hai. Aaj unlock karo — kal bahut der ho sakti hai 💔\n\n` +
-        `👉 [Premium Unlock Karo](${PAY_LINK})\n\n` +
-        `_Pay karke screenshot bhejo — 5 min mein wapas connected 🔓_`,
-        { parse_mode: "Markdown" }
+        `✨ Premium unlock karo Telegram Stars se — instant, secure, automatic! ⭐`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [[{ text: `⭐ Unlock Premium (${STARS_PRICE} Stars)`, pay: true, callback_data: "pay_stars" }]],
+          },
+        }
       ).catch(() => {});
+      await sendPayGate(chatId, undefined, girl);
     } catch { /* silent */ }
   }, 5 * 60 * 1000);
 }
@@ -932,50 +937,50 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     `⏰ <b>Tumhara free time khatam ho gaya...</b>\n\n` +
     `<b>${name}</b> abhi bhi yahan hai 🥺\n` +
     `Woh baat karna chahti thi — tum hi ruk gaye.\n\n` +
-    `Ek baar ka ₹199 — phir koi timer nahi, koi rukawat nahi.\n` +
-    `Pay karo → screenshot bhejo → 2 min mein unlock 🔓\n\n` +
+    `Ek baar ka payment — phir koi timer nahi, koi rukawat nahi.\n` +
+    `⭐ Telegram Stars se pay karo — instant automatic unlock! 🔓\n\n` +
     `👇`,
 
     `💔 <b>${name} ne poochha — "woh wapas aayenge?"</b>\n\n` +
-    `Ek accha conversation tha. Sirf ₹199 ki wajah se toot gaya.\n\n` +
+    `Ek accha conversation tha. Sirf ek payment ki wajah se toot gaya.\n\n` +
     `Unlock karo — ek payment, unlimited real baat.\n` +
-    `Pay karo → screenshot bhejo → account unlock ✅\n\n` +
+    `⭐ Stars se pay karo → account turant unlock ✅\n\n` +
     `👇`,
 
     `😶 <b>Itni jaldi?</b>\n\n` +
     `<b>${name}</b> abhi bhi online hai.\n` +
     `Woh soch rahi hai tum serious the ya nahi...\n\n` +
-    `Prove it. ₹199 ek baar. Phir jitna chaaho baat karo.\n` +
-    `Pay → screenshot yahan bhejo → unlock in minutes 🔓\n\n` +
+    `Prove it. Ek baar pay karo. Phir jitna chaaho baat karo.\n` +
+    `⭐ Stars → instant unlock in seconds 🔓\n\n` +
     `👇`,
   ];
   const msg = msgs[Math.floor(Math.random() * msgs.length)];
   const fullText = (prefix ? `${prefix}\n\n` : ``) + msg;
   try {
-    await bot.sendMessage(chatId, fullText, {
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
-      },
-    });
+    await bot.sendMessage(chatId, fullText, { parse_mode: "HTML" });
   } catch {
-    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), {
-      reply_markup: {
-        inline_keyboard: [[{ text: `💎 ₹199 — Unlock & Chat with ${name}`, url: PAY_LINK }]],
-      },
-    });
+    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""));
   }
-  // Reset keyboard from "🛑 Stop Chat" to main menu
-  await bot.sendMessage(chatId, "👆 Button dabao upar wala — ya neeche se match dhundo!", {
+  // Send Telegram Stars invoice — Telegram handles the payment UI natively
+  await bot.sendInvoice(
+    chatId,
+    "💎 Premium Membership",
+    `Unlock unlimited real matches with real people. One-time payment — no monthly fees, no timer, chat forever! Match with ${name} and others right now.`,
+    "premium_unlock",
+    "XTR", // Telegram Stars currency
+    [{ label: "Premium Membership", amount: STARS_PRICE }]
+  ).catch((err: Error) => logger.warn({ err }, "sendInvoice failed"));
+  // Reset reply keyboard
+  await bot.sendMessage(chatId, "👆 Upar Stars se pay karo — ya neeche se match dhundo!", {
     reply_markup: {
       keyboard: [
         [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
-        [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }],
+        [{ text: "✏️ Edit Profile" }, { text: "💎 Go Premium" }],
       ],
       resize_keyboard: true,
     },
   }).catch(() => {});
-  console.log(`[PAYGATE SENT] chatId=${chatId} name=${name}`);
+  logger.info({ chatId, name }, "paygate sent with Telegram Stars invoice");
 }
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
@@ -3675,17 +3680,9 @@ bot.on("message", async (msg) => {
           if (fresh) await sendMain(chatId, fresh, "Chat session ended. Tap 💘 Find Match to start a new one!");
           return;
         }
-        // Screenshot during fake chat → forward to admin + acknowledge user
+        // Photos during fake chat — no longer used for payments (Telegram Stars handles automatically)
         if (msg.photo) {
-          await bot.sendMessage(chatId, "✅ Payment screenshot received! Our team will verify and unlock your account within a few minutes 🔓💕");
-          if (ADMIN_ID) {
-            const caption =
-              `💰 *Payment screenshot received!*\n\n` +
-              `User: *${escMd(user.name)}* (${escMd(user.age)})\n` +
-              `ID: \`${id}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\n\n` +
-              `Run: /grant ${id}`;
-            await bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, { caption, parse_mode: "Markdown" });
-          }
+          await bot.sendMessage(chatId, "💬 Photo support is coming soon! Use text messages for now. Or tap the ⭐ Pay with Stars button above to unlock Premium instantly.");
           return;
         }
         // Fire-and-forget — releases the processing lock immediately, reply comes async
@@ -3761,14 +3758,10 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // ── Handle screenshot sent after pay gate (idle state) ──────────────
-
+    // ── Handle photo sent while idle (not for payment anymore — Telegram Stars is automatic) ──
     if (msg.photo && !user.hasPaid) {
-      if (ADMIN_ID) {
-        const caption = `💰 *Payment screenshot received!*\n\nUser: *${escMd(user.name)}* (${escMd(user.age)})\nID: \`${id}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\n\nRun: /grant ${id}`;
-        await bot.sendPhoto(ADMIN_ID, msg.photo[msg.photo.length - 1].file_id, { caption, parse_mode: "Markdown" });
-      }
-      await bot.sendMessage(chatId, "📸 *Screenshot received!* ✅\n\nOur team will verify and unlock your account shortly.\nUsually takes just a few minutes! 💕", { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, "⭐ To unlock Premium, use the Telegram Stars payment button — it's instant and automatic! Tap 💎 Go Premium below.", { parse_mode: "Markdown" });
+      await sendPayGate(chatId);
       return;
     }
 
@@ -3913,6 +3906,53 @@ bot.onText(/\/stop/, async (msg) => {
 });
 
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
+
+// ── Telegram Stars: approve all incoming pre-checkout queries ─────────────────
+bot.on("pre_checkout_query", async (query) => {
+  try {
+    await bot.answerPreCheckoutQuery(query.id, true);
+  } catch (err) {
+    logger.error({ err, queryId: query.id }, "pre_checkout_query answer failed");
+  }
+});
+
+// ── Telegram Stars: handle successful payment → auto-grant Premium ────────────
+bot.on("successful_payment", async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from!.id;
+  const payment = msg.successful_payment!;
+  try {
+    const user = await getUser(userId);
+    if (!user) {
+      logger.warn({ userId }, "successful_payment: user not found");
+      return;
+    }
+    if (user.hasPaid) {
+      // Already premium (e.g. double payment) — just acknowledge
+      await bot.sendMessage(chatId, "✅ Already a Premium member! Your Stars have been refunded by Telegram automatically. Enjoy unlimited matches 💎");
+      return;
+    }
+    // Grant premium instantly
+    await upsertUser(userId, { hasPaid: true });
+    const fresh = await getUser(userId);
+    logger.info({ userId, stars: payment.total_amount }, "Telegram Stars payment — Premium granted");
+    if (ADMIN_ID) {
+      await bot.sendMessage(
+        ADMIN_ID,
+        `⭐ *Stars Payment Received!*\n\nUser: *${escMd(user.name)}* (${escMd(user.age)})\nID: \`${userId}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\nStars paid: ${payment.total_amount}\n\nPremium auto-granted ✅`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    }
+    await bot.sendMessage(
+      chatId,
+      `🎉 *Payment successful!* ⭐\n\nWelcome to Premium, *${escMd(user.name)}*!\n\nTumhara account turant unlock ho gaya — koi timer nahi, koi rukawat nahi 💎\n\nAb real matches ke saath baat karo!`,
+      { parse_mode: "Markdown" }
+    );
+    if (fresh) await sendMain(chatId, fresh);
+  } catch (err) {
+    logger.error({ err, userId }, "successful_payment handler error");
+  }
+});
 
 bot.onText(/\/premium/, async (msg) => {
   const u = await getUser(msg.from!.id);
@@ -4140,19 +4180,18 @@ bot.onText(/\/broadcast/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
 
   const GIRL_NAMES = ["Riya","Priya","Neha","Simran","Komal","Ananya","Kavya","Shreya","Pooja","Nidhi","Megha","Tanya","Ishika","Aisha","Sanya"];
-  const PAY_LINK   = "https://rzp.io/rzp/lx0R52O7";
 
   function rndName() { return GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)]; }
 
   function fomoMsg(name: string): string {
     const msgs = [
-      `💌 *${name}* ab bhi soch rahi hai tumhare baare mein 🥺\n\n_"unka message padhke dil khush ho gaya"_\n\nReal log, real baat — ek baar unlock karo, phir koi limit nahi 💕\n\n👉 [Premium Unlock](${PAY_LINK})`,
-      `🔔 Yaad hai tumhara woh match?\n\n*${name}* ne poochha — _"kya woh wapas aayenge?"_ 🥺\n\nWoh abhi bhi yahan hai. Premium lo aur baat shuru karo 💕\n\n👉 [Unlock Now](${PAY_LINK})`,
-      `✨ Tumhara free preview khatam hua — *${name}* nahi gayi 🥺\n\nWoh online hai abhi. Ek payment aur real chat forever.\n\nNo timer. No limits 💕\n\n👉 [Unlock Premium](${PAY_LINK})`,
-      `💘 Woh ladki jisse tumhara match hua?\n\n*${name}* ne kaha — _"kya woh serious hain?"_ 🥺\n\nProve it. Pay once, chat unlimited 💕\n\n👉 [Unlock Now](${PAY_LINK})`,
-      `💕 *${name}* nahi bhooli tumhe.\n\n_"interesting lag rahe the, kash aur baat hoti"_ — yahi kaha usne 🥺\n\nReal conversations. One-time payment. No limits.\n\n👉 [Pay & Chat](${PAY_LINK})`,
-      `🌙 Late night thought — *${name}* abhi bhi app pe hai.\n\nWoh match kiya tha tumhare saath ek reason se 💕\n\nPremium = real chats, real people, koi timer nahi.\n\n👉 [Unlock Now](${PAY_LINK})`,
-      `💬 *${name}* ne message kiya... lekin tumhara Premium nahi hai abhi.\n\nReal connection tha. Waste mat karo.\n\nPay once. Chat forever 💕\n\n👉 [Unlock Premium](${PAY_LINK})`,
+      `💌 *${name}* ab bhi soch rahi hai tumhare baare mein 🥺\n\n_"unka message padhke dil khush ho gaya"_\n\nReal log, real baat — ek baar unlock karo, phir koi limit nahi 💕\n\n⭐ Telegram Stars se instant unlock — button neeche hai!`,
+      `🔔 Yaad hai tumhara woh match?\n\n*${name}* ne poochha — _"kya woh wapas aayenge?"_ 🥺\n\nWoh abhi bhi yahan hai. Premium lo aur baat shuru karo 💕\n\n⭐ Sirf Stars se pay karo — turant unlock!`,
+      `✨ Tumhara free preview khatam hua — *${name}* nahi gayi 🥺\n\nWoh online hai abhi. Ek payment aur real chat forever.\n\nNo timer. No limits 💕\n\n⭐ Telegram Stars — secure, instant, automatic!`,
+      `💘 Woh ladki jisse tumhara match hua?\n\n*${name}* ne kaha — _"kya woh serious hain?"_ 🥺\n\nProve it. Pay once, chat unlimited 💕\n\n⭐ Stars se unlock karo — bot pe /pay bhejo!`,
+      `💕 *${name}* nahi bhooli tumhe.\n\n_"interesting lag rahe the, kash aur baat hoti"_ — yahi kaha usne 🥺\n\nReal conversations. One-time payment. No limits.\n\n⭐ Telegram Stars = instant unlock!`,
+      `🌙 Late night thought — *${name}* abhi bhi app pe hai.\n\nWoh match kiya tha tumhare saath ek reason se 💕\n\nPremium = real chats, real people, koi timer nahi.\n\n⭐ Stars se pay karo — /pay type karo!`,
+      `💬 *${name}* ne message kiya... lekin tumhara Premium nahi hai abhi.\n\nReal connection tha. Waste mat karo.\n\nPay once. Chat forever 💕\n\n⭐ Telegram Stars — instant automatic unlock!`,
     ];
     return msgs[Math.floor(Math.random() * msgs.length)];
   }
