@@ -1020,6 +1020,7 @@ async function sendPlanInvoice(chatId: number, planKey: PlanKey) {
     `${plan.emoji} Premium — ${plan.label}`,
     `Unlock unlimited real matches for ${plan.label}. Instant automatic activation — no waiting, no screenshots. ${plan.stars} Telegram Stars.`,
     `premium_${planKey}`,
+    "",      // providerToken: empty string required for Telegram Stars (XTR)
     "XTR",
     [{ label: `Premium ${plan.label}`, amount: plan.stars }]
   );
