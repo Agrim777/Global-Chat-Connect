@@ -1012,18 +1012,29 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
   logger.info({ chatId, name }, "paygate sent — 3 plan tiers");
 }
 
-/** Send a Telegram Stars invoice for the chosen plan */
+/** Send a Telegram Stars invoice for the chosen plan (direct API call for reliability) */
 async function sendPlanInvoice(chatId: number, planKey: PlanKey) {
   const plan = PLANS[planKey];
-  await bot.sendInvoice(
-    chatId,
-    `${plan.emoji} Premium — ${plan.label}`,
-    `Unlock unlimited real matches for ${plan.label}. Instant automatic activation — no waiting, no screenshots. ${plan.stars} Telegram Stars.`,
-    `premium_${planKey}`,
-    "",      // providerToken: empty string required for Telegram Stars (XTR)
-    "XTR",
-    [{ label: `Premium ${plan.label}`, amount: plan.stars }]
-  );
+  const url = `https://api.telegram.org/bot${TOKEN}/sendInvoice`;
+  const body = {
+    chat_id: chatId,
+    title: `${plan.emoji} Premium — ${plan.label}`,
+    description: `Unlock unlimited real matches for ${plan.label}. Instant automatic activation — no screenshots needed. ${plan.stars} Telegram Stars.`,
+    payload: `premium_${planKey}`,
+    provider_token: "",   // empty string = Telegram Stars (XTR)
+    currency: "XTR",
+    prices: [{ label: `Premium ${plan.label}`, amount: plan.stars }],  // array, not stringified
+  };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json() as { ok: boolean; description?: string; result?: unknown };
+  if (!json.ok) {
+    throw new Error(`Telegram sendInvoice failed: ${json.description ?? JSON.stringify(json)}`);
+  }
+  logger.info({ chatId, planKey, stars: plan.stars }, "Stars invoice sent");
 }
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
