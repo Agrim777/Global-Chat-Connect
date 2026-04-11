@@ -3369,12 +3369,15 @@ bot.on('callback_query', async (query) => {
   if (query.data === 'plan_week2' || query.data === 'plan_month' || query.data === 'plan_yearly') {
     const planKey = query.data.replace('plan_', '') as PlanKey;
     const plan = PLANS[planKey];
+    // Always answer the callback first (can only be called once per query)
+    await bot.answerCallbackQuery(query.id, { text: `${plan.emoji} Opening Stars payment...` }).catch(() => {});
     try {
-      await bot.answerCallbackQuery(query.id, { text: `${plan.emoji} ${plan.label} plan selected! Paying with Stars...` });
       await sendPlanInvoice(chatId, planKey);
-    } catch (err) {
-      logger.error({ err }, 'plan selection invoice error');
-      await bot.answerCallbackQuery(query.id, { text: 'Could not open payment. Try again.' });
+    } catch (err: any) {
+      logger.error({ err, planKey, chatId }, 'sendPlanInvoice failed');
+      await bot.sendMessage(chatId,
+        `❌ Payment could not be opened.\n\nError: ${err?.message ?? String(err)}\n\nPlease try again or contact @WorldMatchSupport`
+      ).catch(() => {});
     }
     return;
   }
