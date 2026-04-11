@@ -16,7 +16,7 @@ export const botStateEnum = pgEnum("bot_state", [
 ]);
 
 export const usersTable = pgTable("users", {
-  id: bigint("id", { mode: "number" }).primaryKey(), // Telegram user ID
+  id: bigint("id", { mode: "number" }).primaryKey(),
   telegramUsername: varchar("telegram_username", { length: 100 }),
   firstName: varchar("first_name", { length: 100 }),
   name: varchar("name", { length: 100 }),
@@ -31,7 +31,8 @@ export const usersTable = pgTable("users", {
   chatCount: integer("chat_count").default(0).notNull(),
   state: botStateEnum("state").default("idle").notNull(),
   chattingWith: bigint("chatting_with", { mode: "number" }),
-  // ── Referral system ───────────────────────────────────────────────────────
+  termsAccepted: boolean("terms_accepted").default(false).notNull(),
+  termsAcceptedAt: timestamp("terms_accepted_at"),
   referralCode: varchar("referral_code", { length: 20 }).unique(),
   referredBy: bigint("referred_by", { mode: "number" }),
   referralCount: integer("referral_count").default(0).notNull(),
