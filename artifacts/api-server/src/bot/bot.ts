@@ -4105,13 +4105,24 @@ bot.onText(/\/broadcast/, async (msg) => {
 
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+  let blocked = 0;
   for (const row of targets) {
     const name = rndName();
     try {
       await bot.sendMessage(row.id, fomoMsg(name), { parse_mode: "Markdown", disable_web_page_preview: true });
       sent++;
-    } catch {
+    } catch (err: unknown) {
       failed++;
+      const statusCode = (err as any)?.response?.statusCode ?? (err as any)?.code;
+      const isBlocked = statusCode === 403 ||
+        (typeof (err as any)?.message === 'string' && (err as any).message.includes('bot was blocked'));
+      if (isBlocked) {
+        blocked++;
+        await prodDb.update(usersTable)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(eq(usersTable.id, row.id))
+          .catch(() => {});
+      }
     }
     if ((sent + failed) % 100 === 0) {
       await bot.sendMessage(chatId, `⏳ Progress: ${sent + failed}/${targets.length} — ✅ ${sent} sent, ❌ ${failed} failed`).catch(() => {});
@@ -4120,7 +4131,7 @@ bot.onText(/\/broadcast/, async (msg) => {
   }
 
   await prodPool.end().catch(() => {});
-  await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`);
+  await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Auto-cleaned blocked: ${blocked}`);
 });
 
 // ── Admin: /broadcasttext <message> — send custom text to ALL users ─────────────
@@ -4146,10 +4157,14 @@ bot.onText(/\/broadcasttext (.+)/, async (msg, match) => {
   const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
   const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
 
-  // ALL users — paid, unpaid, inactive — everyone who ever started the bot (excluding admin)
+  // Only active users — skip users who already blocked the bot
   const targets = await prodDb.select({ id: usersTable.id })
     .from(usersTable)
-    .where(ADMIN_ID ? ne(usersTable.id, ADMIN_ID) : undefined);
+    .where(
+      ADMIN_ID
+        ? and(eq(usersTable.isActive, true), ne(usersTable.id, ADMIN_ID))
+        : eq(usersTable.isActive, true)
+    );
 
   if (targets.length === 0) {
     await bot.sendMessage(chatId, "⚠️ No users found in the database.");
@@ -4162,12 +4177,23 @@ bot.onText(/\/broadcasttext (.+)/, async (msg, match) => {
   let sent = 0, failed = 0;
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+  let blocked = 0;
   for (const row of targets) {
     try {
       await bot.sendMessage(row.id, message);
       sent++;
-    } catch {
-      failed++; // user blocked bot or other error — skip and continue
+    } catch (err: unknown) {
+      failed++;
+      const statusCode = (err as any)?.response?.statusCode ?? (err as any)?.code;
+      const isBlocked = statusCode === 403 ||
+        (typeof (err as any)?.message === 'string' && (err as any).message.includes('bot was blocked'));
+      if (isBlocked) {
+        blocked++;
+        await prodDb.update(usersTable)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(eq(usersTable.id, row.id))
+          .catch(() => {});
+      }
     }
 
     // Progress update every 100 users
@@ -4183,10 +4209,10 @@ bot.onText(/\/broadcasttext (.+)/, async (msg, match) => {
 
   await prodPool.end().catch(() => {});
 
-  logger.info({ sent, failed, total: targets.length }, "broadcasttext complete");
+  logger.info({ sent, failed, blocked, total: targets.length }, "broadcasttext complete");
   await bot.sendMessage(
     chatId,
-    `✅ Broadcast complete!\n\n📊 Total users: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`
+    `✅ Broadcast complete!\n\n📊 Total targeted: ${targets.length}\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Auto-cleaned blocked: ${blocked}`
   );
 });
 
