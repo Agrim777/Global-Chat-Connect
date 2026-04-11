@@ -4055,6 +4055,84 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
   }
 });
 
+// ── Admin: /cleanblocked — silently probe all users, remove blocked ones ────────
+// Uses sendChatAction('typing') — completely invisible to users, no message sent
+// Returns 403 if user has blocked the bot → mark isActive=false in DB
+
+bot.onText(/\/cleanblocked/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "⛔ Not authorised.");
+    return;
+  }
+
+  await bot.sendMessage(chatId, "🔍 Starting silent block-detection scan...\n\n⚠️ This probes all active users with an invisible typing signal. No messages will be sent to users.\n\nThis may take several minutes for large user bases.");
+
+  const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
+  const { Pool: PgPool } = await import("pg").then((m: any) => m.default ?? m) as { Pool: typeof import("pg").Pool };
+  const prodPool = new PgPool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 3 });
+  const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
+  const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
+
+  // Get all currently-active users (excluding admin)
+  const targets = await prodDb.select({ id: usersTable.id })
+    .from(usersTable)
+    .where(
+      ADMIN_ID
+        ? and(eq(usersTable.isActive, true), ne(usersTable.id, ADMIN_ID))
+        : eq(usersTable.isActive, true)
+    );
+
+  await bot.sendMessage(chatId, `📋 Found ${targets.length} active users to probe. Starting scan...`);
+
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+  let probed = 0, cleaned = 0, errors = 0;
+
+  for (const row of targets) {
+    try {
+      // sendChatAction is invisible — no notification, no message shown to user
+      // Returns 403 immediately if user has blocked the bot
+      await bot.sendChatAction(row.id, "typing");
+    } catch (err: unknown) {
+      const statusCode = (err as any)?.response?.statusCode;
+      const errMsg = typeof (err as any)?.message === 'string' ? (err as any).message : '';
+      const isBlocked = statusCode === 403 || errMsg.includes('bot was blocked') || errMsg.includes('user is deactivated') || errMsg.includes('chat not found');
+      if (isBlocked) {
+        cleaned++;
+        await prodDb.update(usersTable)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(eq(usersTable.id, row.id))
+          .catch(() => {});
+      } else {
+        errors++;
+      }
+    }
+    probed++;
+
+    // Progress update every 200 users
+    if (probed % 200 === 0) {
+      await bot.sendMessage(
+        chatId,
+        `⏳ Probed: ${probed}/${targets.length} — 🚫 Blocked found: ${cleaned}`
+      ).catch(() => {});
+    }
+
+    await sleep(55); // ~18/sec — stay under Telegram rate limits
+  }
+
+  await prodPool.end().catch(() => {});
+
+  await bot.sendMessage(
+    chatId,
+    `✅ *Block scan complete!*\n\n` +
+    `👥 Total probed: ${probed}\n` +
+    `🚫 Blocked & removed: ${cleaned}\n` +
+    `⚠️ Other errors: ${errors}\n\n` +
+    `Your active user count is now accurate. Next broadcast will skip all ${cleaned} removed users.`,
+    { parse_mode: "Markdown" }
+  );
+});
+
 // ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
 
 bot.onText(/\/broadcast/, async (msg) => {
