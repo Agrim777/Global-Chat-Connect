@@ -3231,6 +3231,31 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
       user = await getUser(id) ?? user;
     }
 
+    // ── Terms gate — must accept before using any feature ──────────────────
+    if (!user?.termsAccepted) {
+      await bot.sendMessage(chatId,
+        "🌍 *WorldMatch — Before You Begin*\n\n" +
+        "Please read and accept our terms to continue:\n\n" +
+        "1️⃣ You are *18 years or older*\n" +
+        "2️⃣ This platform connects you with other users for social interaction. " +
+        "Response availability may vary based on system load and partner activity.\n" +
+        "3️⃣ We do *not* guarantee a specific gender match.\n" +
+        "4️⃣ Payments are *final* once service is activated — no refunds.\n" +
+        "5️⃣ You agree to use respectful language. Violations may result in a permanent ban.\n" +
+        "6️⃣ Do not share personal details (phone number, home address, etc.) in chat.\n\n" +
+        "_By tapping below, you confirm you have read and agree to all of the above._",
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "✅  I Agree — I Am 18+", callback_data: "agree_terms" }
+            ]]
+          }
+        }
+      );
+      return;
+    }
+
     // Welcome message only for truly first-time users
     if (isNew) {
       await bot.sendMessage(chatId,
@@ -3258,6 +3283,29 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 });
 
 // ── /help ────────────────────────────────────────────────────────────────────
+
+// ── Terms acceptance callback ────────────────────────────────────────────────
+bot.on('callback_query', async (query) => {
+  if (query.data !== 'agree_terms') return;
+  const userId = query.from.id;
+  const chatId = query.message?.chat.id;
+  if (!chatId) return;
+  try {
+    await db.update(usersTable)
+      .set({ termsAccepted: true, termsAcceptedAt: new Date(), updatedAt: new Date() })
+      .where(eq(usersTable.id, userId));
+    await bot.answerCallbackQuery(query.id, { text: '✅ Welcome to WorldMatch!' });
+    await bot.editMessageText(
+      '✅ *Terms accepted!* Welcome to WorldMatch 🌍\n\nSetting up your experience...',
+      { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
+    ).catch(() => {});
+    const user = await getUser(userId);
+    if (user) await sendMain(chatId, user);
+  } catch (err) {
+    logger.error({ err }, 'agree_terms callback error');
+    await bot.answerCallbackQuery(query.id, { text: 'Something went wrong. Send /start to try again.' });
+  }
+});
 
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
@@ -3847,9 +3895,15 @@ bot.onText(/\/edit/, async (msg) => {
 });
 bot.onText(/\/match/, async (msg) => {
   const id = msg.from!.id;
+  const chatId = msg.chat.id;
+  const u = await getUser(id);
+  if (!u?.termsAccepted) {
+    await bot.sendMessage(chatId, "⚠️ Please accept our terms first. Send /start to continue.");
+    return;
+  }
   if (processingSet.has(id)) return;
   processingSet.add(id);
-  try { await findMatch(msg.chat.id, id); } finally { processingSet.delete(id); }
+  try { await findMatch(chatId, id); } finally { processingSet.delete(id); }
 });
 bot.onText(/\/stop/, async (msg) => {
   const id = msg.from!.id;
