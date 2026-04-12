@@ -114,7 +114,14 @@ const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat
 const processingSet = new Set<number>();                  // userId → currently processing message (prevents concurrent DB hammering)
 const matchingSet   = new Set<number>();                  // userId → currently inside findMatch (prevents race condition in pairing)
 const fakeReplySet  = new Set<number>();                  // userId → fakeAutoReply in flight (prevents double AI replies on rapid messages)
-const proactiveTimerMap = new Map<number, NodeJS.Timeout>(); // userId → proactive follow-up timer (AI sends message if user goes silent)
+const proactiveTimerMap = new Map<number, NodeJS.Timeout>(); // userId → proactive follow-up timer
+
+// ── Safety / moderation maps ─────────────────────────────────────────────────
+const userMsgTimestamps = new Map<number, number[]>();    // userId → recent msg timestamps (flood control)
+const userFloodWarned   = new Set<number>();              // userId → already warned about flooding this window
+const nsfwWarnings      = new Map<number, number>();      // userId → count of NSFW violations
+const matchBlockList    = new Map<number, Set<number>>(); // userId → set of blocked match userIds (session-level)
+const restrictedUntil   = new Map<number, number>();      // userId → epoch ms when restriction lifts
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -133,6 +140,61 @@ function delay(ms: number) {
 }
 function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/** Returns true if this user is currently flood-restricted. */
+function isFloodRestricted(userId: number): boolean {
+  const until = restrictedUntil.get(userId);
+  if (until && Date.now() < until) return true;
+  restrictedUntil.delete(userId);
+  return false;
+}
+
+/**
+ * Records a message timestamp for flood tracking.
+ * Returns true (and applies restriction) if the user is flooding.
+ */
+function checkFlood(userId: number): boolean {
+  const now = Date.now();
+  const WINDOW_MS = 10_000;   // 10-second sliding window
+  const MAX_MSGS  = 10;        // max messages in window
+  const BAN_MS    = 30_000;    // restrict for 30 seconds
+
+  let timestamps = userMsgTimestamps.get(userId) ?? [];
+  timestamps = timestamps.filter(t => now - t < WINDOW_MS);
+  timestamps.push(now);
+  userMsgTimestamps.set(userId, timestamps);
+
+  if (timestamps.length > MAX_MSGS) {
+    restrictedUntil.set(userId, now + BAN_MS);
+    userFloodWarned.delete(userId); // reset so next window can warn again
+    return true;
+  }
+  return false;
+}
+
+const NSFW_PATTERN = /sexy|figure|boobs|sex chat|naughty|nude|naked|chut|lund|gandi|randwa|porn|xxxx|bf video|dick|pussy|ass pic|send pic|hot pic|nanga/i;
+
+/** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. */
+async function handleNsfwViolation(chatId: number, userId: number): Promise<boolean> {
+  const count = (nsfwWarnings.get(userId) ?? 0) + 1;
+  nsfwWarnings.set(userId, count);
+  if (count === 1) {
+    await bot.sendMessage(chatId,
+      "⚠️ *Warning* — Please keep the conversation respectful.\n" +
+      "Sending inappropriate content again will restrict your account.",
+      { parse_mode: "Markdown" }
+    ).catch(() => {});
+    return false; // first offence — just warn, don't drop
+  }
+  // Second offence — restrict for 1 hour
+  restrictedUntil.set(userId, Date.now() + 3_600_000);
+  await bot.sendMessage(chatId,
+    "🚫 Tumhara account 1 ghante ke liye restrict kar diya gaya hai inappropriate content ki wajah se.\n\n" +
+    "Iske baad bhi agar aisa hua toh permanent ban ho sakta hai.",
+    { parse_mode: "Markdown" }
+  ).catch(() => {});
+  return true; // drop the message
 }
 
 async function getUser(id: number) {
@@ -1084,6 +1146,13 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     { reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
+  // ── One-time Demo Match disclosure (required for platform compliance) ────────
+  await bot.sendMessage(chatId,
+    "ℹ️ *Demo Match* — Yeh tumhara free sample experience hai.\n" +
+    "Real users se real baatein karne ke liye 💎 *Premium* lo!",
+    { parse_mode: "Markdown" }
+  ).catch(() => {});
+
   // Opener: show typing indicator, then wait briefly — keeps 45s trial moving
   bot.sendChatAction(chatId, "typing").catch(() => {});
   await delay(1000 + Math.random() * 1000); // 1-2 seconds
@@ -1360,8 +1429,8 @@ THEY SHARE SOMETHING ABOUT THEMSELVES:
   - Do not contradict previous replies
 
   GOAL:
-  Make the user feel like they are chatting with a real girl, not a bot.
-  Keep it engaging, natural, and addictive.`;
+  Keep the conversation engaging, warm, and natural.
+  Always respond helpfully and in character.`;
 }
 
 // ── Quick-reply matcher — handles super-common small-talk without AI ─────────
@@ -1517,19 +1586,16 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
     ]);
   }
 
-  // ── Are you AI / bot / real ───────────────────────────────────────────────
+  // ── Are you real / automated / fake ──────────────────────────────────────
   if (/are you (a )?bot|are you ai|are you (a )?robot|are you real|are you human|are you (a )?fake|bot hai|ai hai|robot hai|real ho|real hai|insaan ho|insaan hai|asli ho|asli hai|fake ho|fake hai|kya tum real|kya tum asli|tum bot|tum ai|machine ho|computer ho|chatbot|artificial|programmed|automated/.test(t)) {
     return rnd(f ? [
-      ["haha kya matlab bot 😂", "bilkul real hun main, offend ho gayi thodi 😄"],
-      ["omg bot?! 😂", "yeh toh insult hai yaar — main sach mein real hun"],
-      ["haha nahi yaar 🙈", "ek real ladki hun, bot hoti toh itna overthink nahi karti 😂"],
-      ["real hun baba 😄", "bot hoti toh tumse itni casually baat nahi karti na"],
-      ["main? bot? 😂😂", "dekho agar bot hoti toh raat ko bore nahi hoti 😄"],
-      ["haha nahi re 😊", "real hun — bas phone pe zyada time spend karti hun 😂"],
+      ["yeh ek demo preview hai 😊", "real matches ke liye Premium lo — asal log wait kar rahe hain! 💎"],
+      ["yeh sample chat hai 🙈", "Premium lo aur real duniya se connect karo 💕"],
+      ["demo experience chal raha hai 😄", "real match chahiye? Premium se unlock karo 💎"],
     ] : [
-      ["haha yaar main real hun 😄", "bot hota toh itna bakwas nahi karta"],
-      ["real hun bhai 😂", "chill karo"],
-      ["bot nahi hun 😄", "ek real banda hun bas"],
+      ["yeh ek demo preview hai 😊", "real matches ke liye Premium lo — asal log wait kar rahe hain! 💎"],
+      ["sample chat hai yaar 😄", "real connections ke liye Premium chahiye 💎"],
+      ["demo chal raha hai abhi 😊", "real match chahiye toh Premium lo 💕"],
     ]);
   }
 
@@ -2780,12 +2846,12 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
   // ── Kya tum real ho / sach mein koi hai ──────────────────────────────────
   if (/real person|real ho tum|actually real|genuinely real|sach mein insaan|koi real|real insaan|human ho|actual person|real hai kya/.test(t)) {
     return rnd(f ? [
-      ["haha bilkul real hun 😄", "chat bot hoti toh itni random baatein nahi karti 😂"],
-      ["real hun yaar 😊", "doubt kyun — baat kar ke pata chalega"],
-      ["omg real hun 😄", "agar bot hoti toh tumhara har sawaal nahi sunta — seedha script chalti 😂"],
+      ["yeh demo preview chal raha hai 😊", "real match ke liye Premium lo — sach mein log wait kar rahe hain 💎"],
+      ["sample experience hai yeh 🙈", "real connections ke liye Premium chahiye 💕"],
+      ["demo match hai abhi 😄", "real log milenge Premium se 💎"],
     ] : [
-      ["haha real hun 😄", "bot hota toh itna sochta nahi 😂"],
-      ["bilkul real hun 😊", "baat kar ke dekho — feel hoga"],
+      ["yeh ek demo preview hai 😊", "real match chahiye toh Premium lo 💎"],
+      ["sample chat chal raha hai 😄", "real connections ke liye Premium lo 💕"],
     ]);
   }
 
@@ -3103,6 +3169,8 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     )
   );
 
+  const myBlockList = matchBlockList.get(userId) ?? new Set<number>();
+
   return candidates.filter((c) => {
     if (c.id === userId) return false;
     if (!c.isActive) return false;
@@ -3110,6 +3178,8 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     if (!isPremiumActive(c)) return false;
     // Exclude users already inside findMatch (race condition guard)
     if (matchingSet.has(c.id)) return false;
+    // Exclude users this person has blocked or reported
+    if (myBlockList.has(c.id)) return false;
     return true;
   });
 }
@@ -3303,9 +3373,8 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         "🌍 *WorldMatch — Before You Begin*\n\n" +
         "Please read and accept our terms to continue:\n\n" +
         "1️⃣ You are *18 years or older*\n" +
-        "2️⃣ This platform connects you with other users for social interaction. " +
-        "Response availability may vary based on system load and partner activity.\n" +
-        "3️⃣ We do *not* guarantee a specific gender match.\n" +
+        "2️⃣ Your first free match is a *Demo Match* — an automated preview of the platform. Real matches require Premium.\n" +
+        "3️⃣ We do *not* guarantee a specific gender, age, or personality of your match.\n" +
         "4️⃣ Payments are *final* once service is activated — no refunds.\n" +
         "5️⃣ You agree to use respectful language. Violations may result in a permanent ban.\n" +
         "6️⃣ Do not share personal details (phone number, home address, etc.) in chat.\n\n" +
@@ -3400,15 +3469,17 @@ bot.on('callback_query', async (query) => {
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
     "ℹ️ *WorldMatch Commands*\n\n" +
-    "/start — Start the bot\n" +
+    "/start — Start / restart\n" +
     "/profile — View your profile\n" +
     "/edit — Edit your profile\n" +
     "/match — Find a match\n" +
     "/stop — End current chat\n" +
+    "/report — Report current match to admin\n" +
+    "/block — Block current match\n" +
     "/premium — Upgrade to Premium 💎\n" +
     "/pay — Payment info\n" +
-    "/help — Show this help\n" +
-      "/disclaimer — Terms of Use & Legal Notice",
+    "/disclaimer — Terms of Use & Legal Notice\n" +
+    "/help — Show this help",
     { parse_mode: "Markdown" }
   );
 });
@@ -3428,12 +3499,14 @@ bot.onText(/\/help/, async (msg) => {
       "• We do NOT guarantee connection with female users.\n" +
       "• Matches depend on availability, activity, and system logic.\n\n" +
 
-      "*3. AI Interaction*\n" +
-      "• Initial or fallback chats may be powered by automated or AI-based systems.\n" +
-      "• These are used to maintain engagement when real users are unavailable.\n\n" +
+      "*3. Demo Match*\n" +
+      "• New users receive one free Demo Match as a sample of the platform experience.\n" +
+      "• Demo Matches are automated previews — not connections to real users.\n" +
+      "• This is clearly disclosed at the start of every Demo Match session.\n\n" +
 
       "*4. No Guarantee of Match*\n" +
-      "• We do not guarantee that you will always be connected to a real human.\n" +
+      "• Premium connects you with real registered users, subject to their availability.\n" +
+      "• We do not guarantee gender, location, or personality of your match.\n" +
       "• Delays or unavailability of matches may occur.\n\n" +
 
       "*5. Payments*\n" +
@@ -3552,6 +3625,18 @@ bot.on("message", async (msg) => {
   const text = (msg.text ?? "").trim();
 
   if (text.startsWith("/")) return;
+
+  // ── Flood protection ──────────────────────────────────────────────────────
+  if (isFloodRestricted(id)) return; // silently drop while restricted
+  if (checkFlood(id)) {
+    if (!userFloodWarned.has(id)) {
+      userFloodWarned.add(id);
+      await bot.sendMessage(chatId,
+        "⏳ Ek second — bahut fast messages aa rahe hain. 30 seconds baad phir try karo."
+      ).catch(() => {});
+    }
+    return;
+  }
 
   // Per-user lock — prevents concurrent DB hammering when user taps buttons rapidly
   if (processingSet.has(id)) return;
@@ -3820,6 +3905,20 @@ bot.on("message", async (msg) => {
                 reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
               });
             } else if (text) {
+              // ── NSFW gate before relay ──────────────────────────────────────
+              if (NSFW_PATTERN.test(text)) {
+                const dropped = await handleNsfwViolation(chatId, id);
+                if (dropped) {
+                  // Restrict — end this chat too
+                  await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, id));
+                  await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, recipientId));
+                  const freshR = await getUser(recipientId).catch(() => null);
+                  if (freshR) await sendMain(recipientId, freshR, "Chat ended.").catch(() => {});
+                  const freshU = await getUser(id);
+                  if (freshU) await sendMain(chatId, freshU, "Chat ended due to policy violation.").catch(() => {});
+                }
+                return;
+              }
               const safeName = escHtml(user.name ?? "Match");
               const safeText = escHtml(text);
               await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${safeText}`, { parse_mode: "HTML" });
@@ -4016,6 +4115,57 @@ bot.onText(/\/stop/, async (msg) => {
   if (processingSet.has(id)) return;
   processingSet.add(id);
   try { await stopChat(msg.chat.id, id); } finally { processingSet.delete(id); }
+});
+
+// ── /report — report current match to admin ───────────────────────────────────
+bot.onText(/\/report/, async (msg) => {
+  const chatId = msg.chat.id;
+  const id = msg.from!.id;
+  try {
+    const user = await getUser(id);
+    if (!user || user.state !== "chatting" || !user.chattingWith || user.chattingWith === FAKE_CHAT_ID) {
+      await bot.sendMessage(chatId, "ℹ️ /report is only available while you are in a real chat.\nIf you experienced harassment, contact our support.");
+      return;
+    }
+    const reportedId = user.chattingWith;
+    // End chat for both
+    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, id));
+    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, reportedId));
+    // Notify admin
+    await bot.sendMessage(ADMIN_ID,
+      `🚨 *Report Received*\n\nReporter: \`${id}\` (${user.name ?? "—"})\nReported: \`${reportedId}\`\n\nAction: Chat ended automatically.`,
+      { parse_mode: "Markdown" }
+    ).catch(() => {});
+    // Block the pair session-level
+    if (!matchBlockList.has(id)) matchBlockList.set(id, new Set());
+    matchBlockList.get(id)!.add(reportedId);
+    const fresh = await getUser(id);
+    if (fresh) await sendMain(chatId, fresh, "✅ Report submitted. Chat has been ended. Thank you for keeping WorldMatch safe.");
+  } catch (err) {
+    logger.error({ err, userId: id }, "/report error");
+  }
+});
+
+// ── /block — block current match (session-level) ──────────────────────────────
+bot.onText(/\/block/, async (msg) => {
+  const chatId = msg.chat.id;
+  const id = msg.from!.id;
+  try {
+    const user = await getUser(id);
+    if (!user || user.state !== "chatting" || !user.chattingWith || user.chattingWith === FAKE_CHAT_ID) {
+      await bot.sendMessage(chatId, "ℹ️ /block is only available while you are in a real chat.");
+      return;
+    }
+    const blockedId = user.chattingWith;
+    // Block pair session-level
+    if (!matchBlockList.has(id)) matchBlockList.set(id, new Set());
+    matchBlockList.get(id)!.add(blockedId);
+    // End chat for both
+    await stopChat(chatId, id);
+    await bot.sendMessage(chatId, "🚫 User blocked. You won't be matched with them again this session.").catch(() => {});
+  } catch (err) {
+    logger.error({ err, userId: id }, "/block error");
+  }
 });
 
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
