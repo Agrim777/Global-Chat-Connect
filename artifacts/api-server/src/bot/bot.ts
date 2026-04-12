@@ -992,28 +992,7 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
   ];
   return rnd(f ? naturalF : naturalM);
 }
-// ── 5-minute pay reminder after free trial ends ───────────────────────────────
 const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha"];
-
-function schedulePayReminder(chatId: number, userId: number, matchName?: string) {
-  const girl = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
-  setTimeout(async () => {
-    try {
-      const u = await getUser(userId);
-      if (!u || u.hasPaid) return;
-      await bot.sendMessage(
-        chatId,
-        `💭 *${girl}* abhi bhi soch rahi hai tumhare baare mein...\n\n` +
-        `Usne mujhse kaha — _"woh alag the, kash aur baat hoti"_ 🥺\n\n` +
-        `Woh wait kar rahi hai. Aaj unlock karo — kal bahut der ho sakti hai 💔\n\n` +
-        `✨ Premium unlock karo Telegram Stars se — instant, secure, automatic! ⭐\n\n` +
-        `⚡ 2 Weeks: ${PLANS.week2.stars} Stars | 💎 1 Month: ${PLANS.month.stars} Stars | 👑 1 Year: ${PLANS.yearly.stars} Stars`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-      await sendPayGate(chatId, undefined, girl);
-    } catch { /* silent */ }
-  }, 5 * 60 * 1000);
-}
 
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
@@ -1039,39 +1018,31 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     `👑 <b>1 Year</b> — ${PLANS.yearly.stars} Stars <i>(best value)</i>\n\n` +
     `<i>⭐ Telegram Stars se pay karo — instant automatic unlock!</i>`;
 
+  // Single message — inline plan buttons + main reply keyboard reset (no spam)
+  const replyMarkup = {
+    inline_keyboard: [
+      [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
+      [{ text: `💎 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
+      [{ text: `👑 1 Year — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
+    ],
+  };
   try {
-    await bot.sendMessage(chatId, fullText, {
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-          [{ text: `💎 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-          [{ text: `👑 1 Year — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-        ],
-      },
-    });
+    await bot.sendMessage(chatId, fullText, { parse_mode: "HTML", reply_markup: replyMarkup });
   } catch {
-    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-          [{ text: `💎 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-          [{ text: `👑 1 Year — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-        ],
-      },
-    });
+    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), { reply_markup: replyMarkup });
   }
-  // Reset reply keyboard
-  await bot.sendMessage(chatId, "👆 Upar apna plan chuno — ya neeche se match dhundo!", {
+  // Reset the reply keyboard to main menu in a silent way (remove "🛑 Stop Chat" button)
+  await bot.sendMessage(chatId, "👇 Ya tap karo:", {
     reply_markup: {
       keyboard: [
         [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
         [{ text: "✏️ Edit Profile" }, { text: "💎 Go Premium" }],
       ],
       resize_keyboard: true,
+      one_time_keyboard: true,
     },
   }).catch(() => {});
-  logger.info({ chatId, name }, "paygate sent — 3 plan tiers");
+  logger.info({ chatId, name }, "paygate sent — 3 plan tiers (single message)");
 }
 
 /** Send a Telegram Stars invoice for the chosen plan (direct API call for reliability) */
@@ -1187,7 +1158,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
         await new Promise(r => setTimeout(r, 1500));
         await sendPayGate(chatId, "⏰ Free preview khatam...", persona?.name);
-        schedulePayReminder(chatId, userId, persona?.name);
+        // No follow-up reminders — one pay gate is enough (avoids spam reports)
       }
     } catch (err) {
       logger.error({ err }, "Free-trial timer error (fake chat)");
