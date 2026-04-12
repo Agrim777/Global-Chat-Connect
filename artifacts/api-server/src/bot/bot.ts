@@ -17,7 +17,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 // ── Premium pricing tiers (Telegram Stars) ────────────────────────────────────
 const PLANS = {
   week2:  { stars: 150,  label: "2 Weeks",    days: 14,   emoji: "⚡" },
-  month:  { stars: 200,  label: "1 Month",    days: 30,   emoji: "💎" },
+  month:  { stars: 250,  label: "1 Month",    days: 30,   emoji: "💎" },
   yearly: { stars: 2500, label: "1 Year",     days: 365,  emoji: "👑" },
 } as const;
 
