@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq, and, gt, ne } from "drizzle-orm";
+import { eq, and, ne } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -4313,169 +4313,21 @@ bot.onText(/\/cleanblocked/, async (msg) => {
     `👥 Total probed: ${probed}\n` +
     `🚫 Blocked & removed: ${cleaned}\n` +
     `⚠️ Other errors: ${errors}\n\n` +
-    `Your active user count is now accurate. Next broadcast will skip all ${cleaned} removed users.`,
+    `Your active user count is now accurate. ${cleaned} blocked users were removed from active status.`,
     { parse_mode: "Markdown" }
   );
 });
 
-// ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
+// ── Admin broadcasts are disabled to prevent spam reports and accidental bulk sends ──
 
-bot.onText(/\/broadcast/, async (msg) => {
-  const chatId = msg.chat.id;
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
-
-  const GIRL_NAMES = ["Riya","Priya","Neha","Simran","Komal","Ananya","Kavya","Shreya","Pooja","Nidhi","Megha","Tanya","Ishika","Aisha","Sanya"];
-
-  function rndName() { return GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)]; }
-
-  function fomoMsg(name: string): string {
-    const msgs = [
-      `💌 *${name}* ab bhi soch rahi hai tumhare baare mein 🥺\n\n_"unka message padhke dil khush ho gaya"_\n\nReal log, real baat — ek baar unlock karo, phir koi limit nahi 💕\n\n⭐ Telegram Stars se instant unlock — button neeche hai!`,
-      `🔔 Yaad hai tumhara woh match?\n\n*${name}* ne poochha — _"kya woh wapas aayenge?"_ 🥺\n\nWoh abhi bhi yahan hai. Premium lo aur baat shuru karo 💕\n\n⭐ Sirf Stars se pay karo — turant unlock!`,
-      `✨ Tumhara free preview khatam hua — *${name}* nahi gayi 🥺\n\nWoh online hai abhi. Ek payment aur real chat forever.\n\nNo timer. No limits 💕\n\n⭐ Telegram Stars — secure, instant, automatic!`,
-      `💘 Woh ladki jisse tumhara match hua?\n\n*${name}* ne kaha — _"kya woh serious hain?"_ 🥺\n\nProve it. Pay once, chat unlimited 💕\n\n⭐ Stars se unlock karo — bot pe /pay bhejo!`,
-      `💕 *${name}* nahi bhooli tumhe.\n\n_"interesting lag rahe the, kash aur baat hoti"_ — yahi kaha usne 🥺\n\nReal conversations. One-time payment. No limits.\n\n⭐ Telegram Stars = instant unlock!`,
-      `🌙 Late night thought — *${name}* abhi bhi app pe hai.\n\nWoh match kiya tha tumhare saath ek reason se 💕\n\nPremium = real chats, real people, koi timer nahi.\n\n⭐ Stars se pay karo — /pay type karo!`,
-      `💬 *${name}* ne message kiya... lekin tumhara Premium nahi hai abhi.\n\nReal connection tha. Waste mat karo.\n\nPay once. Chat forever 💕\n\n⭐ Telegram Stars — instant automatic unlock!`,
-    ];
-    return msgs[Math.floor(Math.random() * msgs.length)];
-  }
-
-  await bot.sendMessage(chatId, "📡 Fetching unpaid users from production...");
-
-  // Use Railway production DB directly so broadcast reaches real users
-  const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
-  const { Pool: PgPool } = await import("pg").then(m => m.default ?? m) as { Pool: typeof import("pg").Pool };
-  const prodPool = new PgPool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 3 });
-  const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
-  const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
-
-  const targets = await prodDb.select({ id: usersTable.id })
-    .from(usersTable)
-    .where(
-      and(
-        gt(usersTable.chatCount, 0),
-        eq(usersTable.hasPaid, false),
-        eq(usersTable.isProfileComplete, true),
-        ...(ADMIN_ID ? [ne(usersTable.id, ADMIN_ID)] : [])
-      )
-    );
-
-  await bot.sendMessage(chatId, `📤 Sending to ${targets.length} users... I'll update every 100 messages.`);
-
-  let sent = 0, failed = 0;
-
-  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-
-  let blocked = 0;
-  for (const row of targets) {
-    const name = rndName();
-    try {
-      await bot.sendMessage(row.id, fomoMsg(name), { parse_mode: "Markdown", disable_web_page_preview: true });
-      sent++;
-    } catch (err: unknown) {
-      failed++;
-      const statusCode = (err as any)?.response?.statusCode ?? (err as any)?.code;
-      const isBlocked = statusCode === 403 ||
-        (typeof (err as any)?.message === 'string' && (err as any).message.includes('bot was blocked'));
-      if (isBlocked) {
-        blocked++;
-        await prodDb.update(usersTable)
-          .set({ isActive: false, updatedAt: new Date() })
-          .where(eq(usersTable.id, row.id))
-          .catch(() => {});
-      }
-    }
-    if ((sent + failed) % 100 === 0) {
-      await bot.sendMessage(chatId, `⏳ Progress: ${sent + failed}/${targets.length} — ✅ ${sent} sent, ❌ ${failed} failed`).catch(() => {});
-    }
-    await sleep(80);
-  }
-
-  await prodPool.end().catch(() => {});
-  await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Auto-cleaned blocked: ${blocked}`);
+bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  await bot.sendMessage(msg.chat.id, "🚫 Broadcast is disabled for safety. Use only user-triggered messages.");
 });
 
-// ── Admin: /broadcasttext <message> — send custom text to ALL users ─────────────
-
-bot.onText(/\/broadcasttext (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
-    await bot.sendMessage(chatId, "⛔ Not authorized.").catch(() => {});
-    return;
-  }
-
-  const message = (match![1] ?? "").trim();
-  if (!message) {
-    await bot.sendMessage(chatId, "⚠️ Please provide a message.\nUsage: /broadcasttext Hello everyone! 😄");
-    return;
-  }
-
-  await bot.sendMessage(chatId, "📡 Fetching all users from production DB...");
-
-  const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
-  const { Pool: PgPool } = await import("pg").then((m: any) => m.default ?? m) as { Pool: typeof import("pg").Pool };
-  const prodPool = new PgPool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 3 });
-  const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
-  const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
-
-  // Only active users — skip users who already blocked the bot
-  const targets = await prodDb.select({ id: usersTable.id })
-    .from(usersTable)
-    .where(
-      ADMIN_ID
-        ? and(eq(usersTable.isActive, true), ne(usersTable.id, ADMIN_ID))
-        : eq(usersTable.isActive, true)
-    );
-
-  if (targets.length === 0) {
-    await bot.sendMessage(chatId, "⚠️ No users found in the database.");
-    await prodPool.end().catch(() => {});
-    return;
-  }
-
-  await bot.sendMessage(chatId, `📤 Starting broadcast to ${targets.length} users...\nProgress updates every 100 messages.`);
-
-  let sent = 0, failed = 0;
-  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-
-  let blocked = 0;
-  for (const row of targets) {
-    try {
-      await bot.sendMessage(row.id, message);
-      sent++;
-    } catch (err: unknown) {
-      failed++;
-      const statusCode = (err as any)?.response?.statusCode ?? (err as any)?.code;
-      const isBlocked = statusCode === 403 ||
-        (typeof (err as any)?.message === 'string' && (err as any).message.includes('bot was blocked'));
-      if (isBlocked) {
-        blocked++;
-        await prodDb.update(usersTable)
-          .set({ isActive: false, updatedAt: new Date() })
-          .where(eq(usersTable.id, row.id))
-          .catch(() => {});
-      }
-    }
-
-    // Progress update every 100 users
-    if ((sent + failed) % 100 === 0) {
-      await bot.sendMessage(
-        chatId,
-        `⏳ Progress: ${sent + failed}/${targets.length} — ✅ ${sent} sent, ❌ ${failed} failed`
-      ).catch(() => {});
-    }
-
-    await sleep(50); // ~20 messages/second — safe for Telegram rate limits
-  }
-
-  await prodPool.end().catch(() => {});
-
-  logger.info({ sent, failed, blocked, total: targets.length }, "broadcasttext complete");
-  await bot.sendMessage(
-    chatId,
-    `✅ Broadcast complete!\n\n📊 Total targeted: ${targets.length}\n✅ Sent: ${sent}\n❌ Failed: ${failed}\n🚫 Auto-cleaned blocked: ${blocked}`
-  );
+bot.onText(/\/broadcasttext(?:\s|$)/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  await bot.sendMessage(msg.chat.id, "🚫 Broadcast text is disabled for safety. Use only user-triggered messages.");
 });
 
 // ── Admin: /users ─────────────────────────────────────────────────────────────
