@@ -18,7 +18,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const PLANS = {
   week2:  { stars: 150,  label: "2 Weeks",    days: 14,   emoji: "⚡" },
   month:  { stars: 250,  label: "1 Month",    days: 30,   emoji: "💎" },
-  yearly: { stars: 2500, label: "1 Year",     days: 365,  emoji: "👑" },
+  yearly: { stars: 1000, label: "Lifetime",   days: 36500, emoji: "👑" },
 } as const;
 
 type PlanKey = keyof typeof PLANS;
@@ -1015,7 +1015,7 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     `<b>👇 Apna plan chuno:</b>\n\n` +
     `⚡ <b>2 Weeks</b> — ${PLANS.week2.stars} Stars\n` +
     `💎 <b>1 Month</b> — ${PLANS.month.stars} Stars <i>(most popular)</i>\n` +
-    `👑 <b>1 Year</b> — ${PLANS.yearly.stars} Stars <i>(best value)</i>\n\n` +
+    `👑 <b>Lifetime</b> — ${PLANS.yearly.stars} Stars <i>(best value 🔥)</i>\n\n` +
     `<i>⭐ Telegram Stars se pay karo — instant automatic unlock!</i>`;
 
   // Single message — inline plan buttons + main reply keyboard reset (no spam)
@@ -1023,7 +1023,7 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     inline_keyboard: [
       [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
       [{ text: `💎 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-      [{ text: `👑 1 Year — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
+      [{ text: `👑 Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
     ],
   };
   try {
@@ -3958,7 +3958,7 @@ bot.on("message", async (msg) => {
             inline_keyboard: [
               [{ text: `⚡ Extend 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
               [{ text: `💎 Extend 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-              [{ text: `👑 Extend 1 Year — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
+              [{ text: `👑 Extend Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
             ],
           },
         });
@@ -4218,7 +4218,7 @@ bot.onText(/\/premium/, async (msg) => {
         inline_keyboard: [
           [{ text: `⚡ Extend 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
           [{ text: `💎 Extend 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-          [{ text: `👑 Extend 1 Year — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
+          [{ text: `👑 Extend Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
         ],
       },
     });
