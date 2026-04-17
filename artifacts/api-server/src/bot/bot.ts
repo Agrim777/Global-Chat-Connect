@@ -1106,10 +1106,10 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     .where(eq(usersTable.id, userId));
 
   const matchMsgs = [
-    `💘 Match mila! ${name} online hai — woh pehle message karengi`,
-    `✅ Match! ${name} se connected ho — ab baat shuru hogi`,
-    `💕 ${name} se match hua! Woh typing kar rahi hai...`,
-    `🎉 Match! ${name} online hai abhi`,
+    `🤖 *AI Demo* — ${name} (AI sample) se connected ho!`,
+    `🤖 *Demo Preview* — ${name} (AI) online hai — sample chat shuru!`,
+    `💡 *Free Demo* — ${name} (AI sample) se baat karo!`,
+    `🎯 *Demo Match* — ${name} (AI) typing kar rahi hai...`,
   ];
   await bot.sendMessage(
     chatId,
@@ -1119,8 +1119,8 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
   // ── One-time Demo Match disclosure (required for platform compliance) ────────
   await bot.sendMessage(chatId,
-    "ℹ️ *Demo Match* — Yeh tumhara free sample experience hai.\n" +
-    "Real users se real baatein karne ke liye 💎 *Premium* lo!",
+    "🤖 *AI Demo Preview* — Yeh ek automated sample chat hai (real person nahi).\n" +
+    "Real matches ke liye 💎 *Premium* activate karo!",
     { parse_mode: "Markdown" }
   ).catch(() => {});
 
@@ -1150,9 +1150,9 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await bot.sendChatAction(chatId, "typing").catch(() => {});
         await new Promise(r => setTimeout(r, 2000));
         const teasers = [
-          `💬 ${persona?.name ?? "Woh"} kuch kehne wali thi...\n\n_"main tumhe ek baat batana chahti thi —"_\n\n🔒 Message locked.`,
-          `✍️ ${persona?.name ?? "Woh"} type kar rahi thi...\n\n_"acha suno, actually mujhe tumse —"_\n\n🔒 Message locked.`,
-          `💭 ${persona?.name ?? "Woh"} ne likha aur phir ruk gayi...\n\n_"yaar seriously tum thoda different lagte ho —"_\n\n🔒 Message locked.`,
+          `🤖 *AI Demo ended.* Real matches wait kar rahe hain — unlock karo abhi! 💎`,
+          `⏰ *Demo khatam!* Real log se real baat karne ka time — Premium lo! 💕`,
+          `🔓 *Free preview complete!* Real matches ke liye Premium activate karo 💎`,
         ];
         const teaser = teasers[Math.floor(Math.random() * teasers.length)];
         await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
@@ -4374,11 +4374,8 @@ bot.onText(/\/cleanblocked/, async (msg) => {
 
   await bot.sendMessage(chatId, "🔍 Starting silent block-detection scan...\n\n⚠️ This probes all active users with an invisible typing signal. No messages will be sent to users.\n\nThis may take several minutes for large user bases.");
 
-  const PROD_DB_URL = "postgresql://postgres:GhLpEsBkAcBYSftlWBhOSmAuxZSqRKdG@hopper.proxy.rlwy.net:30481/railway";
-  const { Pool: PgPool } = await import("pg").then((m: any) => m.default ?? m) as { Pool: typeof import("pg").Pool };
-  const prodPool = new PgPool({ connectionString: PROD_DB_URL, ssl: { rejectUnauthorized: false }, max: 3 });
-  const { drizzle: makeDrizzle } = await import("drizzle-orm/node-postgres");
-  const prodDb = makeDrizzle(prodPool, { schema: { usersTable } });
+  // Use the existing database connection — no hardcoded credentials needed
+  const prodDb = db;
 
   // Get all currently-active users (excluding admin)
   const targets = await prodDb.select({ id: usersTable.id })
@@ -4423,10 +4420,10 @@ bot.onText(/\/cleanblocked/, async (msg) => {
       ).catch(() => {});
     }
 
-    await sleep(55); // ~18/sec — stay under Telegram rate limits
+    await sleep(200); // ~5/sec — conservative rate, safer for Telegram spam detection
   }
 
-  await prodPool.end().catch(() => {});
+  // (shared db connection — no pool to close)
 
   await bot.sendMessage(
     chatId,
