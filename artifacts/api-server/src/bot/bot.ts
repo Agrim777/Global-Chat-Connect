@@ -50,6 +50,107 @@ const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
 
+/**
+ * Returns true if the given error is a Telegram "user-unreachable" error
+ * (bot was blocked, user deactivated, chat not found, can't initiate
+ * conversation). These are expected outcomes — the bot should never log
+ * them as errors or alert the admin, otherwise Telegram may flag the bot
+ * as misbehaving and ban it.
+ */
+function isUserUnreachableError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: string; response?: { body?: { error_code?: number; description?: string } }; message?: string };
+  if (e.code !== "ETELEGRAM") return false;
+  const status = e.response?.body?.error_code;
+  const desc = (e.response?.body?.description ?? e.message ?? "").toLowerCase();
+  if (status === 403 || status === 400) {
+    return (
+      desc.includes("bot was blocked") ||
+      desc.includes("user is deactivated") ||
+      desc.includes("chat not found") ||
+      desc.includes("bot can't initiate conversation") ||
+      desc.includes("have no rights to send a message") ||
+      desc.includes("not enough rights") ||
+      desc.includes("group chat was deactivated") ||
+      desc.includes("message to be replied not found") ||
+      desc.includes("message to delete not found") ||
+      desc.includes("message can't be deleted") ||
+      desc.includes("query is too old") ||
+      desc.includes("message is not modified") ||
+      desc.includes("user_id_invalid")
+    );
+  }
+  // Fallback: parse message text if structured body wasn't populated
+  const m = (e.message ?? "").toLowerCase();
+  return (
+    (m.includes("403") || m.includes("400")) &&
+    (m.includes("bot was blocked") ||
+      m.includes("user is deactivated") ||
+      m.includes("chat not found") ||
+      m.includes("query is too old") ||
+      m.includes("message is not modified") ||
+      m.includes("message to delete not found"))
+  );
+}
+
+/**
+ * Wrap all of the bot's outgoing methods so that "user-unreachable" errors
+ * (403 bot blocked, 400 chat not found, query is too old, message not
+ * modified, etc.) are silently swallowed everywhere — without having to
+ * remember a `.catch()` at every call site. Any other error still rejects
+ * normally so real bugs surface.
+ */
+function silenceUnreachable<TArgs extends unknown[], TRet>(
+  fn: (...args: TArgs) => Promise<TRet>,
+): (...args: TArgs) => Promise<TRet | undefined> {
+  return (...args: TArgs) =>
+    fn(...args).catch((err: unknown) => {
+      if (isUserUnreachableError(err)) {
+        logger.debug({ err }, "Telegram send skipped — user unreachable");
+        return undefined;
+      }
+      throw err;
+    });
+}
+
+const _wrappedMethods = [
+  "sendMessage",
+  "sendChatAction",
+  "sendPhoto",
+  "sendDocument",
+  "sendVideo",
+  "sendVoice",
+  "sendAudio",
+  "sendSticker",
+  "sendAnimation",
+  "sendLocation",
+  "sendVenue",
+  "sendContact",
+  "sendPoll",
+  "sendDice",
+  "sendInvoice",
+  "editMessageText",
+  "editMessageCaption",
+  "editMessageReplyMarkup",
+  "editMessageMedia",
+  "deleteMessage",
+  "answerCallbackQuery",
+  "answerPreCheckoutQuery",
+  "forwardMessage",
+  "copyMessage",
+  "pinChatMessage",
+  "unpinChatMessage",
+] as const;
+
+for (const m of _wrappedMethods) {
+  const orig = (bot as unknown as Record<string, unknown>)[m];
+  if (typeof orig === "function") {
+    (bot as unknown as Record<string, unknown>)[m] = silenceUnreachable(
+      (orig as (...a: unknown[]) => Promise<unknown>).bind(bot),
+    );
+  }
+}
+
   // Register Telegram "/" menu commands
   bot.setMyCommands([
     { command: 'start',      description: '▶️ Start the bot' },
@@ -65,6 +166,12 @@ export const bot = new TelegramBot(TOKEN, { polling: false });
 
 // Global safety net — prevent any stray unhandled rejection from crashing the process
 process.on("unhandledRejection", (reason) => {
+  // Silently ignore "user blocked the bot" / chat-gone style errors so we don't
+  // spam the admin and don't generate noisy ERROR logs that look like a bot bug.
+  if (isUserUnreachableError(reason)) {
+    logger.debug({ reason }, "Unhandled rejection ignored — user unreachable");
+    return;
+  }
   const msg = reason instanceof Error ? reason.message : String(reason);
   logger.error({ reason }, "Unhandled promise rejection");
   if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Unhandled rejection: ${msg.slice(0, 300)}`).catch(() => {});
@@ -77,10 +184,16 @@ process.on("unhandledRejection", (reason) => {
     await new Promise(r => setTimeout(r, 1000));
   }
   bot.startPolling({ restart: false });
-  // Suppress 409 errors that may still appear during the brief overlap window
+  // Suppress 409 errors (overlap window) and user-unreachable errors (blocked bot)
   bot.on("polling_error", (err: Error & { code?: string }) => {
     if (err.code === "ETELEGRAM" && err.message?.includes("409")) return;
+    if (isUserUnreachableError(err)) return;
     logger.error({ err }, "Bot polling error");
+  });
+  // Same treatment for generic webhook/error events
+  bot.on("error", (err: Error) => {
+    if (isUserUnreachableError(err)) return;
+    logger.error({ err }, "Bot error");
   });
 })();
 
@@ -140,35 +253,6 @@ function delay(ms: number) {
 }
 function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-/**
- * Returns true if the given error is a Telegram "bot was blocked / chat not found
- * / user is deactivated" error (i.e. we can no longer message this user). These
- * are expected, non-actionable conditions and should not be logged as errors.
- */
-function isUserUnreachableError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; response?: { body?: { error_code?: number; description?: string } }; message?: string };
-  if (e.code !== "ETELEGRAM") return false;
-  const status = e.response?.body?.error_code;
-  if (status === 403 || status === 400) {
-    const desc = (e.response?.body?.description ?? e.message ?? "").toLowerCase();
-    return (
-      desc.includes("bot was blocked") ||
-      desc.includes("user is deactivated") ||
-      desc.includes("chat not found") ||
-      desc.includes("bot can't initiate conversation")
-    );
-  }
-  // Fallback: parse message text if response body wasn't populated
-  const msg = (e.message ?? "").toLowerCase();
-  return (
-    msg.includes("403") &&
-    (msg.includes("bot was blocked") ||
-      msg.includes("user is deactivated") ||
-      msg.includes("chat not found"))
-  );
 }
 
 /** Returns true if this user is currently flood-restricted. */
