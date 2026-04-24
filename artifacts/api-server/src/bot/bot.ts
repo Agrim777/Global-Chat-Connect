@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq, and, ne } from "drizzle-orm";
+import { eq, and, ne, inArray } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -93,24 +93,114 @@ function isUserUnreachableError(err: unknown): boolean {
   );
 }
 
+// ─── Global outbound rate limiter ─────────────────────────────────────────────
+// Telegram's hard global ceiling is 30 messages/sec per bot. We stay safely
+// under that with a token-bucket capped at 25/sec — guarantees we can never
+// trip Telegram's anti-spam systems even during a buggy code path.
+const _bucket = { tokens: 25, lastRefill: Date.now(), capacity: 25, ratePerSec: 25 };
+function _waitForToken(): Promise<void> {
+  return new Promise(resolve => {
+    const tryTake = () => {
+      const now = Date.now();
+      const elapsedSec = (now - _bucket.lastRefill) / 1000;
+      _bucket.tokens = Math.min(_bucket.capacity, _bucket.tokens + elapsedSec * _bucket.ratePerSec);
+      _bucket.lastRefill = now;
+      if (_bucket.tokens >= 1) {
+        _bucket.tokens -= 1;
+        resolve();
+      } else {
+        const waitMs = Math.ceil(((1 - _bucket.tokens) / _bucket.ratePerSec) * 1000);
+        setTimeout(tryTake, waitMs);
+      }
+    };
+    tryTake();
+  });
+}
+
+// ─── Auto-deactivate blocked users (batched DB flush) ────────────────────────
+// When 403 fires, we queue the userId here. A flush every 5s marks them as
+// isActive=false in the DB so matching/broadcasts never pick them again.
+const _blockedUserIds = new Set<number>();
+let _blockedFlushTimer: NodeJS.Timeout | null = null;
+function _queueBlockedUser(userId: number) {
+  if (!Number.isFinite(userId) || userId <= 0) return;
+  _blockedUserIds.add(userId);
+  if (_blockedFlushTimer) return;
+  _blockedFlushTimer = setTimeout(async () => {
+    _blockedFlushTimer = null;
+    if (_blockedUserIds.size === 0) return;
+    const ids = Array.from(_blockedUserIds);
+    _blockedUserIds.clear();
+    try {
+      await db.update(usersTable)
+        .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(inArray(usersTable.id, ids));
+      logger.info({ count: ids.length }, "Auto-marked blocked users as inactive");
+    } catch (err) {
+      logger.warn({ err }, "Failed to mark blocked users inactive");
+    }
+  }, 5000);
+}
+
+// ─── Recent block-rate sampler (early-warning for spam-report storms) ────────
+const _recentBlocks: number[] = []; // timestamps of detected 403s
+function _recordBlock() {
+  const now = Date.now();
+  _recentBlocks.push(now);
+  // Trim anything older than 1 hour
+  while (_recentBlocks.length && now - _recentBlocks[0] > 3_600_000) _recentBlocks.shift();
+}
+function _blockRateLastHour(): number {
+  return _recentBlocks.length;
+}
+
 /**
- * Wrap all of the bot's outgoing methods so that "user-unreachable" errors
- * (403 bot blocked, 400 chat not found, query is too old, message not
- * modified, etc.) are silently swallowed everywhere — without having to
- * remember a `.catch()` at every call site. Any other error still rejects
- * normally so real bugs surface.
+ * Wrap all of the bot's outgoing methods so that:
+ *  1) we never send faster than Telegram allows (token bucket, 25/sec cap),
+ *  2) Telegram 429 "Too Many Requests" is honored (waits retry_after, retries),
+ *  3) "user-unreachable" errors (403/400 bot blocked, chat gone, etc.) are
+ *     silently swallowed AND the user is auto-flagged inactive in the DB.
+ *
+ * Real errors still throw — so genuine bugs surface in logs.
  */
 function silenceUnreachable<TArgs extends unknown[], TRet>(
   fn: (...args: TArgs) => Promise<TRet>,
 ): (...args: TArgs) => Promise<TRet | undefined> {
-  return (...args: TArgs) =>
-    fn(...args).catch((err: unknown) => {
-      if (isUserUnreachableError(err)) {
-        logger.debug({ err }, "Telegram send skipped — user unreachable");
-        return undefined;
+  return async (...args: TArgs) => {
+    await _waitForToken();
+    let attempt = 0;
+    while (true) {
+      try {
+        return await fn(...args);
+      } catch (err: unknown) {
+        const e = err as { code?: string; response?: { body?: { error_code?: number; parameters?: { retry_after?: number } } }; message?: string };
+        // 429: wait the server-instructed cool-off, then retry (max 3 attempts)
+        if (e.code === "ETELEGRAM" && e.response?.body?.error_code === 429) {
+          const retryAfter = e.response.body.parameters?.retry_after ?? 1;
+          if (attempt < 3) {
+            logger.warn({ retryAfter, attempt }, "Telegram 429 — backing off");
+            await new Promise(r => setTimeout(r, (retryAfter + 0.5) * 1000));
+            attempt++;
+            continue;
+          }
+          // Fall through after exhausting retries — log and give up gracefully
+          logger.error({ err }, "Telegram 429 — gave up after retries");
+          return undefined;
+        }
+        if (isUserUnreachableError(err)) {
+          // Capture the chat ID from first arg (works for sendMessage, sendChatAction, etc.)
+          const maybeChat = (args as unknown[])[0];
+          if (typeof maybeChat === "number") {
+            _queueBlockedUser(maybeChat);
+            _recordBlock();
+          }
+          logger.debug({ err }, "Telegram send skipped — user unreachable");
+          return undefined;
+        }
+        throw err;
       }
-      throw err;
-    });
+    }
+  };
 }
 
 const _wrappedMethods = [
@@ -286,7 +376,36 @@ function checkFlood(userId: number): boolean {
   return false;
 }
 
-const NSFW_PATTERN = /sexy|figure|boobs|sex chat|naughty|nude|naked|chut|lund|gandi|randwa|porn|xxxx|bf video|dick|pussy|ass pic|send pic|hot pic|nanga/i;
+// Hardened NSFW detection: tested against a normalized form of the user
+// message so leet ("s3xy"), spacing ("s e x y"), symbol substitution
+// ("s.e.x.y", "s_e_x_y"), repeated letters ("seeexy"), and most emoji
+// obfuscation no longer slip past.
+const NSFW_PATTERN = /(?:sexy?|sext|sexting|nudes?|naked|nangi?|nanga|porn|p0rn|xxx+|nsfw|chut|lund|gand|randi?|randwa|gaand|gandi?|hor?ny|raand|chudai?|chodu?|bhosd[ki]?|bhenchod|behenchod|madarchod|mcbc|bsdk|boobs?|nips|titts?|cleavage|bra|panty|panties|undies|thong|cock|dick|pen[i1]s|pussy|vagina|clit|tits|ass\s*pic|ass\s*hole|jerk\s*off|cum|fuck|fck|fucking|f[\*\.]+ck|orgas[mn]|masturbat|hentai|onlyfans|cam\s*sex|sex\s*chat|sext\s*chat|video\s*call\s*nude|nude\s*pic|hot\s*pic|naughty\s*pic|send\s*pic|bf\s*video|gf\s*video|adult\s*video|blue\s*film|chat\s*sex|hookup|one\s*night|romance\s*adult)/i;
+
+/** Returns a normalized version of text that defeats common NSFW obfuscation. */
+function normalizeForNsfw(text: string): string {
+  let s = text.toLowerCase();
+  // Map common leet substitutions back to letters
+  s = s.replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e").replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t").replace(/8/g, "b").replace(/@/g, "a").replace(/\$/g, "s").replace(/!/g, "i");
+  // Strip common separator characters used to break up words
+  s = s.replace(/[._\-*+~`'"^|\\\/(){}\[\]<>=]/g, "");
+  // Collapse runs of the same letter (seeexy → sexy, hottt → hot)
+  s = s.replace(/([a-z])\1{2,}/g, "$1$1");
+  // Remove emojis and other non-letter/space characters
+  s = s.replace(/[^\p{L}\p{N}\s]/gu, "");
+  // Squash whitespace
+  s = s.replace(/\s+/g, " ").trim();
+  // ALSO produce a despaced variant so "s e x" → "sex" still matches even
+  // when normalize-by-collapse leaves it as separate letters
+  return s + " " + s.replace(/\s+/g, "");
+}
+
+/** True if the given message should be treated as inappropriate / sexual content. */
+function isNsfw(text: string): boolean {
+  if (!text) return false;
+  if (NSFW_PATTERN.test(text)) return true;
+  return NSFW_PATTERN.test(normalizeForNsfw(text));
+}
 
 /** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. */
 async function handleNsfwViolation(chatId: number, userId: number): Promise<boolean> {
@@ -1402,7 +1521,7 @@ function buildPersonaSystemPrompt(persona: FakePersona): string {
   return `You are ${persona.name}, ${persona.age} years old, from ${persona.city}. ${persona.job}. Into ${persona.hobbies.join(", ")}. ${persona.funFact}
 ${situation}
 
-You are a REAL girl chatting on a dating app. NOT an AI, NOT a bot. If anyone asks: "haha nahi yaar main real hun 😂"
+IMPORTANT: This is a DEMO PREVIEW chat inside the bot. If anyone directly asks whether you are AI/bot/real/fake/automated/human, do NOT claim to be a real person. Instead deflect with one short line that points to Premium, e.g. "yeh ek demo preview hai 😊 real matches Premium me unlock hote hain 💎" or "sample chat hai yaar — real connection chahiye toh Premium 💕". Never lie about being human. Never argue or insist you're real.
 
 YOUR VIBE: Flirty, fun, a little mysterious. Warm but not desperate. You make the guy feel interesting — but you don't give everything away at once.
 
@@ -4008,7 +4127,7 @@ bot.on("message", async (msg) => {
               });
             } else if (text) {
               // ── NSFW gate before relay ──────────────────────────────────────
-              if (NSFW_PATTERN.test(text)) {
+              if (isNsfw(text)) {
                 const dropped = await handleNsfwViolation(chatId, id);
                 if (dropped) {
                   // Restrict — end this chat too
@@ -4489,6 +4608,59 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     await bot.sendMessage(chatId, `❌ Delete failed: ${errMsg.slice(0, 200)}`).catch(() => {});
+  }
+});
+
+// ── Admin: /banhealth — quick health snapshot (block-rate, paid users, etc.) ─
+// Surfaces early-warning signals BEFORE Telegram bans the bot:
+//  - block-rate spike in last hour (sudden mass-block ⇒ likely spam-report storm)
+//  - share of paid users sitting in idle (delivery risk)
+//  - total active vs inactive
+bot.onText(/\/banhealth/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "⛔ Not authorised.");
+    return;
+  }
+  try {
+    const rows = await db.select({
+      isActive:  usersTable.isActive,
+      hasPaid:   usersTable.hasPaid,
+      state:     usersTable.state,
+      chatCount: usersTable.chatCount,
+    }).from(usersTable);
+    let total = rows.length, active = 0, inactive = 0, paid = 0, paidIdle = 0, stuckPaid = 0;
+    for (const r of rows) {
+      if (r.isActive) active++; else inactive++;
+      if (r.hasPaid) {
+        paid++;
+        if (r.state === "idle") paidIdle++;
+        if ((r.chatCount ?? 0) === 0) stuckPaid++;
+      }
+    }
+    const blockedHr = _blockRateLastHour();
+    const queued = _blockedUserIds.size;
+    // Heuristic warnings
+    const warnings: string[] = [];
+    if (blockedHr > 50) warnings.push(`🚨 ${blockedHr} blocks in last hour — possible spam-report storm`);
+    else if (blockedHr > 20) warnings.push(`⚠️ ${blockedHr} blocks in last hour — keep an eye on it`);
+    if (paid > 0 && stuckPaid / paid > 0.20) warnings.push(`🚨 ${stuckPaid}/${paid} paid users have 0 chats — refund risk`);
+    if (total > 0 && inactive / total > 0.40) warnings.push(`⚠️ ${inactive}/${total} users inactive — pool shrinking`);
+    const lines = [
+      `📊 *Bot Ban-Health Snapshot*`,
+      ``,
+      `👥 Users: ${total} (active ${active} / inactive ${inactive})`,
+      `💎 Paid: ${paid} (idle ${paidIdle}, never-chatted ${stuckPaid})`,
+      ``,
+      `🚫 Blocks (last 1h): ${blockedHr}`,
+      `🕒 Pending DB-flush: ${queued}`,
+      ``,
+      warnings.length ? warnings.join("\n") : `✅ All signals look healthy.`,
+    ];
+    await bot.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown" });
+  } catch (err) {
+    logger.error({ err }, "/banhealth failed");
+    await bot.sendMessage(chatId, "❌ Failed to fetch health snapshot.");
   }
 });
 
