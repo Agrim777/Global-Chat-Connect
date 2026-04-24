@@ -124,6 +124,7 @@ const _blockedUserIds = new Set<number>();
 let _blockedFlushTimer: NodeJS.Timeout | null = null;
 function _queueBlockedUser(userId: number) {
   if (!Number.isFinite(userId) || userId <= 0) return;
+  if (ADMIN_ID && userId === ADMIN_ID) return; // never auto-deactivate admin
   _blockedUserIds.add(userId);
   if (_blockedFlushTimer) return;
   _blockedFlushTimer = setTimeout(async () => {
@@ -345,8 +346,9 @@ function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-/** Returns true if this user is currently flood-restricted. */
+/** Returns true if this user is currently flood-restricted. Admin is never restricted. */
 function isFloodRestricted(userId: number): boolean {
+  if (ADMIN_ID && userId === ADMIN_ID) return false; // admin bypass
   const until = restrictedUntil.get(userId);
   if (until && Date.now() < until) return true;
   restrictedUntil.delete(userId);
@@ -356,8 +358,10 @@ function isFloodRestricted(userId: number): boolean {
 /**
  * Records a message timestamp for flood tracking.
  * Returns true (and applies restriction) if the user is flooding.
+ * Admin is never tracked or restricted.
  */
 function checkFlood(userId: number): boolean {
+  if (ADMIN_ID && userId === ADMIN_ID) return false; // admin bypass
   const now = Date.now();
   const WINDOW_MS = 10_000;   // 10-second sliding window
   const MAX_MSGS  = 10;        // max messages in window
@@ -407,8 +411,9 @@ function isNsfw(text: string): boolean {
   return NSFW_PATTERN.test(normalizeForNsfw(text));
 }
 
-/** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. */
+/** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. Admin is fully exempt. */
 async function handleNsfwViolation(chatId: number, userId: number): Promise<boolean> {
+  if (ADMIN_ID && userId === ADMIN_ID) return false; // admin never warned or restricted
   const count = (nsfwWarnings.get(userId) ?? 0) + 1;
   nsfwWarnings.set(userId, count);
   if (count === 1) {
@@ -3517,10 +3522,13 @@ async function findMatch(chatId: number, userId: number) {
       const is403 = notifyErr instanceof Error && (notifyErr as NodeJS.ErrnoException & { code?: string; response?: { statusCode?: number } }).response?.statusCode === 403;
       if (is403) {
         // Partner deactivated their account or blocked the bot — mark them inactive
+        // (but never touch admin's account)
         logger.warn({ matchId: match.id }, "Match partner is deactivated — marking inactive and resetting");
-        await db.update(usersTable)
-          .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(eq(usersTable.id, match.id));
+        if (!ADMIN_ID || match.id !== ADMIN_ID) {
+          await db.update(usersTable)
+            .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, match.id));
+        }
         // Reset searcher too — they're no longer connected
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
