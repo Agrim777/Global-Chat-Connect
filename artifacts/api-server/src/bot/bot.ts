@@ -142,6 +142,35 @@ function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+/**
+ * Returns true if the given error is a Telegram "bot was blocked / chat not found
+ * / user is deactivated" error (i.e. we can no longer message this user). These
+ * are expected, non-actionable conditions and should not be logged as errors.
+ */
+function isUserUnreachableError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: string; response?: { body?: { error_code?: number; description?: string } }; message?: string };
+  if (e.code !== "ETELEGRAM") return false;
+  const status = e.response?.body?.error_code;
+  if (status === 403 || status === 400) {
+    const desc = (e.response?.body?.description ?? e.message ?? "").toLowerCase();
+    return (
+      desc.includes("bot was blocked") ||
+      desc.includes("user is deactivated") ||
+      desc.includes("chat not found") ||
+      desc.includes("bot can't initiate conversation")
+    );
+  }
+  // Fallback: parse message text if response body wasn't populated
+  const msg = (e.message ?? "").toLowerCase();
+  return (
+    msg.includes("403") &&
+    (msg.includes("bot was blocked") ||
+      msg.includes("user is deactivated") ||
+      msg.includes("chat not found"))
+  );
+}
+
 /** Returns true if this user is currently flood-restricted. */
 function isFloodRestricted(userId: number): boolean {
   const until = restrictedUntil.get(userId);
@@ -1157,10 +1186,28 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         const teaser = teasers[Math.floor(Math.random() * teasers.length)];
         await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
         await new Promise(r => setTimeout(r, 1500));
-        await sendPayGate(chatId, "⏰ Free preview khatam...", persona?.name);
+        // sendPayGate may throw 403 if user blocked the bot — swallow that case quietly
+        await sendPayGate(chatId, "⏰ Free preview khatam...", persona?.name).catch((err) => {
+          if (isUserUnreachableError(err)) {
+            logger.info({ userId, chatId }, "Free-trial pay gate skipped — user unreachable (blocked bot)");
+            return;
+          }
+          throw err;
+        });
         // No follow-up reminders — one pay gate is enough (avoids spam reports)
       }
     } catch (err) {
+      // User blocked the bot / deactivated account / chat gone — expected, log as info and move on.
+      if (isUserUnreachableError(err)) {
+        logger.info({ userId, chatId }, "Free-trial timer: user unreachable (blocked bot or deactivated)");
+        // Best-effort state cleanup so this user isn't stuck in 'chatting'
+        try {
+          await db.update(usersTable)
+            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+            .where(eq(usersTable.id, userId));
+        } catch { /* ignore */ }
+        return;
+      }
       logger.error({ err }, "Free-trial timer error (fake chat)");
       console.error(`[TIMER ERROR] fake chat: ${err instanceof Error ? err.message : String(err)}`);
     }
