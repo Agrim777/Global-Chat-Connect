@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq, and, ne, inArray } from "drizzle-orm";
+import { eq, and, ne, inArray, notInArray } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -44,6 +44,16 @@ function isPremiumActive(user: { hasPaid: boolean; premiumExpiresAt?: Date | nul
 }
 
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
+// Extra protected accounts (admin's alts, co-admins, test accounts).
+// These users are NEVER auto-deactivated, flood-restricted, NSFW-restricted,
+// or cleaned up by /cleanblocked.
+const EXTRA_PROTECTED_IDS = [2110327748];
+const PROTECTED_IDS = new Set<number>(
+  [ADMIN_ID, ...EXTRA_PROTECTED_IDS].filter(id => Number.isFinite(id) && id > 0)
+);
+function isProtected(userId: number): boolean {
+  return PROTECTED_IDS.has(userId);
+}
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
 const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
 
@@ -124,7 +134,7 @@ const _blockedUserIds = new Set<number>();
 let _blockedFlushTimer: NodeJS.Timeout | null = null;
 function _queueBlockedUser(userId: number) {
   if (!Number.isFinite(userId) || userId <= 0) return;
-  if (ADMIN_ID && userId === ADMIN_ID) return; // never auto-deactivate admin
+  if (isProtected(userId)) return; // never auto-deactivate protected accounts
   _blockedUserIds.add(userId);
   if (_blockedFlushTimer) return;
   _blockedFlushTimer = setTimeout(async () => {
@@ -346,9 +356,9 @@ function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-/** Returns true if this user is currently flood-restricted. Admin is never restricted. */
+/** Returns true if this user is currently flood-restricted. Protected accounts are never restricted. */
 function isFloodRestricted(userId: number): boolean {
-  if (ADMIN_ID && userId === ADMIN_ID) return false; // admin bypass
+  if (isProtected(userId)) return false; // protected accounts bypass
   const until = restrictedUntil.get(userId);
   if (until && Date.now() < until) return true;
   restrictedUntil.delete(userId);
@@ -361,7 +371,7 @@ function isFloodRestricted(userId: number): boolean {
  * Admin is never tracked or restricted.
  */
 function checkFlood(userId: number): boolean {
-  if (ADMIN_ID && userId === ADMIN_ID) return false; // admin bypass
+  if (isProtected(userId)) return false; // protected accounts bypass
   const now = Date.now();
   const WINDOW_MS = 10_000;   // 10-second sliding window
   const MAX_MSGS  = 10;        // max messages in window
@@ -411,9 +421,9 @@ function isNsfw(text: string): boolean {
   return NSFW_PATTERN.test(normalizeForNsfw(text));
 }
 
-/** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. Admin is fully exempt. */
+/** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. Protected accounts are fully exempt. */
 async function handleNsfwViolation(chatId: number, userId: number): Promise<boolean> {
-  if (ADMIN_ID && userId === ADMIN_ID) return false; // admin never warned or restricted
+  if (isProtected(userId)) return false; // protected accounts never warned or restricted
   const count = (nsfwWarnings.get(userId) ?? 0) + 1;
   nsfwWarnings.set(userId, count);
   if (count === 1) {
@@ -3522,9 +3532,9 @@ async function findMatch(chatId: number, userId: number) {
       const is403 = notifyErr instanceof Error && (notifyErr as NodeJS.ErrnoException & { code?: string; response?: { statusCode?: number } }).response?.statusCode === 403;
       if (is403) {
         // Partner deactivated their account or blocked the bot — mark them inactive
-        // (but never touch admin's account)
+        // (but never touch protected accounts)
         logger.warn({ matchId: match.id }, "Match partner is deactivated — marking inactive and resetting");
-        if (!ADMIN_ID || match.id !== ADMIN_ID) {
+        if (!isProtected(match.id)) {
           await db.update(usersTable)
             .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
             .where(eq(usersTable.id, match.id));
@@ -4688,12 +4698,13 @@ bot.onText(/\/cleanblocked/, async (msg) => {
   // Use the existing database connection — no hardcoded credentials needed
   const prodDb = db;
 
-  // Get all currently-active users (excluding admin)
+  // Get all currently-active users (excluding all protected accounts)
+  const protectedList = Array.from(PROTECTED_IDS);
   const targets = await prodDb.select({ id: usersTable.id })
     .from(usersTable)
     .where(
-      ADMIN_ID
-        ? and(eq(usersTable.isActive, true), ne(usersTable.id, ADMIN_ID))
+      protectedList.length
+        ? and(eq(usersTable.isActive, true), notInArray(usersTable.id, protectedList))
         : eq(usersTable.isActive, true)
     );
 
