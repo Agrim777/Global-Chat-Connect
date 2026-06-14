@@ -691,7 +691,58 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     return f ? two(`${city} 🙈`, "you?") : two(city, "you?");
   }
 
-  if (/photo|pic|selfie|dikhao|dikha|send photo|tum kaisi|kaisi dikhti/.test(t)) {
+
+    // ── Delhi area deep-dive — when user asks which part of Delhi ────────────
+    if (/delhi mein kahan|delhi ka kaunsa|delhi ka konsa|south delhi|north delhi|west delhi|kaun sa area|konsa area|kaunsa area|area kya|which area|rohini|dwarka|saket|hauz khas|lajpat|janakpuri|pitampura|karol bagh|rajouri|gk |greater kailash|cp |connaught|noida|gurgaon|gurugram|faridabad|ghaziabad|vasant|malviya|nehru place|preet vihar|mayur vihar|laxmi nagar|vikaspuri|paschim|uttam nagar|shalimar|model town/.test(t)) {
+      persona.lastAsked = "job";
+      const myAreas = ["Lajpat Nagar", "Rohini Sector 14", "Dwarka Sector 10", "Saket", "Hauz Khas Village", "Karol Bagh", "Janakpuri", "Pitampura", "Greater Kailash 1", "Rajouri Garden", "Defence Colony", "Preet Vihar"];
+      const myArea = rnd(myAreas);
+      // React to user's area specifically
+      if (/rohini/.test(t)) return rnd([
+        f ? two("omg Rohini!! 😄", "kaun sa sector? meri ek friend bhi Rohini mein hai haha") : two("oh Rohini nice", "which sector?"),
+        f ? two("haha Rohini wale 😄", "metro se aate ho ya bus?") : two("Rohini? cool", "sector?"),
+      ]);
+      if (/dwarka/.test(t)) return rnd([
+        f ? two("Dwarka!! 😄", "wahan ka metro connectivity toh solid hai yaar") : two("oh Dwarka", "which sector?"),
+        f ? two("omg Dwarka 😄", "kaun sa sector? 10 ya 12?") : two("Dwarka nice", "sector 10 or 12?"),
+      ]);
+      if (/saket|malviya|hauz khas/.test(t)) return rnd([
+        f ? two("omg South Delhi!! 😍", "Hauz Khas Village kabhi gayi ho? bohot vibe wali jagah hai") : two("South Delhi nice 😍", "been to Hauz Khas?"),
+        f ? two("South Delhi wali! 😍", "posh area yaar honestly haha") : two("South Delhi, nice area", "student or working?"),
+      ]);
+      if (/lajpat|defence colony|gk|greater kailash/.test(t)) return rnd([
+        f ? two("omg GK / Lajpat side!! 😍", "yaar wahan ka market bohot acha hai na?") : two("oh GK side nice", "Lajpat market ever?"),
+        f ? two("haha South Delhi 😍", "Lajpat Nagar market mein shopping hoti rehti hai? 😄") : two("Lajpat / GK nice", "cool area"),
+      ]);
+      if (/karol bagh|rajouri|janakpuri|vikaspuri|uttam nagar/.test(t)) return rnd([
+        f ? two("oh West Delhi! 😄", "Rajouri Garden mall mein ghoomna hota hai? 😄") : two("West Delhi nice", "Rajouri Garden mall?"),
+        f ? two("West Delhi gang! 😄", "traffic wahan ki toh God level hai yaar 😂") : two("West Delhi haha", "traffic there is crazy nah?"),
+      ]);
+      if (/pitampura|model town|shalimar/.test(t)) return rnd([
+        f ? two("North Delhi! 😄", "Pitampura ka area toh clean rehta hai na compared to baaki?") : two("North Delhi nice", "Pitampura area?"),
+        f ? two("oh North Delhi side 😊", "NSP (Netaji Subhash Place) pe jaati ho kabhi?") : two("North Delhi nice", "NSP area?"),
+      ]);
+      if (/noida/.test(t)) return rnd([
+        f ? two("Noida!! 😄", "kaun sa sector? 18 wala area hai na ekdum happening 😄") : two("oh Noida nice", "which sector?"),
+        f ? two("NCR gang 😄", "Sector 18 ya 62 side?") : two("Noida nice", "sector 18 or tech park side?"),
+      ]);
+      if (/gurgaon|gurugram/.test(t)) return rnd([
+        f ? two("Gurgaon!! 😄", "DLF wala area? ya Cyber Hub side? 😄") : two("oh Gurgaon nice", "Cyber Hub side?"),
+        f ? two("omg Gurgaon 😮", "rent wahan bohot zyada hai yaar 😂 job ke liye ho kya?") : two("Gurgaon nice", "working there?"),
+      ]);
+      if (/preet vihar|mayur vihar|laxmi nagar/.test(t)) return rnd([
+        f ? two("East Delhi! 😄", "Laxmi Nagar market pe jaati ho kabhi?") : two("East Delhi nice", "Laxmi Nagar market?"),
+        f ? two("oh East Delhi side 😊", "metro connectivity toh acha hai wahan 😄") : two("East Delhi", "metro must be convenient?"),
+      ]);
+      // Generic — tell own area, ask theirs
+      return rnd([
+        f ? two(`main ${myArea} side hun 😊`, "tum kaun sa area?") : two(`${myArea} 😊`, "your area?"),
+        f ? two(`${myArea} mein rehti hun 😄`, "aur tum Delhi mein kahan ho exactly?") : two(`${myArea}`, "which area you from?"),
+        f ? two(`haha main toh ${myArea} wali hun 😄`, "tum bolo — kaun sa area?") : two(`${myArea} side`, "you?"),
+      ]);
+    }
+
+    if (/photo|pic|selfie|dikhao|dikha|send photo|tum kaisi|kaisi dikhti/.test(t)) {
     const replies_f = [
       ["haha abhi nahi 😂", "thoda toh baat karo pehle na"],
       ["omg seedha wahan 😂", "earn it first lol"],
@@ -1158,21 +1209,21 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     case "continuation": {
       // User answered a continuation question — react to their answer then ask another
       const reactions_f = [
-          `omg same energy honestly 😄`,
-          `hahaha yaar 😂 okay okay`,
-          `aww honestly that's cute ngl 🙈`,
-          `haha okay noted 😄`,
-          `haha acha acha 😊`,
-          `omg sach mein? 😄`,
-          `haha interesting yaar 😄`,
-          `aww nice 😊`,
-        ];
-        const reactions_m = [
-          `haha fair enough 😄`,
-          `okay interesting 😄`,
-          `haha nice 😊`,
-          `okay okay 😊`,
-        ];
+        `haha "${echo}" 😄`,
+        `omg "${echo}"?? 👀`,
+        `wait — "${echo}"?? bolo bolo 😄`,
+        `haha achha ${echo} wala toh sochta nahi tha 😂`,
+        `omg same energy honestly 😄`,
+        `hahaha yaar 😂 okay okay`,
+        `aww honestly that's cute ngl 🙈`,
+        `haha okay noted 😄`,
+      ];
+      const reactions_m = [
+        `haha "${echo}" 😄`,
+        `"${echo}"? interesting 😄`,
+        `okay "${echo}" — go on`,
+        `haha fair enough 😄`,
+      ];
       const react = [rnd(f ? reactions_f : reactions_m)];
       const next = pickFresh(persona);
       return [...react, ...next];
