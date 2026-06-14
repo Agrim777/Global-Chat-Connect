@@ -1158,21 +1158,21 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     case "continuation": {
       // User answered a continuation question — react to their answer then ask another
       const reactions_f = [
-        `haha "${echo}" 😄`,
-        `omg "${echo}"?? 👀`,
-        `wait — "${echo}"?? bolo bolo 😄`,
-        `haha achha ${echo} wala toh sochta nahi tha 😂`,
-        `omg same energy honestly 😄`,
-        `hahaha yaar 😂 okay okay`,
-        `aww honestly that's cute ngl 🙈`,
-        `haha okay noted 😄`,
-      ];
-      const reactions_m = [
-        `haha "${echo}" 😄`,
-        `"${echo}"? interesting 😄`,
-        `okay "${echo}" — go on`,
-        `haha fair enough 😄`,
-      ];
+          `omg same energy honestly 😄`,
+          `hahaha yaar 😂 okay okay`,
+          `aww honestly that's cute ngl 🙈`,
+          `haha okay noted 😄`,
+          `haha acha acha 😊`,
+          `omg sach mein? 😄`,
+          `haha interesting yaar 😄`,
+          `aww nice 😊`,
+        ];
+        const reactions_m = [
+          `haha fair enough 😄`,
+          `okay interesting 😄`,
+          `haha nice 😊`,
+          `okay okay 😊`,
+        ];
       const react = [rnd(f ? reactions_f : reactions_m)];
       const next = pickFresh(persona);
       return [...react, ...next];
