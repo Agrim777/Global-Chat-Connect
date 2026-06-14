@@ -1352,24 +1352,13 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, chatCount: 1, updatedAt: new Date() })
     .where(eq(usersTable.id, userId));
 
-  const matchMsgs = [
-    `🤖 *AI Demo* — ${name} (AI sample) se connected ho!`,
-    `🤖 *Demo Preview* — ${name} (AI) online hai — sample chat shuru!`,
-    `💡 *Free Demo* — ${name} (AI sample) se baat karo!`,
-    `🎯 *Demo Match* — ${name} (AI) typing kar rahi hai...`,
-  ];
-  await bot.sendMessage(
+await bot.sendMessage(
     chatId,
-    matchMsgs[Math.floor(Math.random() * matchMsgs.length)],
-    { reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
+    `✅ Match found! You've been connected with *${name}*, ${age} from ${city} 💬\n\nSay hello!`,
+    { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
-  // ── One-time Demo Match disclosure (required for platform compliance) ────────
-  await bot.sendMessage(chatId,
-    "🤖 *AI Demo Preview* — Yeh ek automated sample chat hai (real person nahi).\n" +
-    "Real matches ke liye 💎 *Premium* activate karo!",
-    { parse_mode: "Markdown" }
-  ).catch(() => {});
+
 
   // Opener: show typing indicator, then wait briefly — keeps 45s trial moving
   bot.sendChatAction(chatId, "typing").catch(() => {});
@@ -1397,9 +1386,9 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
         await bot.sendChatAction(chatId, "typing").catch(() => {});
         await new Promise(r => setTimeout(r, 2000));
         const teasers = [
-          `🤖 *AI Demo ended.* Real matches wait kar rahe hain — unlock karo abhi! 💎`,
-          `⏰ *Demo khatam!* Real log se real baat karne ka time — Premium lo! 💕`,
-          `🔓 *Free preview complete!* Real matches ke liye Premium activate karo 💎`,
+          `${persona?.name ?? ""} ne chat chod di 👋\n\nAur real matches ke liye 💎 *Premium* lo!`,
+          `${persona?.name ?? ""} offline ho gayi 😔\n\nReal matches ke liye Premium activate karo 💕`,
+          `${persona?.name ?? ""} chali gayi... 🥺\n\nReal log se baat ke liye Premium lo 💎`,
         ];
         const teaser = teasers[Math.floor(Math.random() * teasers.length)];
         await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
