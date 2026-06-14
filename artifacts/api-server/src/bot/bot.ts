@@ -995,11 +995,33 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
 
     case "location": {
       persona.lastAsked = "job";
-      if (/delhi|ncr|gurgaon|noida|faridabad/.test(t)) {
+      if (/delhi|ncr/.test(t) && !/gurgaon|gurugram|noida|faridabad|ghaziabad/.test(t)) {
+        persona.lastAsked = "delhi_area";
         return rnd([
-          f ? two("omg delhi wale 😄", "kya karte ho wahan?") : two("oh delhi nice", "student or job?"),
-          f ? two("arre delhi 😄", "wfh ya bahar jaate ho?") : two("delhi?", "student or working?"),
-          f ? two("oh nice 😄", "delhi mein kahan exactly?") : two("delhi nice", "what do you do?"),
+          f ? two("omg Delhi!! 😄", "South Delhi ya North? kaun sa area?") : two("oh Delhi nice 😄", "which area?"),
+          f ? two("arre Delhi wale 😄", "kaun sa area — Rohini, Dwarka, ya South Delhi?") : two("Delhi? nice", "which part?"),
+          f ? two("haha Delhi gang 😄", "bata — Rohini, Saket, Janakpuri kaun sa?") : two("Delhi nice", "South or North?"),
+        ]);
+      }
+      if (/gurgaon|gurugram/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("oh Gurgaon!! 😮", "Cyber Hub pe kabhi gayi? ekdum lit hai weekend mein 😄") : two("Gurgaon nice 😮", "Cyber Hub side?"),
+          f ? two("haha Gurgaon wali 😄", "rent sunke dil dukha 😂 job ke liye shifted ho?") : two("Gurgaon nice", "working there?"),
+        ]);
+      }
+      if (/noida/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("Noida!! 😄", "kaun sa sector? 18 wala area ekdum happening hai") : two("oh Noida nice", "which sector?"),
+          f ? two("NCR gang 😄", "DND pe traffic hota hai roz? 😂") : two("Noida nice", "sector 18 or tech?"),
+        ]);
+      }
+      if (/faridabad|ghaziabad/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("NCR side 😄", "Delhi commute hoti hai roz?") : two("NCR nice", "Delhi commute?"),
+          f ? two("arre NCR wali 😄", "Delhi traffic mein kabhi nahi phasi? 😂") : two("NCR side", "Delhi commute tough?"),
         ]);
       }
       if (/mumbai|bombay|pune|maharashtra|navi mumbai/.test(t)) {
@@ -1191,6 +1213,54 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
       }
       return rnd([
         f ? two(`${echo}? haha relatable 😄`, "btw kya karte ho?") : two(`${echo}? nice`, "what do you do?"),
+      ]);
+    }
+
+    case "delhi_area": {
+      persona.lastAsked = "job";
+      if (/rohini/.test(t)) return rnd([
+        f ? two("omg Rohini!! 😄", "kaun sa sector? 14-15 wala area ekdum busy rehta hai") : two("Rohini nice", "which sector?"),
+        f ? two("haha Rohini wali 😄", "Yellow Line metro se aati ho daily?") : two("oh Rohini", "sector?"),
+      ]);
+      if (/dwarka/.test(t)) return rnd([
+        f ? two("Dwarka!! 😄", "kaun sa sector? 10 ya 12 wala area mast hai na?") : two("oh Dwarka nice", "which sector?"),
+        f ? two("haha Dwarka gang 😄", "Blue Line metro — convenient hai na?") : two("Dwarka nice", "sector 10 or 12?"),
+      ]);
+      if (/saket|malviya|hauz khas/.test(t)) return rnd([
+        f ? two("omg South Delhi!! 😍", "Hauz Khas Village kabhi gayi? ekdum chill vibe hai wahan") : two("South Delhi nice 😍", "Hauz Khas?"),
+        f ? two("South Delhi wali 😍", "Select City Walk ya DLF Saket — weekend hangout wahan?") : two("South Delhi nice", "Saket mall?"),
+      ]);
+      if (/lajpat|defence|gk |greater kailash/.test(t)) return rnd([
+        f ? two("omg GK / Lajpat side!! 😍", "Lajpat Nagar Central Market mein shopping hoti rehti hai na? 😄") : two("oh GK/Lajpat nice", "market?"),
+        f ? two("haha South Delhi premium 😍", "Khan Market kabhi gayi? overpriced but vibes achi hain 😂") : two("GK side nice", "Khan Market?"),
+      ]);
+      if (/karol bagh|rajouri|janakpuri|vikaspuri|uttam nagar/.test(t)) return rnd([
+        f ? two("West Delhi!! 😄", "Rajouri Garden mall pe ghumna hota hai weekend mein? 😄") : two("West Delhi nice", "Rajouri Garden?"),
+        f ? two("haha West Delhi gang 😄", "Karol Bagh market mein bargaining toh aati hai na? 😂") : two("West Delhi", "Karol Bagh 😂"),
+      ]);
+      if (/pitampura|model town|shalimar|ashok vihar/.test(t)) return rnd([
+        f ? two("North Delhi!! 😄", "NSP (Netaji Subhash Place) wala area ekdum connected hai na?") : two("North Delhi nice", "NSP area?"),
+        f ? two("haha North Delhi wali 😄", "Pitampura ka area clean hai na compared to rest 😄") : two("North Delhi", "Pitampura?"),
+      ]);
+      if (/preet vihar|mayur vihar|laxmi nagar|patparganj/.test(t)) return rnd([
+        f ? two("East Delhi!! 😄", "Laxmi Nagar market mein jaana hota hai kabhi?") : two("East Delhi nice", "Laxmi Nagar?"),
+        f ? two("oh East Delhi side 😊", "Blue Line se connected hai ekdum — convenient na?") : two("East Delhi", "metro?"),
+      ]);
+      if (/noida/.test(t)) return rnd([
+        f ? two("Noida!! 😄", "kaun sa sector? 18 wala area ekdum happening hai 😄") : two("oh Noida nice", "which sector?"),
+        f ? two("NCR gang 😄", "DND flyway pe traffic hota hai roz? 😂") : two("Noida nice", "DND traffic?"),
+      ]);
+      if (/gurgaon|gurugram/.test(t)) return rnd([
+        f ? two("Gurgaon!! 😮", "Cyber Hub pe kabhi gayi? ekdum lit place hai weekend mein 😄") : two("oh Gurgaon nice", "Cyber Hub?"),
+        f ? two("haha Gurgaon wali 😄", "rent sunke mann dukha hoga 😂 job ke liye shifted ho?") : two("Gurgaon nice", "working there?"),
+      ]);
+      if (/connaught|paharganj/.test(t)) return rnd([
+        f ? two("CP side!! 😄", "Connaught Place inner circle wali coffee shops mast hain na 😊") : two("CP area nice", "inner circle hangout?"),
+        f ? two("haha Central Delhi wali 😄", "wahan ka crowd God-level hai 😂") : two("Central Delhi", "CP crowd 😂"),
+      ]);
+      return rnd([
+        f ? two("haha Delhi wali 😄", "South ya North side? kaun sa area exactly?") : two("Delhi nice 😄", "which area?"),
+        f ? two("omg Delhi!! 😄", "kaun sa part — Rohini, South Delhi, Dwarka?") : two("Delhi!", "North or South?"),
       ]);
     }
 
