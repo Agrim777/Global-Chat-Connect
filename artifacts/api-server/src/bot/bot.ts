@@ -1354,7 +1354,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
 await bot.sendMessage(
     chatId,
-    `✅ Match found! You've been connected with *${name}*, ${age} from ${city} 💬\n\nSay hello!`,
+    `✅ Match found! You've been connected with *${name}* 💬\n\nSay hello!`,
     { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
