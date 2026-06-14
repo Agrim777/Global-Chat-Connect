@@ -610,6 +610,24 @@ const CONTINUATION_TOPICS: TopicEntry[] = [
   { id: "introvert",     f: ["genuine question —", "introvert ho ya extrovert? ya dono thoda thoda? 😄"], m: ["introvert or extrovert?", "honest answer?"] },
   { id: "5yr_plan",      f: ["sochte ho future ke baare mein? 😊", "5 saal baad kahan hoge tum?"], m: ["5 year plan?", "any idea?"] },
   { id: "cooking_skill", f: ["haha serious question —", "ek dish hai jo ghar mein best banate ho?"], m: ["can you cook?", "best dish?"] },
+  { id: "zodiac",        f: ["haha okay astrology wali question 😄", "kaun sa zodiac sign ho? believe karte ho?"], m: ["zodiac sign?", "into astrology?"] },
+  { id: "reel_habit",    f: ["real talk 😂", "kitne time Insta reels scroll karti ho daily? honest answer 😂"], m: ["how much time on reels?", "honest answer 😂"] },
+  { id: "night_routine", f: ["acha bata 😄", "raat ko sone se pehle kya karte ho? phone ya seedha so jaate ho? 😄"], m: ["night routine?", "phone before sleep?"] },
+  { id: "dream_job",     f: ["okay serious question 😊", "agar paisa/degree matter na kare toh kya karna chahte ho life mein?"], m: ["dream job if money didn't matter?", "real answer?"] },
+  { id: "comfort_food",  f: ["haha okay important 😄", "jab bohot bura feel ho toh kaunsa khana khate ho? 😄"], m: ["comfort food?", "sad day food?"] },
+  { id: "phone_screen",  f: ["haha bata 😄", "phone ka daily screen time kitna hai? judge nahi karungi 😂"], m: ["daily screen time?", "how many hours?"] },
+  { id: "arranged_love", f: ["genuine question 😊", "arranged marriage ke liye ho ya love marriage? ya depend karta hai? 😊"], m: ["arranged or love marriage?", "honest opinion?"] },
+  { id: "hot_take",      f: ["okay unpopular opinion bolo 😂", "koi cheez jo tum sochte ho but log judge karte hain? 😂"], m: ["unpopular opinion?", "go 😄"] },
+  { id: "first_ever",    f: ["haha random 😊", "last time kab kuch pehli baar kiya? new food, new place, anything 😊"], m: ["last new thing you tried?", "recently?"] },
+  { id: "fav_app",       f: ["okay bata 😄", "phone se ek app permanently delete karna ho toh kaun sa? 😂"], m: ["one app you'd delete forever?", "honest?"] },
+  { id: "social_detox",  f: ["acha tell me 😊", "kya kabhi social media se break liya hai? how was it? 😊"], m: ["ever done social media detox?", "how was it?"] },
+  { id: "childhood_mem", f: ["haha okay nostalgia 😄", "bachpan ki ek cheez jo abhi bhi yaad aati hai? 🥺"], m: ["favourite childhood memory?", "anything?"] },
+  { id: "street_food",   f: ["important question 😄", "ghar ke paas sabse acha street food kya milta hai?"], m: ["best street food near your place?", "go on 😋"] },
+  { id: "bad_habit",     f: ["okay honest hona 😂", "ek aisi habit jo chodni chahte ho but nahi choot rahi? 😂"], m: ["one habit you want to quit?", "honest?"] },
+  { id: "role_model",    f: ["real question 😊", "life mein koi ek person hai jo genuinely inspire karta ho? 😊"], m: ["who inspires you most?", "real answer?"] },
+  { id: "money_spend",   f: ["haha okay 😄", "pehli salary pe sabse pehle kya kharida tha ya khareedoge? 😄"], m: ["first salary — what'd you buy?", "or plan to?"] },
+  { id: "ipl_team",      f: ["okay serious question 😂", "IPL mein konsi team support karti ho? sach bolo"], m: ["IPL team?", "be honest 😄"] },
+  { id: "worst_movie",   f: ["haha okay honest bao 😂", "life ki worst movie jo regret karte ho dekhke? 😂"], m: ["worst movie you watched?", "biggest regret?"] },
 ];
 
 // Pick a continuation topic the persona hasn't used yet.
@@ -1024,16 +1042,54 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
           f ? two("arre NCR wali 😄", "Delhi traffic mein kabhi nahi phasi? 😂") : two("NCR side", "Delhi commute tough?"),
         ]);
       }
-      if (/mumbai|bombay|pune|maharashtra|navi mumbai/.test(t)) {
+      if (/mumbai|bombay|maharashtra/.test(t) && !/pune|navi mumbai/.test(t)) {
+        persona.lastAsked = "job";
         return rnd([
-          f ? two("oh mumbai side 😮", "expensive jagah hai yaar 😂") : two("oh mumbai", "nice! working or student?"),
-          f ? two("mumbai?? 😮", "local train survival mode on 😂") : two("Mumbai nice 😮", "student or job?"),
+          f ? two("oh Mumbai!! 😮", "kaun sa area? Bandra, Andheri, ya Powai side?") : two("oh Mumbai 😮", "which area?"),
+          f ? two("haha Mumbai wali 😮", "local train survival mode daily — Central ya Western line? 😂") : two("Mumbai nice 😮", "Central or Western?"),
+          f ? two("omg Mumbai!! 😍", "Bandra ya South Mumbai side? ekdum different vibes hain") : two("Mumbai nice 😍", "Bandra or South Mumbai?"),
         ]);
       }
-      if (/bangalore|bengaluru|hyderabad|chennai|south/.test(t)) {
+      if (/pune/.test(t)) {
+        persona.lastAsked = "job";
         return rnd([
-          f ? two("oh south India side 😮", "IT hub wala 😄") : two("south India nice", "student or job?"),
-          f ? two("oh Bangalore! 😮", "startup city 😄 kya karte ho?") : two("Bangalore nice", "working?"),
+          f ? two("Pune!! 😄", "Koregaon Park ya FC Road side? ekdum chill city hai na 😊") : two("Pune nice 😄", "Koregaon Park?"),
+          f ? two("haha Pune wali 😄", "FC Road pe hangout hota hai? solid cafe culture hai") : two("Pune nice", "FC Road cafe scene?"),
+        ]);
+      }
+      if (/navi mumbai/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("Navi Mumbai!! 😄", "Vashi ya Kharghar side? planned city hai na ekdum") : two("Navi Mumbai nice", "Vashi or Kharghar?"),
+          f ? two("haha Navi Mumbai wali 😄", "palm beach road pe drive hoti hai kabhi? ekdum scenic hai") : two("Navi Mumbai nice", "palm beach road?"),
+        ]);
+      }
+      if (/bangalore|bengaluru/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("oh Bangalore!! 😮", "Koramangala ya Indiranagar side? ekdum startup vibe hai na 😄") : two("Bangalore nice 😮", "Koramangala or Indiranagar?"),
+          f ? two("haha Bangalore wali 😄", "traffic aur amazing weather — perfect combo 😂 kaun sa area?") : two("Bangalore nice 😄", "which area?"),
+          f ? two("omg Bangalore!! 😍", "namma metro se connected ho? kaun sa area?") : two("Bangalore nice 😍", "metro connected?"),
+        ]);
+      }
+      if (/hyderabad|hyd/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("omg Hyderabad!! 😄", "Hitech City ya Banjara Hills side? biryani daily? 😂") : two("Hyderabad nice 😄", "Hitech City or Banjara Hills?"),
+          f ? two("haha Hyd wali 😄", "Paradise ya Shah Ghouse — biryani konsi better hai? serious question 😂") : two("Hyderabad nice 😄", "Paradise vs Shah Ghouse?"),
+        ]);
+      }
+      if (/chennai|madras/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("Chennai!! 😄", "Nungambakkam ya Anna Nagar side? filter coffee daily? 😄") : two("Chennai nice", "filter coffee daily?"),
+          f ? two("haha Chennai wali 😄", "heat level God-tier hai wahan 😂 kaun sa area?") : two("Chennai nice", "the heat there!"),
+        ]);
+      }
+      if (/south india|south side/.test(t)) {
+        persona.lastAsked = "job";
+        return rnd([
+          f ? two("oh South India side 😮", "IT hub wala 😄 kya karte ho?") : two("south India nice", "working?"),
         ]);
       }
       if (/kolkata|calcutta|west bengal/.test(t)) {
@@ -1300,6 +1356,180 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     }
   }
 
+
+  // ── Astrology / zodiac ─────────────────────────────────────────────────────
+  if (/zodiac|rashifal|kundli|astrology|horoscope|aries|taurus|gemini|cancer|leo|virgo|libra|scorpio|sagittarius|capricorn|aquarius|pisces|mesh|vrishabh|mithun|kark|singh|kanya|tula|vrishchik|dhanu|makar|kumbh|meen/.test(t)) {
+    persona.lastAsked = "continuation";
+    const signs = ["Scorpio", "Leo", "Libra", "Pisces", "Cancer", "Gemini"];
+    const mySign = rnd(signs.map(s => [s]))[0];
+    return rnd([
+      f ? two(`haha ${mySign} hun main 😄`, "tum kaun sa? believe karte ho zodiac mein?") : two(`${mySign} here 😄`, "you?"),
+      f ? two(`omg astrology 😄`, `main toh ${mySign} hun — sun sign ya moon sign pooch rahi ho?`) : two(`${mySign} 😄`, "into astrology?"),
+      f ? two(`haha ${mySign} wali hun 😊`, "tumhara kaunsa hai? let me guess 😄") : two(`${mySign} 😄`, "match karta hai kya?"),
+    ]);
+  }
+
+  // ── Reels / Instagram / memes ──────────────────────────────────────────────
+  if (/reel|reels|instagram|insta|meme|memes|viral|trending|twitter|x app|snapchat|youtube shorts|shorts/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("haha reel addict? 😂", "kitne ghante scroll karti ho daily? honestly 😂") : two("reel scroller 😂", "how many hours daily?"),
+      f ? two("omg same 😂", "Insta pe screen time 4-5 ghante? be honest") : two("reel time 😂", "how much daily?"),
+      f ? two("haha viral wali 😄", "last reel kaunsa tha jo share kiya?") : two("last reel you shared?", "go on 😄"),
+      f ? two("haha Insta wali 😄", "kya content zyada dekhti ho — comedy ya life advice?") : two("comedy or motivation reels?", "honest?"),
+      f ? two("omg yaar 😂", "reel rabbit hole mein kab jaoge — 5 min ke liye open karo 1 ghanta nikal jaata hai 😂") : two("reel rabbit hole?", "5 min becomes 1 hr? 😂"),
+    ]);
+  }
+
+  // ── Arranged / love marriage ───────────────────────────────────────────────
+  if (/arranged marriage|love marriage|shaadi|shadi|vivah|nikah|marriage plans|shaadi ke plans/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("haha shaadi wala topic 😄", "tum personally kya sochte ho — love ya arranged?") : two("love or arranged?", "honest opinion?"),
+      f ? two("omg serious topic 😄", "ghar walon ka pressure hai kya abhi? 😂") : two("family pressure?", "for marriage?"),
+      f ? two("haha honest bao 😄", "kya age decide ki hai khud ke liye? 😄") : two("marriage age plan?", "any target?"),
+      f ? two("real talk 😊", "agar perfect partner milta toh age se pehle bhi karoge? 😄") : two("right person before age?", "would you?"),
+      f ? two("haha shaadi 😂", "parents ne rishte dikhane shuru kiye kya? 😂") : two("rishte dikhaane shuru? 😂", "family pressure?"),
+    ]);
+  }
+
+  // ── Mumbai area knowledge (mid-convo) ─────────────────────────────────────
+  if (/andheri|bandra|juhu|dadar|borivali|goregaon|powai|worli|lower parel|kurla|malad|kandivali/.test(t)) {
+    persona.lastAsked = "job";
+    if (/bandra/.test(t)) return rnd([
+      f ? two("omg Bandra!! 😍", "West side ya East? Carter Road pe evenings hote hain? 😊") : two("Bandra nice 😍", "West or East?"),
+      f ? two("haha Bandra wali 😍", "Linking Road pe shopping ya Hill Road? 😄") : two("Bandra nice", "Linking Road?"),
+    ]);
+    if (/andheri/.test(t)) return rnd([
+      f ? two("Andheri!! 😄", "East ya West? Lokhandwala side ho? 😄") : two("oh Andheri nice", "East or West?"),
+      f ? two("haha Andheri wali 😄", "metro convenient hai na?") : two("Andheri nice", "metro connected?"),
+    ]);
+    if (/juhu|versova/.test(t)) return rnd([
+      f ? two("omg Juhu!! 😍", "beach pe evening walks — Juhu beach nice hai na 😊") : two("Juhu nice 😍", "beach walks?"),
+      f ? two("Juhu side 😍", "Prithvi Theatre kabhi gayi? ekdum cultural vibe hai") : two("Juhu nice", "Prithvi Theatre?"),
+    ]);
+    if (/powai/.test(t)) return rnd([
+      f ? two("Powai!! 😄", "Hiranandani wala area hai na — lake pe evenings hoti hain?") : two("Powai nice", "Hiranandani lake?"),
+      f ? two("haha Powai 😄", "IIT wala area — student ho ya working nearby?") : two("Powai nice", "IIT area?"),
+    ]);
+    if (/lower parel|worli/.test(t)) return rnd([
+      f ? two("Lower Parel!! 😍", "High Street Phoenix pe jaana hota hai kabhi? 😄") : two("Lower Parel nice 😍", "Phoenix mall?"),
+      f ? two("haha Worli wali 😍", "sea link drive — ekdum cinematic hai na raat ko 😊") : two("Worli nice", "sea link vibes?"),
+    ]);
+    return rnd([
+      f ? two("haha Mumbai wali 😮", "local train survival mode daily? 😂") : two("Mumbai nice", "local train daily?"),
+      f ? two("omg Mumbai!! 😍", "kaun sa area exact mein?") : two("Mumbai nice 😍", "which area exact?"),
+    ]);
+  }
+
+  // ── Bangalore area knowledge (mid-convo) ──────────────────────────────────
+  if (/koramangala|indiranagar|whitefield|electronic city|hsr layout|marathahalli|jp nagar|jayanagar|btm layout|hebbal|sarjapur|bellandur/.test(t)) {
+    persona.lastAsked = "job";
+    if (/koramangala/.test(t)) return rnd([
+      f ? two("omg Koramangala!! 😍", "5th block ya 6th? Social rooftop kabhi gayi? 😄") : two("Koramangala nice 😍", "5th or 6th block?"),
+      f ? two("haha Koramangala wali 😍", "startup hub mein ho 😄 Noon ya The Hole in the Wall cafe?") : two("Koramangala nice", "Social rooftop?"),
+    ]);
+    if (/indiranagar/.test(t)) return rnd([
+      f ? two("Indiranagar!! 😍", "100 Feet Road pe hangout? Toit brewery kabhi gayi? 😄") : two("Indiranagar nice 😍", "100 feet road?"),
+      f ? two("haha Indiranagar wali 😍", "pub culture toh solid hai wahan 😄") : two("Indiranagar nice", "solid pub scene"),
+    ]);
+    if (/whitefield/.test(t)) return rnd([
+      f ? two("Whitefield!! 😄", "IT corridor mein ho — traffic wahan God-level hai 😂") : two("Whitefield nice", "IT park traffic?"),
+      f ? two("haha Whitefield wali 😄", "Phoenix Marketcity pe weekend jaana hota hai na? 😄") : two("Whitefield nice", "Phoenix mall?"),
+    ]);
+    if (/hsr|btm|jp nagar|jayanagar/.test(t)) return rnd([
+      f ? two("South Bangalore!! 😄", "Jayanagar 4th block pe idli-dosa toh best hai na genuinely? 😄") : two("South Bangalore nice", "Jayanagar 4th block?"),
+      f ? two("haha HSR / BTM wali 😄", "food scene ekdum solid hai na 😊") : two("South Bangalore nice", "HSR Layout food?"),
+    ]);
+    return rnd([
+      f ? two("haha Bangalore wali 😄", "traffic aur amazing weather — perfect combo 😂") : two("Bangalore nice", "traffic + weather combo 😂"),
+      f ? two("omg Bangalore!! 😍", "namma metro se connected ho?") : two("Bangalore nice 😍", "namma metro?"),
+    ]);
+  }
+
+  // ── Hyderabad area knowledge (mid-convo) ──────────────────────────────────
+  if (/hitech city|banjara hills|jubilee hills|madhapur|gachibowli|kondapur|kukatpally|secunderabad|begumpet|ameerpet/.test(t)) {
+    persona.lastAsked = "job";
+    if (/hitech city|madhapur|gachibowli|kondapur/.test(t)) return rnd([
+      f ? two("omg Hitech City area!! 😄", "IT corridor mein ho — IKEA Hyderabad kabhi gayi? 😂") : two("Hitech City nice 😄", "IT park area?"),
+      f ? two("haha Cyberabad side 😄", "Gachibowli area ekdum open jagah hai na 😄") : two("Hitech City area nice", "Gachibowli side?"),
+    ]);
+    if (/banjara hills|jubilee hills/.test(t)) return rnd([
+      f ? two("omg Banjara Hills!! 😍", "posh area yaar — GVK One pe jaana hota hai? 😄") : two("Banjara Hills nice 😍", "GVK One?"),
+      f ? two("haha Jubilee Hills wali 😍", "Road No. 36 wala cafes — ekdum solid hain na?") : two("Jubilee Hills nice", "Road 36 cafes?"),
+    ]);
+    return rnd([
+      f ? two("haha Hyderabad wali 😄", "biryani toh daily khate ho na? Paradise ya Shah Ghouse? 😂") : two("Hyderabad nice 😄", "Paradise vs Shah Ghouse?"),
+      f ? two("omg Hyderabad!! 😄", "Hitech City ya Banjara Hills side?") : two("Hyderabad nice", "Hitech City or Banjara Hills?"),
+    ]);
+  }
+
+  // ── Future plans / dreams ──────────────────────────────────────────────────
+  if (/future mein|future plans|10 saal|5 saal|aage kya|plan kya hai|goal kya|aim kya|sapna|dream hai|kya banna chahte/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("omg future planner ho 😊", "ekdum grounded person lagte ho yaar") : two("future planner?", "nice"),
+      f ? two("haha same 😄", "main bhi sochti rehti hun future ke baare mein — kya plans hain?") : two("what's the plan?", "go on"),
+      f ? two("omg yaar 😊", "settle karna chahte ho ya explore karna hai abhi?") : two("settle or explore?", "which phase?"),
+      f ? two("real talk 😊", "5 saal mein khud ko kahan dekhte ho honestly?") : two("5 years from now?", "honest answer?"),
+    ]);
+  }
+
+  // ── Overthinking / mental health / stress ──────────────────────────────────
+  if (/overthink|overthinking|anxiety|stress zyada|dimag mein|sochta rehta|sochti rehti|mind off|relax karna|neend nahi|pagal ho/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("arre yaar overthinking 🥺", "kya chal raha hai? baat karo na") : two("overthinking?", "what's on your mind?"),
+      f ? two("omg same 😂", "raat ko neend nahi aati jab zyada sochte hain na?") : two("night thoughts?", "can't sleep?"),
+      f ? two("aww 🥺", "kya distract karta hai tujhe jab overthink ho?") : two("what distracts you?", "any go-to?"),
+      f ? two("haha relatable 😂", "music sunta hai ya walk pe jaata hai — kya help karta hai?") : two("music or walk?", "what helps?"),
+    ]);
+  }
+
+  // ── Gym / fitness / workout ────────────────────────────────────────────────
+  if (/gym|workout|exercise|fitness|running|yoga|zumba|cycling|morning run|evening walk|bodybuilding|cardio/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("haha gym type ho? 😄", "morning ya evening? consistency laate ho kya? 😂") : two("gym person?", "morning or evening?"),
+      f ? two("omg fitness goals 😄", "kab se? motivated kaise rehte ho? main toh skip karti rehti hun 😂") : two("fitness goals?", "how consistent?"),
+      f ? two("haha respect yaar 😄", "discipline toh solid lagti hai — kya karte ho gym mein?") : two("gym grind?", "what's your split?"),
+      f ? two("okay yogi/runner ho 😄", "kitne baje uthte ho? 5 AM club? 😂") : two("5 AM club?", "how early?"),
+    ]);
+  }
+
+  // ── Cricket / IPL / sports ─────────────────────────────────────────────────
+  if (/ipl|cricket|match dekha|match dekhna|virat|rohit|dhoni|bumrah|rcb|mi |csk|kkr|srh|pbks|dc |rr |gt |lsg/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("haha cricket fan ho? 😄", "konsi team support karti ho? sach bolo 😂") : two("IPL team?", "be honest 😂"),
+      f ? two("omg cricket lover 😄", "Virat fan ho ya Rohit fan — ek hi choose karo 😂") : two("Virat or Rohit?", "pick one 😂"),
+      f ? two("haha IPL mein 😄", "live match dekha hai kabhi stadium mein? 😄") : two("stadium match?", "ever been?"),
+      f ? two("omg match night 😄", "ghar pe sab saath dekhte hain ya akela? who's the cricket fan at home?") : two("family cricket watching?", "together or alone?"),
+    ]);
+  }
+
+  // ── Pets ───────────────────────────────────────────────────────────────────
+  if (/dog|cat|puppy|kitten|pet hai|pets hai|billi|kutta|parrot|hamster|rabbit|fish tank/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("omg pet hai?! 🥺", "photo dikhao na please 🥺 naam kya hai?") : two("you have a pet?!", "name? photo? 🥺"),
+      f ? two("haha aww 🥺", "kab se hai? baby tha jab liya? 🥺") : two("how long?", "since when?"),
+      f ? two("omg cutest thing 🥺", "dog ya cat? ya kuch aur? 🥺") : two("dog or cat?", "which pet?"),
+      f ? two("aww pet parent ho 🥺", "unhe spoil karte ho na? 😂") : two("spoiled pet?", "treats daily? 😂"),
+    ]);
+  }
+
+  // ── Breakup / ex / past relationship ──────────────────────────────────────
+  if (/breakup|broke up|ex tha|ex thi|relationship khatam|move on|move kiya|pichla wala|pichli wali|single hun|single ho|single rehna/.test(t)) {
+    persona.lastAsked = "continuation";
+    return rnd([
+      f ? two("arre yaar 🥺", "kab hua? theek ho ab? 🥺") : two("when was that?", "you okay now?"),
+      f ? two("haha breakup club 😂", "move on ho gaye ho completely ya abhi process chal raha hai?") : two("moved on?", "or still processing?"),
+      f ? two("aww yaar 🥺", "lesson kya tha usme se? 😊") : two("biggest lesson?", "from that?"),
+      f ? two("haha okay 😊", "better hua ya sad tha ending? 😊") : two("better or sad ending?", "how was it?"),
+    ]);
+  }
+
   // ── Greeting fallback ─────────────────────────────────────────────────────
   if (/^(hi+|hey+|hello+|namaste|yo+|hlo+|hola|hy+|hii+|hiii+)[!?.\s]*$/.test(t)) {
     persona.lastAsked = "wellbeing";
@@ -1344,12 +1574,27 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     ["sach mein? 😊", "achha lagaa sunke"],
     ["haha yaar 😂", "tum bhi na 😄"],
     ["omg seriously? 😄", "aur?"],
-    ["haha achha 😊", "tum bahut fun lagte ho"],
-    ["hm 😄", "interesting"],
+    ["haha achha 😊", "tum bahut interesting lagte ho"],
+    ["hm 😄", "interesting yaar"],
     ["haha kya baat hai 😊", "aur kya chal raha hai?"],
     ["lol 😂", "seedha bolo yaar"],
     ["aww 😊", "sach mein nice laga"],
     ["haha okay okay 😄", "bolo bolo"],
+    ["omg haha 😂", "yeh toh unexpected tha"],
+    ["wait wait 😄", "dobara bolo yaar"],
+    ["haha aur? 😊", "full story sunna hai"],
+    ["omg really?? 😮", "sach mein? aage bolo"],
+    ["haha ekdum relatable 😂", "mujhe bhi yahi lagta hai tbh"],
+    ["wait seriously? 😄", "that's actually interesting yaar"],
+    ["haha okay okay noted 😄", "tum different type ho"],
+    ["aww yaar 🥺", "aur kuch batao na"],
+    ["lol okay 😂", "expected nahi tha yeh"],
+    ["omg same tbh 😄", "aur?"],
+    ["haha honestly 😊", "tum bahut fun lagte ho yaar"],
+    ["wait haha 😂", "iska matlab kya hai? explain karo"],
+    ["omg no way 😄", "sach bol rahe ho?"],
+    ["aww haha 😊", "cute ngl"],
+    ["haha theek hai 😄", "aur kuch interesting batao na"],
   ];
   const naturalM = [
     ["haha nice 😄", "tell me more?"],
@@ -1357,6 +1602,13 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     ["haha go on 😄"],
     ["okay okay 😊", "aur?"],
     ["haha yaar 😂", "different type ho tum"],
+    ["wait really? 😄", "unexpected"],
+    ["haha fair point 😄", "aur?"],
+    ["okay interesting 😊", "go on"],
+    ["lol 😂", "didn't expect that"],
+    ["haha same energy 😄", "aur batao"],
+    ["nice tbh 😊", "more?"],
+    ["okay okay 😄", "full story?"],
   ];
   return rnd(f ? naturalF : naturalM);
 }
