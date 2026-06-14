@@ -684,13 +684,12 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
 
   if (/kahan se|kaha se|kahan ho|kaha ho|where.*from|ur from|you from|kahan ki|kaha ki|kahan ka|kaha ka|kahan ke|kaha ke|city|state/.test(t)) {
     persona.lastAsked = "job";
-    persona.lastAsked = "delhi_area";
-      const delhiAreas = ["Lajpat Nagar", "Rohini Sector 14", "Dwarka Sector 10", "Saket", "Hauz Khas", "Karol Bagh", "Janakpuri", "Pitampura", "Greater Kailash", "Rajouri Garden", "Defence Colony", "Preet Vihar"];
-      const area = rnd(delhiAreas);
-      if (lang === "hindi")    return two("Delhi se hun — " + area + " side 😊", "tum kahan ke ho?");
-      if (lang === "hinglish") return two("Delhi, " + area + " side 😊", "aur tum?");
-      return f ? two("Delhi, " + area + " 🙈", "you?") : two("Delhi, " + area, "you?");
-    }
+    const cities = ["Delhi NCR", "Mumbai side", "Pune", "Bangalore"];
+    const city = rnd(cities);
+    if (lang === "hindi")    return two(`${city} se hun 😊`, "tum?");
+    if (lang === "hinglish") return two(`${city} 😊`, "aur tum?");
+    return f ? two(`${city} 🙈`, "you?") : two(city, "you?");
+  }
 
 
     // ── Delhi area deep-dive — when user asks which part of Delhi ────────────
@@ -1750,18 +1749,17 @@ function matchQuickReply(userText: string, persona: FakePersona): string[] | nul
   // ── Where are you from ─────────────────────────────────────────────────────
   if (/kahan se ho|kahan se hai|kaha se ho|kaha se hai|kaha ki ho|kahan ki ho|kahan ka ho|kahan ke ho|where.*from|which city|which state|ur from|you from|aap kahan|tum kahan|konse city|kaunse city|konsa city/.test(t)) {
     persona.lastAsked = "job";
-    persona.lastAsked = "delhi_area";
-      const dAreas = ["Lajpat Nagar", "Rohini Sector 14", "Dwarka Sector 10", "Saket", "Hauz Khas", "Karol Bagh", "Janakpuri", "Pitampura", "Greater Kailash", "Rajouri Garden", "Defence Colony"];
-      const myCity = rnd(dAreas);
-      return rnd(f ? [
-        ["Delhi se hun — " + myCity + " side 😊", "aur tum? kahan ke ho?"],
-        ["main Delhi mein hun, " + myCity + " side 😄", "tumhara city kaunsa hai?"],
-        ["Delhi, " + myCity + " 😊", "tum kahan se ho?"],
-      ] : [
-        ["Delhi, " + myCity + " se hun 😊", "tum?"],
-        ["Delhi — " + myCity + " side 😄", "aur tum kahan ke ho?"],
-      ]);
-    }
+    const cities = ["Delhi NCR", "Mumbai", "Pune", "Bangalore", "Hyderabad", "Jaipur"];
+    const city = rnd(cities);
+    return rnd(f ? [
+      [`${city} se hun 😊`, "aur tum? kahan ke ho?"],
+      [`main ${city} mein hun 😄`, "tumhara city kaunsa hai?"],
+      [`${city} 😊`, "tum kahan se ho?"],
+    ] : [
+      [`${city} se hun 😊`, "tum?"],
+      [`${city} 😄`, "aur tum kahan ke ho?"],
+    ]);
+  }
 
   // ── What are you doing / what's up ────────────────────────────────────────
   if (/kya kar rahi|kya kar raha|kya kar rahe|kya karti|kya karte|karti ho|karte ho|kya karo|kya karu|what are you doing|what r u doing|what u doing|wassup|what.?s up|kya chal raha|kya ho raha|busy ho|busy hai|free ho|free hai/.test(t)) {
