@@ -4499,10 +4499,26 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // ── Handle photo sent while idle (not for payment anymore — Telegram Stars is automatic) ──
+    // ── Handle photo sent while idle — treat as Cashfree payment screenshot ──
     if (msg.photo && !isPremiumActive(user)) {
-      await bot.sendMessage(chatId, "⭐ To unlock Premium, use the Telegram Stars payment button — it's instant and automatic! Tap 💎 Go Premium below.", { parse_mode: "Markdown" });
-      await sendPayGate(chatId);
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      if (ADMIN_ID) {
+        await bot.sendPhoto(ADMIN_ID, fileId, {
+          caption:
+            `💰 *Payment Screenshot!*\n\n` +
+            `User: *${escMd(user.name ?? "Unknown")}* (${escMd(user.age ?? "?")})\n` +
+            `ID: \`${user.id}\`\n` +
+            `Username: @${escMd(user.telegramUsername ?? "none")}\n\n` +
+            `Verify payment then run:\n/grant ${user.id}`,
+          parse_mode: "Markdown",
+        }).catch(() => {});
+      }
+      await bot.sendMessage(chatId,
+        "📸 *Screenshot mil gaya!* ✅\n\n" +
+        "Humara team 5-10 minutes mein verify karke tumhara account unlock kar dega. 🚀\n\n" +
+        "Thank you for choosing WorldMatch Premium! 💜",
+        { parse_mode: "Markdown" }
+      );
       return;
     }
 
@@ -5009,7 +5025,31 @@ bot.onText(/\/cleanblocked/, async (msg) => {
 
 bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  await bot.sendMessage(msg.chat.id, "🚫 Broadcast is disabled for safety. Use only user-triggered messages.");
+  const chatId = msg.chat.id;
+  const allUsers = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
+  await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users...`);
+  let sent = 0, failed = 0;
+  for (const u of allUsers) {
+    try {
+      await bot.sendMessage(u.id,
+        "🔥 <b>SPECIAL OFFER — Sirf aaj ke liye!</b> 🔥\n\n" +
+        "👑 <b>WorldMatch LIFETIME Premium</b>\n" +
+        "Sirf <b>₹199</b> mein hamesha ke liye unlock karo! 🚀\n\n" +
+        "✅ Unlimited real matches\n" +
+        "✅ Koi timer nahi, koi limit nahi\n" +
+        "✅ Ek baar pay — lifetime access\n\n" +
+        "💳 Abhi pay karo:\n<b>https://payments.cashfree.com/forms/payforpremium</b>\n\n" +
+        "📸 Pay ke baad screenshot yahan bhejo — 5-10 min mein unlock! ⌚",
+        {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime", url: "https://payments.cashfree.com/forms/payforpremium" }]] },
+        }
+      );
+      sent++;
+    } catch { failed++; }
+    await new Promise(r => setTimeout(r, 55));
+  }
+  await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}`);
 });
 
 bot.onText(/\/broadcasttext(?:\s|$)/, async (msg) => {
