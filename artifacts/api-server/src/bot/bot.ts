@@ -55,7 +55,7 @@ function isProtected(userId: number): boolean {
   return PROTECTED_IDS.has(userId);
 }
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
+const FREE_CHAT_DURATION_MS = 90 * 1000; // 90 second free trial
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
@@ -1633,10 +1633,10 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     (prefix ? `${prefix}\n\n` : ``) + msg +
     `\n\n` +
     `<b>👇 Apna plan chuno:</b>\n\n` +
-    `⚡ <b>2 Weeks</b> — ${PLANS.week2.stars} Stars\n` +
-    `💎 <b>1 Month</b> — ${PLANS.month.stars} Stars <i>(most popular)</i>\n` +
-    `👑 <b>Lifetime</b> — ${PLANS.yearly.stars} Stars <i>(best value 🔥)</i>\n\n` +
-    `<i>⭐ Telegram Stars se pay karo — instant automatic unlock!</i>`;
+    `⚡ <b>2 Weeks</b> — ${PLANS.week2.stars} Stars <i>(≈ ₹130)</i>\n` +
+    `💎 <b>1 Month</b> — ${PLANS.month.stars} Stars ≈ ₹220 <i>(most popular)</i>\n` +
+    `👑 <b>Lifetime</b> — ${PLANS.yearly.stars} Stars ≈ ₹870 <i>(best value 🔥)</i>\n\n` +
+    `<i>⭐ Telegram Stars se pay karo — instant unlock! Ek baar pay karo, uske baad sirf real log.</i>`;
 
   // Single message — inline plan buttons + main reply keyboard reset (no spam)
   const replyMarkup = {
@@ -1652,16 +1652,16 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), { reply_markup: replyMarkup });
   }
   // Reset the reply keyboard to main menu in a silent way (remove "🛑 Stop Chat" button)
-  await bot.sendMessage(chatId, "👇 Ya tap karo:", {
-    reply_markup: {
-      keyboard: [
-        [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
-        [{ text: "✏️ Edit Profile" }, { text: "💎 Go Premium" }],
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: true,
-    },
-  }).catch(() => {});
+  // await bot.sendMessage(chatId, "👇 Ya tap karo:", {
+  // reply_markup: {
+  // keyboard: [
+  // [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
+  // [{ text: "✏️ Edit Profile" }, { text: "💎 Go Premium" }],
+  // ],
+  // resize_keyboard: true,
+  // one_time_keyboard: true,
+  // },
+  // }).catch(() => {});
   logger.info({ chatId, name }, "paygate sent — 3 plan tiers (single message)");
 }
 
@@ -1722,7 +1722,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
   });
 
   await db.update(usersTable)
-    .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, chatCount: 1, updatedAt: new Date() })
+    .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, updatedAt: new Date() })
     .where(eq(usersTable.id, userId));
 
 await bot.sendMessage(
@@ -1753,15 +1753,15 @@ await bot.sendMessage(
       // Only fire pay gate if user is STILL in the fake chat — stopChat already handles the case where they left manually
       if (u?.state === "chatting" && !u.hasPaid) {
         await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .set({ state: "idle", chattingWith: null, chatCount: 1, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
         // Show "typing..." for 2s then a teaser — creates curiosity gap before paygate
         await bot.sendChatAction(chatId, "typing").catch(() => {});
         await new Promise(r => setTimeout(r, 2000));
         const teasers = [
-          `${persona?.name ?? ""} ne chat chod di 👋\n\nAur real matches ke liye 💎 *Premium* lo!`,
-          `${persona?.name ?? ""} offline ho gayi 😔\n\nReal matches ke liye Premium activate karo 💕`,
-          `${persona?.name ?? ""} chali gayi... 🥺\n\nReal log se baat ke liye Premium lo 💎`,
+          `⏰ <b>${persona?.name ?? "Woh"} abhi bhi online hai...</b> woh tumhara wait kar rahi hai 🥺`,
+          `💬 <b>${persona?.name ?? "Woh"} ne message kiya:</b> "kya tum wapas aoge?" 🥺`,
+          `📵 <b>${persona?.name ?? "Woh"} ne typing start ki...</b> — kya bataya woh?`,
         ];
         const teaser = teasers[Math.floor(Math.random() * teasers.length)];
         await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
