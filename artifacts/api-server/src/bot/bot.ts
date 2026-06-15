@@ -44,6 +44,7 @@ function isPremiumActive(user: { hasPaid: boolean; premiumExpiresAt?: Date | nul
 }
 
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
+let broadcastUsed = false; // one-time broadcast lock
 // Extra protected accounts (admin's alts, co-admins, test accounts).
 // These users are NEVER auto-deactivated, flood-restricted, NSFW-restricted,
 // or cleaned up by /cleanblocked.
@@ -5026,8 +5027,13 @@ bot.onText(/\/cleanblocked/, async (msg) => {
 bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const chatId = msg.chat.id;
+  if (broadcastUsed) {
+    await bot.sendMessage(chatId, "🚫 Broadcast already sent once. Restart the bot to enable again (but avoid it — Telegram spam risk).");
+    return;
+  }
+  broadcastUsed = true; // lock immediately before sending
   const allUsers = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
-  await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users...`);
+  await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users... (one-time only)`);
   let sent = 0, failed = 0;
   for (const u of allUsers) {
     try {
@@ -5049,7 +5055,7 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
     } catch { failed++; }
     await new Promise(r => setTimeout(r, 55));
   }
-  await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}`);
+  await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}\n\n🔒 Broadcast is now DISABLED for this session.`);
 });
 
 bot.onText(/\/broadcasttext(?:\s|$)/, async (msg) => {
