@@ -1614,81 +1614,43 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
 }
 const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha"];
 
-// ── Pay gate ─────────────────────────────────────────────────────────────────
+// ── Pay gate (Cashfree ₹199 Lifetime) ──────────────────────────────────────
 
-async function sendPayGate(chatId: number, prefix?: string, matchName?: string) {
+const CASHFREE_LINK = "https://payments.cashfree.com/forms/payforpremium";
+
+async function sendPayGate(chatId: number, _prefix?: string, matchName?: string) {
   const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
-  const teaser = [
-    `⏰ <b>Tumhara free time khatam ho gaya...</b>\n\n` +
-    `<b>${name}</b> abhi bhi yahan hai 🥺 — apna plan chuno aur turant connect karo!`,
-
-    `💔 <b>${name} ne poochha — "woh wapas aayenge?"</b>\n\n` +
-    `Ek plan lo — phir koi timer nahi, koi rukawat nahi. Woh wait kar rahi hai 🥺`,
-
-    `😶 <b>Itni jaldi?</b>\n\n` +
-    `<b>${name}</b> abhi bhi online hai. Apna plan chuno — instant unlock! ⭐`,
+  const teasers = [
+    `⏰ <b>${name} abhi bhi online hai...</b> woh tumhara wait kar rahi hai 🥺`,
+    `💬 <b>${name} ne message kiya:</b> "kya tum wapas aoge?" 🥺`,
+    `📵 <b>${name} typing kar rahi hai...</b> — ruko mat, connect karo! 💪`,
   ];
-  const msg = teaser[Math.floor(Math.random() * teaser.length)];
+  const teaser = teasers[Math.floor(Math.random() * teasers.length)];
   const fullText =
-    (prefix ? `${prefix}\n\n` : ``) + msg +
+    teaser +
     `\n\n` +
-    `<b>👇 Apna plan chuno:</b>\n\n` +
-    `⚡ <b>2 Weeks</b> — ${PLANS.week2.stars} Stars <i>(≈ ₹130)</i>\n` +
-    `💎 <b>1 Month</b> — ${PLANS.month.stars} Stars ≈ ₹220 <i>(most popular)</i>\n` +
-    `👑 <b>Lifetime</b> — ${PLANS.yearly.stars} Stars ≈ ₹870 <i>(best value 🔥)</i>\n\n` +
-    `<i>⭐ Telegram Stars se pay karo — instant unlock! Ek baar pay karo, uske baad sirf real log.</i>`;
-
-  // Single message — inline plan buttons + main reply keyboard reset (no spam)
-  const replyMarkup = {
-    inline_keyboard: [
-      [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-      [{ text: `💎 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-      [{ text: `👑 Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-    ],
-  };
+    `👑 <b>LIFETIME PREMIUM — sirf ₹199</b> 🔥\n` +
+    `✅ Unlimited real matches\n` +
+    `✅ Koi timer nahi, koi rukawat nahi\n` +
+    `✅ Lifetime access — ek baar pay, hamesha ke liye\n\n` +
+    `<b>Step 1:</b> 💳 Pay karo ₹199 yahaan:\n<b>${CASHFREE_LINK}</b>\n\n` +
+    `<b>Step 2:</b> 📸 Payment ka screenshot yahan bhejo\n` +
+    `<b>Step 3:</b> ⌚ 5-10 min mein tumhara account unlock ho jayega! 🚀`;
   try {
-    await bot.sendMessage(chatId, fullText, { parse_mode: "HTML", reply_markup: replyMarkup });
+    await bot.sendMessage(chatId, fullText, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime Access", url: CASHFREE_LINK }]],
+      },
+    });
   } catch {
-    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), { reply_markup: replyMarkup });
+    await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), {
+      reply_markup: { inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime Access", url: CASHFREE_LINK }]] },
+    });
   }
-  // Reset the reply keyboard to main menu in a silent way (remove "🛑 Stop Chat" button)
-  // await bot.sendMessage(chatId, "👇 Ya tap karo:", {
-  // reply_markup: {
-  // keyboard: [
-  // [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
-  // [{ text: "✏️ Edit Profile" }, { text: "💎 Go Premium" }],
-  // ],
-  // resize_keyboard: true,
-  // one_time_keyboard: true,
-  // },
-  // }).catch(() => {});
-  logger.info({ chatId, name }, "paygate sent — 3 plan tiers (single message)");
+  logger.info({ chatId, name }, "paygate sent — Cashfree ₹199 lifetime");
 }
 
-/** Send a Telegram Stars invoice for the chosen plan (direct API call for reliability) */
-async function sendPlanInvoice(chatId: number, planKey: PlanKey) {
-  const plan = PLANS[planKey];
-  const url = `https://api.telegram.org/bot${TOKEN}/sendInvoice`;
-  const body = {
-    chat_id: chatId,
-    title: `${plan.emoji} Premium — ${plan.label}`,
-    description: `Unlock unlimited real matches for ${plan.label}. Instant automatic activation — no screenshots needed. ${plan.stars} Telegram Stars.`,
-    payload: `premium_${planKey}`,
-    provider_token: "",   // empty string = Telegram Stars (XTR)
-    currency: "XTR",
-    prices: [{ label: `Premium ${plan.label}`, amount: plan.stars }],  // array, not stringified
-  };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const json = await res.json() as { ok: boolean; description?: string; result?: unknown };
-  if (!json.ok) {
-    throw new Error(`Telegram sendInvoice failed: ${json.description ?? JSON.stringify(json)}`);
-  }
-  logger.info({ chatId, planKey, stars: plan.stars }, "Stars invoice sent");
-}
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
 
@@ -4048,19 +4010,10 @@ bot.on('callback_query', async (query) => {
 
   // ── Plan selection → send Telegram Stars invoice ────────────────────────────
   if (query.data === 'plan_week2' || query.data === 'plan_month' || query.data === 'plan_yearly') {
-    const planKey = query.data.replace('plan_', '') as PlanKey;
-    const plan = PLANS[planKey];
-    // Always answer the callback first (can only be called once per query)
-    await bot.answerCallbackQuery(query.id, { text: `${plan.emoji} Opening Stars payment...` }).catch(() => {});
-    try {
-      await sendPlanInvoice(chatId, planKey);
-    } catch (err: any) {
-      logger.error({ err, planKey, chatId }, 'sendPlanInvoice failed');
-      await bot.sendMessage(chatId,
-        `❌ Payment could not be opened.\n\nError: ${err?.message ?? String(err)}\n\nPlease try again or contact @WorldMatchSupport`
-      ).catch(() => {});
-    }
+    await bot.answerCallbackQuery(query.id, { text: "💳 Pay karo ₹199 aur screenshot bhejo!" }).catch(() => {});
+    await sendPayGate(chatId);
     return;
+  }
   }
 
   // Unknown callback — ignore silently
@@ -4551,11 +4504,29 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // ── Handle photo sent while idle (not for payment anymore — Telegram Stars is automatic) ──
+    // ── Handle photo sent while idle — treat as payment screenshot ──
     if (msg.photo && !isPremiumActive(user)) {
-      await bot.sendMessage(chatId, "⭐ To unlock Premium, use the Telegram Stars payment button — it's instant and automatic! Tap 💎 Go Premium below.", { parse_mode: "Markdown" });
-      await sendPayGate(chatId);
+      // Forward screenshot to admin
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      if (ADMIN_ID) {
+        await bot.sendPhoto(ADMIN_ID, fileId, {
+          caption:
+            `💰 *Payment Screenshot Received!*\n\n` +
+            `User: *${escMd(user.name ?? "Unknown")}* (${escMd(user.age ?? "?")})\n` +
+            `ID: \`${user.id}\`\n` +
+            `Username: @${escMd(user.telegramUsername ?? "none")}\n\n` +
+            `Verify payment ✅ and run:\n/grant ${user.id}`,
+          parse_mode: "Markdown",
+        }).catch(() => {});
+      }
+      await bot.sendMessage(chatId,
+        "📸 *Screenshot mil gaya!* ✅\n\n" +
+        "Humara team 5-10 minutes mein verify karke tumhara account unlock kar dega. 🚀\n\n" +
+        "Thank you for choosing WorldMatch Premium! 💜",
+        { parse_mode: "Markdown" }
+      );
       return;
+    }
     }
 
     // ── Menu buttons ────────────────────────────────────────────────────
@@ -4582,16 +4553,7 @@ bot.on("message", async (msg) => {
         const expStr = user.premiumExpiresAt
           ? `\n📅 Valid until: *${user.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
           : "";
-        await bot.sendMessage(chatId, `✅ You're a *Premium* member! 💎${expStr}\n\nRenew anytime to extend:`, {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: `⚡ Extend 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-              [{ text: `💎 Extend 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-              [{ text: `👑 Extend Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-            ],
-          },
-        });
+        await bot.sendMessage(chatId, "✅ Tum already *Premium* member ho! 📎\n\nKisi cheez mein madad chahiye? @WorldMatchSupport pe contact karo.", { parse_mode: "Markdown" });
         return;
       }
       await sendPayGate(chatId);
@@ -4772,69 +4734,6 @@ bot.onText(/\/block/, async (msg) => {
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
 
 // ── Telegram Stars: approve all incoming pre-checkout queries ─────────────────
-bot.on("pre_checkout_query", async (query) => {
-  try {
-    await bot.answerPreCheckoutQuery(query.id, true);
-  } catch (err) {
-    logger.error({ err, queryId: query.id }, "pre_checkout_query answer failed");
-  }
-});
-
-// ── Telegram Stars: handle successful payment → auto-grant Premium ────────────
-bot.on("successful_payment", async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from!.id;
-  const payment = msg.successful_payment!;
-  try {
-    const user = await getUser(userId);
-    if (!user) {
-      logger.warn({ userId }, "successful_payment: user not found");
-      return;
-    }
-
-    // Determine which plan was purchased
-    const planKey = getPlanByStars(payment.total_amount);
-    const plan = planKey ? PLANS[planKey] : null;
-    const days = plan?.days ?? 30; // default to 30 days if unrecognised amount
-    const expiresAt = getPremiumExpiry(days);
-    const planLabel = plan ? `${plan.emoji} ${plan.label}` : `${payment.total_amount} Stars`;
-
-    // If already premium, extend the expiry from whichever is later (now or current expiry)
-    let newExpiry = expiresAt;
-    if (user.hasPaid && user.premiumExpiresAt && user.premiumExpiresAt > new Date()) {
-      // Extend from current expiry
-      const extended = new Date(user.premiumExpiresAt);
-      extended.setDate(extended.getDate() + days);
-      newExpiry = extended;
-    }
-
-    await upsertUser(userId, { hasPaid: true, premiumExpiresAt: newExpiry });
-    const fresh = await getUser(userId);
-    const expiryStr = newExpiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
-
-    logger.info({ userId, stars: payment.total_amount, planKey, expiresAt: newExpiry }, "Telegram Stars payment — Premium granted");
-
-    if (ADMIN_ID) {
-      await bot.sendMessage(
-        ADMIN_ID,
-        `⭐ *Stars Payment Received!*\n\nUser: *${escMd(user.name)}* (${escMd(user.age)})\nID: \`${userId}\`\nUsername: @${escMd(user.telegramUsername ?? "none")}\nPlan: ${planLabel}\nStars: ${payment.total_amount}\nExpires: ${expiryStr}\n\nPremium auto-granted ✅`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-    }
-
-    await bot.sendMessage(
-      chatId,
-      `🎉 *Payment successful!* ⭐\n\nWelcome to Premium, *${escMd(user.name)}*!\n\n` +
-      `📦 Plan: *${planLabel}*\n` +
-      `📅 Valid until: *${expiryStr}*\n\n` +
-      `Tumhara account turant unlock ho gaya 💎\nAb real matches ke saath baat karo!`,
-      { parse_mode: "Markdown" }
-    );
-    if (fresh) await sendMain(chatId, fresh);
-  } catch (err) {
-    logger.error({ err, userId }, "successful_payment handler error");
-  }
-});
 
 bot.onText(/\/premium/, async (msg) => {
   const u = await getUser(msg.from!.id);
@@ -4842,16 +4741,7 @@ bot.onText(/\/premium/, async (msg) => {
     const expStr = u.premiumExpiresAt
       ? `\n📅 Valid until: *${u.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
       : "";
-    await bot.sendMessage(msg.chat.id, `✅ You're a *Premium* member! Enjoy unlimited matches 💎${expStr}\n\nTap below to renew or upgrade anytime ⬇️`, {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: `⚡ Extend 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-          [{ text: `💎 Extend 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-          [{ text: `👑 Extend Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-        ],
-      },
-    });
+      await bot.sendMessage(msg.chat.id, "✅ Tum already *Premium* member ho! 👑\n\nKisi cheez mein help chahiye? @WorldMatchSupport se contact karo.", { parse_mode: "Markdown" });
     return;
   }
   await sendPayGate(msg.chat.id);
@@ -4895,14 +4785,14 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
       fakePersonaMap.delete(targetId);
     }
 
-    // Grant premium with 30-day expiry; if mid-fake-chat reset to idle
-    const grantExpiry = getPremiumExpiry(30);
+    // Grant lifetime premium (no expiry); if mid-fake-chat reset to idle
+    const grantExpiry = getPremiumExpiry(36500);
     const grantExpStr = grantExpiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
     const grantUpdate: Partial<typeof usersTable.$inferInsert> = { hasPaid: true, premiumExpiresAt: grantExpiry, updatedAt: new Date() };
     if (wasInFakeChat) { grantUpdate.state = "idle"; grantUpdate.chattingWith = null; }
     await db.update(usersTable).set(grantUpdate).where(eq(usersTable.id, targetId));
 
-    await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})\n📅 Expires: ${grantExpStr}`);
+    await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})\n📅 Access: Lifetime 👑`);
 
     const updated = await getUser(targetId);
     if (!updated) return;
@@ -4910,7 +4800,7 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
     if (updated.isProfileComplete) {
       // Profile done — one message with menu buttons
       await sendMain(targetId, updated,
-        `🎉 Your premium is now active!\n\nThank you for your support 💕\nTap 💘 Find Match to connect with real people worldwide!`
+        `🎉 👑 LIFETIME Premium active ho gaya! 🔥\n\nThank you! 💰 ₹199 ka best decision tha! 💕\nTap 💘 Find Match to connect with real people worldwide!`
       ).catch(() => {});
     } else {
       // Profile incomplete — guide them to finish setup first
@@ -5124,7 +5014,31 @@ bot.onText(/\/cleanblocked/, async (msg) => {
 
 bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  await bot.sendMessage(msg.chat.id, "🚫 Broadcast is disabled for safety. Use only user-triggered messages.");
+  const chatId = msg.chat.id;
+  const allUsers = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
+  await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users...`);
+  let sent = 0, failed = 0;
+  for (const u of allUsers) {
+    try {
+      await bot.sendMessage(u.id,
+        "🔥 <b>SPECIAL OFFER — Sirf aaj ke liye!</b> 🔥\n\n" +
+        "👑 <b>WorldMatch LIFETIME Premium</b>\n" +
+        "Sirf <b>₹199</b> mein hamesha ke liye unlock karo! 🚀\n\n" +
+        "✅ Unlimited real matches\n" +
+        "✅ Koi timer nahi, koi limit nahi\n" +
+        "✅ Ek baar pay — lifetime access\n\n" +
+        "💳 Abhi pay karo:\n<b>https://payments.cashfree.com/forms/payforpremium</b>\n\n" +
+        "📸 Pay karne ke baad screenshot yahan bhejo — 5-10 min mein unlock! ⌚",
+        {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime Access", url: "https://payments.cashfree.com/forms/payforpremium" }]] },
+        }
+      );
+      sent++;
+    } catch { failed++; }
+    await new Promise(r => setTimeout(r, 50)); // rate limit safe
+  }
+  await bot.sendMessage(chatId, `✅ Broadcast done! Sent: ${sent} | Failed: ${failed}`);
 });
 
 bot.onText(/\/broadcasttext(?:\s|$)/, async (msg) => {
