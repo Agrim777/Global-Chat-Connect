@@ -1625,27 +1625,20 @@ const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha
       `📵 <b>${name} typing kar rahi hai...</b> — ruko mat, connect karo! 💪`,
     ];
     const teaser = teasers[Math.floor(Math.random() * teasers.length)];
-    const fullText =
-      teaser +
-      `\n\n` +
-      `👑 <b>LIFETIME PREMIUM — sirf ₹199</b> 🔥\n` +
+    const fullText = teaser + `\n\n` +
+      `⭐ <b>Unlock Premium with Telegram Stars</b>\n` +
       `✅ Unlimited real matches\n` +
-      `✅ Koi timer nahi, koi rukawat nahi\n` +
-      `✅ Lifetime access — ek baar pay, hamesha ke liye\n\n` +
-      `<b>Step 1:</b> 💳 Pay karo ₹199 yahaan:\n<b>https://payments.cashfree.com/forms/payforpremium</b>\n\n` +
-      `<b>Step 2:</b> 📸 Payment ka screenshot yahan bhejo\n` +
-      `<b>Step 3:</b> ⌚ 5-10 min mein tumhara account unlock ho jayega! 🚀`;
-    try {
-      await bot.sendMessage(chatId, fullText, {
-        parse_mode: "HTML",
-        reply_markup: { inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime Access", url: "https://payments.cashfree.com/forms/payforpremium" }]] },
-      });
-    } catch {
-      await bot.sendMessage(chatId, fullText.replace(/<[^>]+>/g, ""), {
-        reply_markup: { inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime Access", url: "https://payments.cashfree.com/forms/payforpremium" }]] },
-      });
-    }
-    logger.info({ chatId, name }, "paygate sent — Cashfree Rs199 lifetime");
+      `✅ Koi timer nahi, koi rukawat nahi\n\n` +
+      `👇 Apna plan choose karo:`;
+    await bot.sendMessage(chatId, fullText, {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [
+        [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} ⭐`, callback_data: "plan_week2" }],
+        [{ text: `💎 1 Month — ${PLANS.month.stars} ⭐`, callback_data: "plan_month" }],
+        [{ text: `👑 Lifetime — ${PLANS.yearly.stars} ⭐`, callback_data: "plan_yearly" }],
+      ]},
+    });
+    logger.info({ chatId, name }, "paygate sent — Telegram Stars");
   }
 
   
@@ -4006,10 +3999,18 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // ── Plan button tapped — show Cashfree paygate ──────────────────────────────
+  // ── Plan button tapped — send Telegram Stars invoice ──────────────────────
     if (query.data === 'plan_week2' || query.data === 'plan_month' || query.data === 'plan_yearly') {
-      await bot.answerCallbackQuery(query.id, { text: "💳 Pay ₹199 aur screenshot bhejo!" }).catch(() => {});
-      await sendPayGate(chatId);
+      const key = query.data.replace('plan_', '') as PlanKey;
+      const plan = PLANS[key];
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await (bot as any).sendInvoice(
+        chatId,
+        `${plan.emoji} ${plan.label} Premium`,
+        `WorldMatch Premium unlock karo — ${plan.label} access. Stars se instant payment!`,
+        key, "", "XTR",
+        [{ label: plan.label, amount: plan.stars }]
+      );
       return;
     }
   // Unknown callback — ignore silently
@@ -5027,28 +5028,22 @@ bot.onText(/\/cleanblocked/, async (msg) => {
 bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const chatId = msg.chat.id;
-  if (broadcastUsed) {
-    await bot.sendMessage(chatId, "🚫 Broadcast already sent once. Restart the bot to enable again (but avoid it — Telegram spam risk).");
-    return;
-  }
-  broadcastUsed = true; // lock immediately before sending
   const allUsers = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
   await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users... (one-time only)`);
   let sent = 0, failed = 0;
   for (const u of allUsers) {
     try {
       await bot.sendMessage(u.id,
-        "🔥 <b>SPECIAL OFFER — Sirf aaj ke liye!</b> 🔥\n\n" +
-        "👑 <b>WorldMatch LIFETIME Premium</b>\n" +
-        "Sirf <b>₹199</b> mein hamesha ke liye unlock karo! 🚀\n\n" +
+        "⭐ <b>WorldMatch Premium — Telegram Stars se unlock karo!</b>\n\n" +
         "✅ Unlimited real matches\n" +
-        "✅ Koi timer nahi, koi limit nahi\n" +
-        "✅ Ek baar pay — lifetime access\n\n" +
-        "💳 Abhi pay karo:\n<b>https://payments.cashfree.com/forms/payforpremium</b>\n\n" +
-        "📸 Pay ke baad screenshot yahan bhejo — 5-10 min mein unlock! ⌚",
+        "✅ Koi timer nahi — lifetime access available\n\n" +
+        `⚡ 2 Weeks — ${PLANS.week2.stars} Stars\n` +
+        `💎 1 Month — ${PLANS.month.stars} Stars\n` +
+        `👑 Lifetime — ${PLANS.yearly.stars} Stars\n\n` +
+        "👇 Bot mein /premium tap karo aur plan choose karo — instant unlock!",
         {
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: [[{ text: "💳 Pay ₹199 — Lifetime", url: "https://payments.cashfree.com/forms/payforpremium" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "⭐ Choose Plan — Premium", callback_data: "plan_yearly" }]] },
         }
       );
       sent++;
