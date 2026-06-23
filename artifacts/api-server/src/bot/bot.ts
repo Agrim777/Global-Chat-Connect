@@ -4022,19 +4022,32 @@ bot.on('callback_query', async (query) => {
     await bot.editMessageText('📣 Sending deals broadcast...', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
 
     const DEALS_MSG =
-      "🛍️ *WorldMatch ke saath ek khaas update!* 👋\n\n" +
-      "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
-      "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
-      "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
-      "📢 *Abhi join karo:* @dealsatyourdoo\n\n" +
-      "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
+      "Hey! 👋\n\n" +
+      "Ek useful cheez share karna tha — ek channel hai @dealsatyourdoo jahan daily discount deals post hoti hain.\n\n" +
+      "Electronics, fashion, daily essentials — kaafi baar 50-70% tak ka discount milta hai. Agar deals dhundhte ho toh worth checking out hai.\n\n" +
+      "Join karo: @dealsatyourdoo\n\n" +
+      "Bas itna hi, enjoy chatting! 😊";
 
     const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
     let sent = 0, failed = 0;
     for (const u of allUsers) {
-      try { await bot.sendMessage(u.id, DEALS_MSG, { parse_mode: 'Markdown' }); sent++; }
-      catch { failed++; }
-      await new Promise(r => setTimeout(r, 60));
+      let retries = 3;
+      while (retries-- > 0) {
+        try {
+          await bot.sendMessage(u.id, DEALS_MSG);
+          sent++;
+          break;
+        } catch (e: any) {
+          const retryAfter = e?.response?.body?.parameters?.retry_after;
+          if (retryAfter) {
+            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+          } else {
+            failed++;
+            break;
+          }
+        }
+      }
+      await new Promise(r => setTimeout(r, 50));
     }
     await bot.sendMessage(chatId,
       `✅ *Deals broadcast done!*\n📤 Sent: ${sent} | ❌ Failed: ${failed}`,
@@ -5198,12 +5211,11 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
 bot.onText(/\/deals/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const DEALS_MSG =
-    "🛍️ *WorldMatch ke saath ek khaas update!* 👋\n\n" +
-    "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
-    "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
-    "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
-    "📢 *Abhi join karo:* @dealsatyourdoo\n\n" +
-    "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
+    "Hey! 👋\n\n" +
+    "Ek useful cheez share karna tha — ek channel hai @dealsatyourdoo jahan daily discount deals post hoti hain.\n\n" +
+    "Electronics, fashion, daily essentials — kaafi baar 50-70% tak ka discount milta hai. Agar deals dhundhte ho toh worth checking out hai.\n\n" +
+    "Join karo: @dealsatyourdoo\n\n" +
+    "Bas itna hi, enjoy chatting! 😊";
 
   const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
   await bot.sendMessage(msg.chat.id,
@@ -5445,12 +5457,11 @@ logger.info("Telegram bot polling started");
   await new Promise(r => setTimeout(r, 15_000));
 
   const DEALS_MSG =
-    "🛍️ *WorldMatch ke saath ek khaas update!* 👋\n\n" +
-    "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
-    "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
-    "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
-    "📢 *Abhi join karo:* @dealsatyourdoo\n\n" +
-    "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
+    "Hey! 👋\n\n" +
+    "Ek useful cheez share karna tha — ek channel hai @dealsatyourdoo jahan daily discount deals post hoti hain.\n\n" +
+    "Electronics, fashion, daily essentials — kaafi baar 50-70% tak ka discount milta hai. Agar deals dhundhte ho toh worth checking out hai.\n\n" +
+    "Join karo: @dealsatyourdoo\n\n" +
+    "Bas itna hi, enjoy chatting! 😊";
 
   try {
     const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
@@ -5458,11 +5469,23 @@ logger.info("Telegram bot polling started");
 
     let sent = 0, failed = 0;
     for (const u of allUsers) {
-      try {
-        await bot.sendMessage(u.id, DEALS_MSG, { parse_mode: "Markdown" });
-        sent++;
-      } catch { failed++; }
-      await new Promise(r => setTimeout(r, 60));
+      let retries = 3;
+      while (retries-- > 0) {
+        try {
+          await bot.sendMessage(u.id, DEALS_MSG);
+          sent++;
+          break;
+        } catch (e: any) {
+          const retryAfter = e?.response?.body?.parameters?.retry_after;
+          if (retryAfter) {
+            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+          } else {
+            failed++;
+            break;
+          }
+        }
+      }
+      await new Promise(r => setTimeout(r, 50));
     }
 
     logger.info({ sent, failed }, "Deals broadcast: complete");
