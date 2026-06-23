@@ -4015,6 +4015,34 @@ bot.on('callback_query', async (query) => {
       );
       return;
     }
+  // ── Deals channel broadcast ───────────────────────────────────────────────
+  if (query.data === 'deals_broadcast_confirm') {
+    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    await bot.editMessageText('📣 Sending deals broadcast...', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
+
+    const DEALS_MSG =
+      "🛍️ *WorldMatch ke saath ek khaas update!* 👋\n\n" +
+      "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
+      "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
+      "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
+      "📢 *Abhi join karo:* @Dealsatyourdoorbot\n\n" +
+      "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
+
+    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
+    let sent = 0, failed = 0;
+    for (const u of allUsers) {
+      try { await bot.sendMessage(u.id, DEALS_MSG, { parse_mode: 'Markdown' }); sent++; }
+      catch { failed++; }
+      await new Promise(r => setTimeout(r, 60));
+    }
+    await bot.sendMessage(chatId,
+      `✅ *Deals broadcast done!*\n📤 Sent: ${sent} | ❌ Failed: ${failed}`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
   // ── Custom broadcast confirm / cancel ────────────────────────────────────
   if (query.data === 'custom_broadcast_confirm' || query.data === 'custom_broadcast_cancel') {
     if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
@@ -5164,6 +5192,31 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
     await new Promise(r => setTimeout(r, 55));
   }
   await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}\n\n🔒 Broadcast is now DISABLED for this session.`);
+});
+
+// ── Admin: /deals — preview & send deals channel broadcast ───────────────────
+bot.onText(/\/deals/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const DEALS_MSG =
+    "🛍️ *WorldMatch ke saath ek khaas update!* 👋\n\n" +
+    "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
+    "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
+    "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
+    "📢 *Abhi join karo:* @Dealsatyourdoorbot\n\n" +
+    "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
+
+  const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
+  await bot.sendMessage(msg.chat.id,
+    `👀 *Preview — exactly as users will see it:*\n\n─────────────────\n${DEALS_MSG}\n─────────────────\n\n📤 Will send to *${allUsers.length} users*. Tap to confirm:`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Send to all users now', callback_data: 'deals_broadcast_confirm' },
+        ]]
+      }
+    }
+  );
 });
 
 // ── Admin: /broadcasttext — one-time custom message to all users ──────────────
