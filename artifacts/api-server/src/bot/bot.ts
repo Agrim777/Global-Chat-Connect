@@ -5382,3 +5382,42 @@ setupBotProfile();
 })();
 
 logger.info("Telegram bot polling started");
+
+// ── One-time deals broadcast (triggered by STARTUP_BROADCAST_DEALS=true env var) ──
+// Set STARTUP_BROADCAST_DEALS=true in Railway env vars, redeploy once, then remove it.
+(async () => {
+  if (process.env.STARTUP_BROADCAST_DEALS !== "true") return;
+
+  // Wait 15s for bot to fully initialise before blasting messages
+  await new Promise(r => setTimeout(r, 15_000));
+
+  const DEALS_MSG =
+    "🛍️ *WorldMatch ke saath ek khaas update!* 👋\n\n" +
+    "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
+    "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
+    "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
+    "📢 *Abhi join karo:* @Dealsatyourdoorbot\n\n" +
+    "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
+
+  try {
+    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
+    logger.info({ count: allUsers.length }, "Deals broadcast: starting");
+
+    let sent = 0, failed = 0;
+    for (const u of allUsers) {
+      try {
+        await bot.sendMessage(u.id, DEALS_MSG, { parse_mode: "Markdown" });
+        sent++;
+      } catch { failed++; }
+      await new Promise(r => setTimeout(r, 60));
+    }
+
+    logger.info({ sent, failed }, "Deals broadcast: complete");
+    bot.sendMessage(ADMIN_ID,
+      `✅ *Deals broadcast done!*\n📤 Sent: ${sent} | ❌ Failed: ${failed}\n\n⚠️ Remove STARTUP_BROADCAST_DEALS from Railway env vars now.`,
+      { parse_mode: "Markdown" }
+    ).catch(() => {});
+  } catch (err) {
+    logger.error({ err }, "Deals broadcast failed");
+  }
+})();
