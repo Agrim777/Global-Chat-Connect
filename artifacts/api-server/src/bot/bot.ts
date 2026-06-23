@@ -4026,7 +4026,7 @@ bot.on('callback_query', async (query) => {
       "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
       "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
       "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
-      "📢 *Abhi join karo:* @Dealsatyourdoorbot\n\n" +
+      "📢 *Abhi join karo:* @dealsatyourdoo\n\n" +
       "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
 
     const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
@@ -5202,7 +5202,7 @@ bot.onText(/\/deals/, async (msg) => {
     "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
     "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
     "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
-    "📢 *Abhi join karo:* @Dealsatyourdoorbot\n\n" +
+    "📢 *Abhi join karo:* @dealsatyourdoo\n\n" +
     "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
 
   const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
@@ -5449,7 +5449,7 @@ logger.info("Telegram bot polling started");
     "Ek zabardast channel mila hai jahan *har roz* naye deals aate hain —\n" +
     "electronics, fashion, gadgets, daily essentials — sab pe *50–80% OFF!* 🔥\n\n" +
     "💰 Real discounts, real savings — bilkul free mein join karo\n\n" +
-    "📢 *Abhi join karo:* @Dealsatyourdoorbot\n\n" +
+    "📢 *Abhi join karo:* @dealsatyourdoo\n\n" +
     "👆 Tap karo aur Join — deals daily drop hote hain, miss mat karna! 🚀";
 
   try {
