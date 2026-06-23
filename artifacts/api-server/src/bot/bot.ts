@@ -45,6 +45,8 @@ function isPremiumActive(user: { hasPaid: boolean; premiumExpiresAt?: Date | nul
 
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 let broadcastUsed = false; // one-time broadcast lock
+let customBroadcastUsed = false; // one-time custom text broadcast lock
+const awaitingBroadcastText = new Map<number, string>(); // adminId → "awaiting" | "preview:<text>"
 // Extra protected accounts (admin's alts, co-admins, test accounts).
 // These users are NEVER auto-deactivated, flood-restricted, NSFW-restricted,
 // or cleaned up by /cleanblocked.
@@ -4013,6 +4015,45 @@ bot.on('callback_query', async (query) => {
       );
       return;
     }
+  // ── Custom broadcast confirm / cancel ────────────────────────────────────
+  if (query.data === 'custom_broadcast_confirm' || query.data === 'custom_broadcast_cancel') {
+    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+
+    if (query.data === 'custom_broadcast_cancel') {
+      awaitingBroadcastText.delete(userId);
+      await bot.editMessageText('❌ Broadcast cancelled.', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
+      return;
+    }
+
+    // Confirm — retrieve stored text
+    const stored = awaitingBroadcastText.get(userId);
+    if (!stored || !stored.startsWith('preview:')) {
+      await bot.sendMessage(chatId, '⚠️ No message found. Please start again with /broadcasttext').catch(() => {});
+      return;
+    }
+    const broadcastMsg = stored.slice('preview:'.length);
+    awaitingBroadcastText.delete(userId);
+    customBroadcastUsed = true;
+
+    await bot.editMessageText('📣 Sending...', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
+
+    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
+    let sent = 0, failed = 0;
+    for (const u of allUsers) {
+      try {
+        await bot.sendMessage(u.id, broadcastMsg, { parse_mode: 'Markdown' });
+        sent++;
+      } catch { failed++; }
+      await new Promise(r => setTimeout(r, 60)); // 60ms delay — stay under Telegram rate limits
+    }
+    await bot.sendMessage(chatId,
+      `✅ *Broadcast complete!*\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n\n🔒 Custom broadcast is now locked for this session.`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
   // Unknown callback — ignore silently
   await bot.answerCallbackQuery(query.id).catch(() => {});
 });
@@ -5125,9 +5166,71 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}\n\n🔒 Broadcast is now DISABLED for this session.`);
 });
 
+// ── Admin: /broadcasttext — one-time custom message to all users ──────────────
 bot.onText(/\/broadcasttext(?:\s|$)/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  await bot.sendMessage(msg.chat.id, "🚫 Broadcast text is disabled for safety. Use only user-triggered messages.");
+  const chatId = msg.chat.id;
+
+  if (customBroadcastUsed) {
+    await bot.sendMessage(chatId,
+      '🔒 Custom broadcast has already been used this session.\n\nRestart the bot to enable it again.'
+    );
+    return;
+  }
+
+  if (awaitingBroadcastText.has(ADMIN_ID)) {
+    await bot.sendMessage(chatId, '⏳ Already waiting for your message. Just type it now.');
+    return;
+  }
+
+  awaitingBroadcastText.set(ADMIN_ID, 'awaiting');
+  const userCount = await db.select({ id: usersTable.id }).from(usersTable);
+  await bot.sendMessage(chatId,
+    `📝 *Custom Broadcast*\n\n` +
+    `Will send to *${userCount.length} users* — one time only.\n\n` +
+    `Type your message now (supports *bold*, _italic_, \`code\`):\n\n` +
+    `Send /cancel to abort.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ── Admin message interceptor: captures text when awaiting broadcast ──────────
+bot.on('message', async (msg) => {
+  if (!msg.from || msg.from.id !== ADMIN_ID) return;
+  if (!awaitingBroadcastText.has(ADMIN_ID)) return;
+  if (awaitingBroadcastText.get(ADMIN_ID) !== 'awaiting') return;
+
+  const text = msg.text ?? '';
+  if (text.startsWith('/')) {
+    // Admin sent a command — cancel
+    awaitingBroadcastText.delete(ADMIN_ID);
+    await bot.sendMessage(msg.chat.id, '❌ Broadcast input cancelled.').catch(() => {});
+    return;
+  }
+
+  if (!text.trim()) {
+    await bot.sendMessage(msg.chat.id, '⚠️ Message is empty. Please type your broadcast text.').catch(() => {});
+    return;
+  }
+
+  // Store the text and show preview
+  awaitingBroadcastText.set(ADMIN_ID, `preview:${text}`);
+  const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
+
+  await bot.sendMessage(msg.chat.id,
+    `👀 *Preview* (exactly as users will see it):\n\n` +
+    `─────────────────\n${text}\n─────────────────\n\n` +
+    `📤 Will send to *${allUsers.length} users*. Confirm?`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Yes, send to everyone', callback_data: 'custom_broadcast_confirm' },
+          { text: '❌ Cancel', callback_data: 'custom_broadcast_cancel' },
+        ]]
+      }
+    }
+  );
 });
 
 // ── Admin: /users ─────────────────────────────────────────────────────────────
