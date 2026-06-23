@@ -4017,6 +4017,78 @@ bot.on('callback_query', async (query) => {
   await bot.answerCallbackQuery(query.id).catch(() => {});
 });
 
+// ── Telegram Stars: approve all incoming pre-checkout queries ─────────────────
+// Telegram sends this within seconds of the user tapping "Pay". The bot MUST
+// answer within 10 seconds or Telegram automatically cancels the payment.
+bot.on('pre_checkout_query', async (query) => {
+  try {
+    await bot.answerPreCheckoutQuery(query.id, true);
+    logger.info({ userId: query.from.id, payload: query.invoice_payload }, "Pre-checkout approved");
+  } catch (err) {
+    logger.warn({ err }, "answerPreCheckoutQuery failed");
+  }
+});
+
+// ── Telegram Stars: grant premium after successful payment ────────────────────
+// Fires once Telegram has debited the Stars. This is the ONLY place
+// where premium should be granted for Stars payments.
+bot.on('message', async (msg) => {
+  if (!msg.successful_payment) return;
+
+  const userId = msg.from!.id;
+  const chatId = msg.chat.id;
+  const payload = msg.successful_payment.invoice_payload as PlanKey;
+  const plan = PLANS[payload];
+
+  if (!plan) {
+    logger.warn({ userId, payload }, "Unknown plan payload in successful_payment — cannot grant premium");
+    return;
+  }
+
+  const expiry = getPremiumExpiry(plan.days);
+  const expStr = expiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+
+  try {
+    await db.update(usersTable)
+      .set({ hasPaid: true, premiumExpiresAt: expiry, updatedAt: new Date() })
+      .where(eq(usersTable.id, userId));
+
+    // If user was mid-fake-chat, clear that so they can Find Match immediately
+    if (fakePersonaMap.has(userId)) {
+      const fakeTimer = chatTimerMap.get(userId);
+      if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(userId); }
+      fakePersonaMap.delete(userId);
+      fakeReplySet.delete(userId);
+      await db.update(usersTable)
+        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(and(eq(usersTable.id, userId), eq(usersTable.state, "chatting")));
+    }
+
+    const user = await getUser(userId);
+    if (user) {
+      await sendMain(userId, user,
+        `🎉 *Payment successful!* Welcome to Premium ${plan.emoji}\n\n` +
+        `✅ *${plan.label}* access activated\n` +
+        `📅 Valid until: *${expStr}*\n\n` +
+        `Tap 💘 Find Match to connect with real people now!`
+      );
+    }
+
+    logger.info({ userId, plan: payload, expiry }, "Premium granted via Telegram Stars");
+
+    bot.sendMessage(ADMIN_ID,
+      `💎 New Stars payment!\nUser: ${userId}\nPlan: ${plan.label} (${plan.stars} ⭐)\nExpires: ${expStr}`
+    ).catch(() => {});
+
+  } catch (err) {
+    logger.error({ err, userId }, "Failed to grant premium after successful_payment");
+    await bot.sendMessage(chatId,
+      "❌ Payment received but activation failed. Please contact support with your Telegram ID."
+    ).catch(() => {});
+  }
+});
+
+
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
     "ℹ️ *WorldMatch Commands*\n\n" +
