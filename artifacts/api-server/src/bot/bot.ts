@@ -1676,8 +1676,9 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
     history: [{ role: "assistant", content: openerObj.text }],
   });
 
+  // Mark trial as USED immediately — prevents multiple free chats if user stops early
   await db.update(usersTable)
-    .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, updatedAt: new Date() })
+    .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, chatCount: 1, updatedAt: new Date() })
     .where(eq(usersTable.id, userId));
 
 await bot.sendMessage(
@@ -1696,7 +1697,7 @@ await bot.sendMessage(
     await bot.sendMessage(chatId, openerObj.text);
   }
 
-  // 45-second free chat timer — ends chat and shows pay gate when trial expires
+  // 30-second free chat timer — ends chat and shows pay gate when trial expires
   const timer = setTimeout(async () => {
     try {
       chatTimerMap.delete(userId);
@@ -1710,17 +1711,7 @@ await bot.sendMessage(
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, chatCount: 1, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        // Show "typing..." for 2s then a teaser — creates curiosity gap before paygate
-        await bot.sendChatAction(chatId, "typing").catch(() => {});
-        await new Promise(r => setTimeout(r, 2000));
-        const teasers = [
-          `⏰ <b>${persona?.name ?? "Woh"} abhi bhi online hai...</b> woh tumhara wait kar rahi hai 🥺`,
-          `💬 <b>${persona?.name ?? "Woh"} ne message kiya:</b> "kya tum wapas aoge?" 🥺`,
-          `📵 <b>${persona?.name ?? "Woh"} ne typing start ki...</b> — kya bataya woh?`,
-        ];
-        const teaser = teasers[Math.floor(Math.random() * teasers.length)];
-        await bot.sendMessage(chatId, teaser, { parse_mode: "Markdown" }).catch(() => {});
-        await new Promise(r => setTimeout(r, 1500));
+        // 30 seconds are up — show pay gate immediately
         // sendPayGate may throw 403 if user blocked the bot — swallow that case quietly
         await sendPayGate(chatId, "⏰ Free preview khatam...", persona?.name).catch((err) => {
           if (isUserUnreachableError(err)) {
