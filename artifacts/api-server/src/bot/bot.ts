@@ -3922,8 +3922,8 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
       user = await getUser(id) ?? user;
     }
 
-    // ── Terms gate — must accept before using any feature ──────────────────
-    if (!user?.termsAccepted) {
+    // ── Terms gate — shown on every /start (new and returning users) ────────
+    {
       await bot.sendMessage(chatId,
         "🔒 *TERMS OF USE & DISCLAIMER — Please Read Carefully*\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
