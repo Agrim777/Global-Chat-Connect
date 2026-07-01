@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable } from "@workspace/db";
-import { eq, and, ne, inArray, notInArray } from "drizzle-orm";
+import { eq, and, ne, inArray, notInArray, or } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -1706,7 +1706,7 @@ await bot.sendMessage(
       fakePersonaMap.delete(userId);
       const u = await getUser(userId);
       // Only fire pay gate if user is STILL in the fake chat — stopChat already handles the case where they left manually
-      if (u?.state === "chatting" && !u.hasPaid) {
+      if (u?.state === "chatting" && !u.hasPaid && u.gender !== "female") {
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, chatCount: 1, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
@@ -3710,15 +3710,19 @@ async function stopChat(chatId: number, userId: number) {
 // ── Find eligible real users ──────────────────────────────────────────────────
 
 async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number) {
-  // Non-active premium users never get real matches
-  if (!isPremiumActive(me)) return [];
+  const meIsFemale = me.gender === "female";
+  // Female users get free real matches; others need active premium
+  if (!meIsFemale && !isPremiumActive(me)) return [];
 
-  // Fetch only idle, complete, paid users from the DB
+  // Fetch idle, complete users — paid OR female (female always free)
   const candidates = await db.select().from(usersTable).where(
     and(
       eq(usersTable.isProfileComplete, true),
-      eq(usersTable.hasPaid, true),
-      eq(usersTable.state, "idle")
+      eq(usersTable.state, "idle"),
+      or(
+        eq(usersTable.hasPaid, true),
+        eq(usersTable.gender, "female")
+      )
     )
   );
 
@@ -3727,8 +3731,8 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
   return candidates.filter((c) => {
     if (c.id === userId) return false;
     if (!c.isActive) return false;
-    // Also filter out expired premium users from the candidate pool
-    if (!isPremiumActive(c)) return false;
+    // Candidate must be premium-active OR female (free tier)
+    if (!isPremiumActive(c) && c.gender !== "female") return false;
     // Exclude users already inside findMatch (race condition guard)
     if (matchingSet.has(c.id)) return false;
     // Exclude users this person has blocked or reported
@@ -3768,7 +3772,9 @@ async function findMatch(chatId: number, userId: number) {
     }
 
     // ── FREE / EXPIRED USERS: AI chat ONLY — never touch real user pool ───
-    if (!isPremiumActive(me)) {
+    // Female users are always free — bypass the pay gate entirely
+    const userIsFemale = me.gender === "female";
+    if (!userIsFemale && !isPremiumActive(me)) {
       if (me.hasPaid && me.premiumExpiresAt && me.premiumExpiresAt <= new Date()) {
         // Premium expired — clear hasPaid flag and show expiry message + paygate
         await db.update(usersTable)
@@ -4274,11 +4280,14 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
 // First-time profile setup (only called when no profile exists)
 async function startSetup(chatId: number, id: number) {
   editModeMap.delete(id); // ensure we're NOT in edit mode
-  // Wipe all old profile fields so the user always starts completely fresh
+  // Check if user has a permanently locked female gender — preserve it
+  const existingForSetup = await getUser(id);
+  const isGenderLocked = (existingForSetup as any)?.genderLocked === true && existingForSetup?.gender === "female";
+  // Wipe all old profile fields — but keep gender if permanently locked
   await upsertUser(id, {
     name: null as any,
     age: null as any,
-    gender: null as any,
+    ...(isGenderLocked ? {} : { gender: null as any }),
     lookingFor: null as any,
     bio: null as any,
     country: null as any,
@@ -4294,6 +4303,8 @@ async function startSetup(chatId: number, id: number) {
 // Edit an existing profile — shows field picker
 async function startEditProfile(chatId: number, id: number) {
   editModeMap.set(id, "choosing");
+  const editUser = await getUser(id);
+  const isLockedFemale = (editUser as any)?.genderLocked === true && editUser?.gender === "female";
   await bot.sendMessage(chatId,
     "✏️ *Edit Profile*\n\nWhich field do you want to change?",
     {
@@ -4301,7 +4312,9 @@ async function startEditProfile(chatId: number, id: number) {
       reply_markup: {
         keyboard: [
           [{ text: "📝 Change Name" }, { text: "🎂 Change Age" }],
-          [{ text: "⚤ Change Gender" }, { text: "💞 Change Looking For" }],
+          ...(isLockedFemale
+            ? [[{ text: "💞 Change Looking For" }]]
+            : [[{ text: "⚤ Change Gender" }, { text: "💞 Change Looking For" }]]),
           [{ text: "📖 Change Bio" }, { text: "🌍 Change Country" }],
           [{ text: "❌ Cancel" }],
         ],
@@ -4462,8 +4475,16 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, "Please enter a valid age between 18 and 80.");
         return;
       }
-      await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
+      const skipGenderStep = !isEdit && (user as any).genderLocked === true && user.gender === "female";
+      await upsertUser(id, { age, state: isEdit ? "idle" : (skipGenderStep ? "setup_looking_for" : "setup_gender") });
       if (isEdit) { await finishEditField(chatId, id); return; }
+      if (skipGenderStep) {
+        await bot.sendMessage(chatId, `♀️ *Gender: Female* (permanent — cannot be changed)\n\n*Step 3 of 3* — 💞 Looking for?`, {
+          parse_mode: "Markdown",
+          reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }], [{ text: "Any" }]], resize_keyboard: true, one_time_keyboard: true },
+        });
+        return;
+      }
       await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ Tumhara gender?`, {
         parse_mode: "Markdown",
         reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true },
@@ -4474,16 +4495,28 @@ bot.on("message", async (msg) => {
     if (user.state === "setup_gender") {
       const isEdit = editModeMap.get(id) === "gender";
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      // Block gender change if already permanently locked as female
+      if ((user as any).genderLocked === true && user.gender === "female") {
+        await bot.sendMessage(chatId, "♀️ Your gender is permanently set to *Female* and cannot be changed.", { parse_mode: "Markdown" });
+        if (isEdit) { await finishEditField(chatId, id); } else { await upsertUser(id, { state: "idle" }); }
+        return;
+      }
       const gMap: Record<string, "male"|"female"|"other"> = { male:"male", female:"female", other:"other" };
       const g = gMap[text.toLowerCase()];
       if (!g) { await bot.sendMessage(chatId, "Please tap Male, Female, or Other."); return; }
+      // Permanently lock gender when female is selected — can never be changed
+      const lockGender = g === "female";
       if (isEdit) {
-        await upsertUser(id, { gender: g, state: "idle" });
+        await upsertUser(id, { gender: g, ...(lockGender ? { genderLocked: true } as any : {}), state: "idle" });
         await finishEditField(chatId, id); return;
       }
-      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle", isProfileComplete: true });
+      await upsertUser(id, { gender: g, ...(lockGender ? { genderLocked: true } as any : {}), lookingFor: "any", state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
-      await sendMain(chatId, updated!, "🎉 Profile ready! Ab shuru karte hain — tap 💘 *Find Match* to begin!");
+      if (lockGender) {
+        await sendMain(chatId, updated!, "🎉 Profile ready! \n\n🆓 *Females get FREE unlimited matches!* Tap 💘 *Find Match* to begin!");
+      } else {
+        await sendMain(chatId, updated!, "🎉 Profile ready! Ab shuru karte hain — tap 💘 *Find Match* to begin!");
+      }
       return;
     }
 
