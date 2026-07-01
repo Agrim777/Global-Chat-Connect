@@ -4280,10 +4280,10 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
 // First-time profile setup (only called when no profile exists)
 async function startSetup(chatId: number, id: number) {
   editModeMap.delete(id); // ensure we're NOT in edit mode
-  // Check if user has a permanently locked female gender — preserve it
+  // Female gender is permanent — preserve it if already set so the lock survives re-setup
   const existingForSetup = await getUser(id);
-  const isGenderLocked = (existingForSetup as any)?.genderLocked === true && existingForSetup?.gender === "female";
-  // Wipe all old profile fields — but keep gender if permanently locked
+  const isGenderLocked = existingForSetup?.gender === "female";
+  // Wipe all old profile fields — but keep gender if permanently locked female
   await upsertUser(id, {
     name: null as any,
     age: null as any,
@@ -4304,7 +4304,7 @@ async function startSetup(chatId: number, id: number) {
 async function startEditProfile(chatId: number, id: number) {
   editModeMap.set(id, "choosing");
   const editUser = await getUser(id);
-  const isLockedFemale = (editUser as any)?.genderLocked === true && editUser?.gender === "female";
+  const isLockedFemale = editUser?.gender === "female";
   await bot.sendMessage(chatId,
     "✏️ *Edit Profile*\n\nWhich field do you want to change?",
     {
@@ -4475,7 +4475,7 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, "Please enter a valid age between 18 and 80.");
         return;
       }
-      const skipGenderStep = !isEdit && (user as any).genderLocked === true && user.gender === "female";
+      const skipGenderStep = !isEdit && user.gender === "female";
       await upsertUser(id, { age, state: isEdit ? "idle" : (skipGenderStep ? "setup_looking_for" : "setup_gender") });
       if (isEdit) { await finishEditField(chatId, id); return; }
       if (skipGenderStep) {
@@ -4495,8 +4495,8 @@ bot.on("message", async (msg) => {
     if (user.state === "setup_gender") {
       const isEdit = editModeMap.get(id) === "gender";
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
-      // Block gender change if already permanently locked as female
-      if ((user as any).genderLocked === true && user.gender === "female") {
+      // Block gender change if already permanently set as female
+      if (user.gender === "female") {
         await bot.sendMessage(chatId, "♀️ Your gender is permanently set to *Female* and cannot be changed.", { parse_mode: "Markdown" });
         if (isEdit) { await finishEditField(chatId, id); } else { await upsertUser(id, { state: "idle" }); }
         return;
@@ -4507,10 +4507,10 @@ bot.on("message", async (msg) => {
       // Permanently lock gender when female is selected — can never be changed
       const lockGender = g === "female";
       if (isEdit) {
-        await upsertUser(id, { gender: g, ...(lockGender ? { genderLocked: true } as any : {}), state: "idle" });
+        await upsertUser(id, { gender: g, state: "idle" });
         await finishEditField(chatId, id); return;
       }
-      await upsertUser(id, { gender: g, ...(lockGender ? { genderLocked: true } as any : {}), lookingFor: "any", state: "idle", isProfileComplete: true });
+      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
       if (lockGender) {
         await sendMain(chatId, updated!, "🎉 Profile ready! \n\n🆓 *Females get FREE unlimited matches!* Tap 💘 *Find Match* to begin!");
