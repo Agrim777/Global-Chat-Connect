@@ -4043,7 +4043,54 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // ── Plan button tapped — send Telegram Stars invoice ──────────────────────
+  // ── Admin: confirm/cancel delete inactive females ────────────────────────────
+  if (query.data === "confirm_clean_inactive_females") {
+    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id, { text: "⛔ Not authorised." }); return; }
+    await bot.answerCallbackQuery(query.id, { text: "🗑️ Deleting..." });
+    try {
+      // Edit message to show in-progress
+      await bot.editMessageText(
+        "⏳ *Deleting inactive female profiles...*",
+        { chat_id: chatId, message_id: query.message?.message_id, parse_mode: "Markdown" }
+      ).catch(() => {});
+
+      // Delete all inactive female profiles (not protected)
+      const protectedList = Array.from(PROTECTED_IDS);
+      const deleted = await db
+        .delete(usersTable)
+        .where(
+          protectedList.length
+            ? and(eq(usersTable.gender, "female"), eq(usersTable.isActive, false), notInArray(usersTable.id, protectedList))
+            : and(eq(usersTable.gender, "female"), eq(usersTable.isActive, false))
+        )
+        .returning({ id: usersTable.id });
+
+      await bot.editMessageText(
+        `✅ *Done!*\n\n🗑️ Deleted *${deleted.length}* inactive female profile(s) permanently.\n\n_Protected accounts were skipped._`,
+        { chat_id: chatId, message_id: query.message?.message_id, parse_mode: "Markdown" }
+      ).catch(() => {});
+      logger.info({ count: deleted.length, adminId: userId }, "Admin deleted inactive female profiles");
+    } catch (err) {
+      logger.error({ err }, "confirm_clean_inactive_females failed");
+      await bot.editMessageText(
+        `❌ Error during deletion: ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`,
+        { chat_id: chatId, message_id: query.message?.message_id }
+      ).catch(() => {});
+    }
+    return;
+  }
+
+  if (query.data === "cancel_clean_inactive_females") {
+    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id); return; }
+    await bot.answerCallbackQuery(query.id, { text: "Cancelled." });
+    await bot.editMessageText(
+      "❌ *Deletion cancelled.* No profiles were removed.",
+      { chat_id: chatId, message_id: query.message?.message_id, parse_mode: "Markdown" }
+    ).catch(() => {});
+    return;
+  }
+
+    // ── Plan button tapped — send Telegram Stars invoice ──────────────────────
     if (query.data === 'plan_week2' || query.data === 'plan_month' || query.data === 'plan_yearly') {
       const key = query.data.replace('plan_', '') as PlanKey;
       const plan = PLANS[key];
@@ -5284,6 +5331,51 @@ bot.onText(/\/cleanblocked/, async (msg) => {
     `Your active user count is now accurate. ${cleaned} blocked users were removed from active status.`,
     { parse_mode: "Markdown" }
   );
+});
+
+// ── Admin: /cleaninactivefemales — delete all female profiles with isActive=false ──
+
+bot.onText(/\/cleaninactivefemales/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "⛔ Not authorised.");
+    return;
+  }
+
+  try {
+    // Count inactive female profiles first (safety preview)
+    const targets = await db
+      .select({ id: usersTable.id, name: usersTable.name, createdAt: usersTable.createdAt })
+      .from(usersTable)
+      .where(and(eq(usersTable.gender, "female"), eq(usersTable.isActive, false)));
+
+    if (targets.length === 0) {
+      await bot.sendMessage(chatId, "✅ No inactive female profiles found. Nothing to delete.");
+      return;
+    }
+
+    // Show count + sample, ask for confirmation
+    const sample = targets.slice(0, 5).map(u => `• ID ${u.id} — ${u.name ?? "unnamed"}`).join("\n");
+    await bot.sendMessage(
+      chatId,
+      `⚠️ *Confirm Deletion*\n\n` +
+      `Found *${targets.length}* inactive female profile(s).\n\n` +
+      `Sample:\n${sample}${targets.length > 5 ? `\n…and ${targets.length - 5} more` : ""}\n\n` +
+      `Tap *Confirm Delete* to permanently remove all ${targets.length} records, or *Cancel* to abort.`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [[
+            { text: `🗑️ Confirm Delete (${targets.length})`, callback_data: "confirm_clean_inactive_females" },
+            { text: "❌ Cancel", callback_data: "cancel_clean_inactive_females" },
+          ]]
+        }
+      }
+    );
+  } catch (err) {
+    logger.error({ err }, "/cleaninactivefemales count failed");
+    await bot.sendMessage(chatId, `❌ Error counting profiles: ${err instanceof Error ? err.message : String(err)}`);
+  }
 });
 
 // ── Admin broadcasts are disabled to prevent spam reports and accidental bulk sends ──
