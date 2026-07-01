@@ -3688,7 +3688,7 @@ async function stopChat(chatId: number, userId: number) {
 
       if (disconnected.length > 0) {
         // We were first — send the partner exactly one notification
-        if (!isPremiumActive(partner) && (partner.chatCount ?? 0) > 0) {
+        if (!isPremiumActive(partner) && (partner.chatCount ?? 0) > 0 && partner.gender !== "female") {
           await sendPayGate(partnerId);
         } else {
           await sendMain(partnerId, partner, "Your match ended the chat.");
@@ -3700,7 +3700,7 @@ async function stopChat(chatId: number, userId: number) {
 
   const updated = await getUser(userId);
   // Non-premium users who've used their trial → show pay gate with correct girl name
-  if (updated && !isPremiumActive(updated) && (updated.chatCount ?? 0) > 0) {
+  if (updated && !isPremiumActive(updated) && (updated.chatCount ?? 0) > 0 && updated.gender !== "female") {
     await sendPayGate(chatId, undefined, fakePersonaName);
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
@@ -4610,8 +4610,8 @@ bot.on("message", async (msg) => {
 
       // Real chat relay — allow messages whenever both sides are still connected to each other
 
-      // ── SAFETY GATE: non-premium users must NEVER relay to real users ──────
-      if (!isPremiumActive(user)) {
+      // ── SAFETY GATE: non-premium, non-female users must NEVER relay to real users ──
+      if (!isPremiumActive(user) && user.gender !== "female") {
         logger.warn({ userId: id }, "Relay blocked: no active premium in real chat — force-disconnecting");
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
@@ -4633,7 +4633,7 @@ bot.on("message", async (msg) => {
           recipient?.state === "chatting" &&
           recipient.chattingWith === id &&
           recipient.chattingWith !== FAKE_CHAT_ID && // recipient must NOT be in AI fake chat
-          isPremiumActive(recipient) // recipient must still have active premium
+          (isPremiumActive(recipient) || recipient.gender === "female") // paid OR female (free tier)
         ) {
           // Both still connected and both verified paid — relay the message
           try {
@@ -4767,7 +4767,7 @@ bot.on("message", async (msg) => {
     // Unrecognised input:
     // — if free user who used trial, they're probably confused & trying to chat → show paygate
     // — otherwise re-show the menu so buttons are always visible
-    if (!isPremiumActive(user) && (user.chatCount ?? 0) > 0) {
+    if (!isPremiumActive(user) && (user.chatCount ?? 0) > 0 && user.gender !== "female") {
       await sendPayGate(chatId, "💬 Want to keep chatting? Unlock Premium to connect with real people! 💕");
     } else {
       await sendMain(chatId, user);
