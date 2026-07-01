@@ -39,6 +39,7 @@ export const usersTable = pgTable("users", {
   bonusChats: integer("bonus_chats").default(0).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  genderLocked: boolean("gender_locked").default(false).notNull(),
 });
 
 export const insertUserSchema = createInsertSchema(usersTable).omit({ createdAt: true, updatedAt: true });
