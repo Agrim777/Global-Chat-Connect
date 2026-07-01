@@ -265,6 +265,8 @@ for (const m of _wrappedMethods) {
     { command: 'premium',    description: '💎 Upgrade to Premium' },
     { command: 'pay',        description: '💳 Payment info' },
     { command: 'disclaimer', description: '📋 Terms of Use & Legal Notice' },
+    { command: 'privacy',    description: '🔐 Privacy Policy' },
+    { command: 'deleteaccount', description: '🗑️ Delete my profile & data' },
     { command: 'help',       description: 'ℹ️ Show all commands' },
   ]).catch((e: Error) => console.error('setMyCommands failed:', e.message));
 
@@ -3923,21 +3925,54 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
     // ── Terms gate — must accept before using any feature ──────────────────
     if (!user?.termsAccepted) {
       await bot.sendMessage(chatId,
-        "🌍 *WorldMatch — Before You Begin*\n\n" +
-        "Please read and accept our terms to continue:\n\n" +
-        "1️⃣ You are *18 years or older*\n" +
-        "2️⃣ Your first free match is a *Demo Match* — an automated preview of the platform. Real matches require Premium.\n" +
-        "3️⃣ We do *not* guarantee a specific gender, age, or personality of your match.\n" +
-        "4️⃣ Payments are *final* once service is activated — no refunds.\n" +
-        "5️⃣ You agree to use respectful language. Violations may result in a permanent ban.\n" +
-        "6️⃣ Do not share personal details (phone number, home address, etc.) in chat.\n\n" +
-        "_By tapping below, you confirm you have read and agree to all of the above._",
+        "🔒 *TERMS OF USE & DISCLAIMER — Please Read Carefully*\n" +
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+
+        "📌 *What is this platform?*\n" +
+        "Global Chat Connect is an *anonymous chatting platform*, NOT a dating app or matrimonial service. It connects you with random strangers for text-based anonymous conversations.\n\n" +
+
+        "🔞 *Age Requirement (18+)*\n" +
+        "You must be *at least 18 years old* to use this service. By accepting, you confirm you are 18+. This is mandatory under Indian laws (IT Act 2000, POCSO Act 2012).\n\n" +
+
+        "🎭 *No Gender Guarantee*\n" +
+        "We do NOT guarantee the gender, age, location, or identity of your match. Matches are random and depend on availability.\n\n" +
+
+        "🤖 *First Chat May Be Automated*\n" +
+        "Your first free session may be an AI-powered demo to show you how the platform works. This is clearly notified at the start.\n\n" +
+
+        "🚫 *No Criminal Liability*\n" +
+        "The platform owner/admin is NOT responsible for any criminal offence, harm, fraud, harassment, or illegal activity carried out by users. Users are solely responsible for their actions under IPC/BNS and IT Act 2000.\n\n" +
+
+        "🔐 *Privacy & Data Safety*\n" +
+        "• Do NOT share your phone number, address, photos, Aadhaar, bank details, or any sensitive personal data in chat.\n" +
+        "• We collect only your Telegram ID and profile data you voluntarily provide.\n" +
+        "• Type /privacy for our full Privacy Policy.\n\n" +
+
+        "⚖️ *Zero Tolerance for Illegal Activity*\n" +
+        "We strictly prohibit and do NOT support: sexual exploitation, harassment, hate speech, threats, fraud, drugs, or any activity illegal under Indian law or Telegram's Terms of Service. Violations result in immediate permanent ban.\n\n" +
+
+        "💳 *Payment is Optional*\n" +
+        "Basic features are free. Premium features require payment. Paying is entirely your choice — there is no compulsion. Payments once activated are non-refundable.\n\n" +
+
+        "🗑️ *Delete Your Profile*\n" +
+        "You may delete all your data at any time by sending /deleteaccount.\n\n" +
+
+        "📋 *Full Legal Docs*\n" +
+        "• /disclaimer — Full Terms of Use\n" +
+        "• /privacy — Privacy Policy\n\n" +
+
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+        "_By tapping ✅ I Accept below, you confirm that:\n" +
+        "1. You are 18 years or older\n" +
+        "2. You have read and understood all terms above\n" +
+        "3. You agree to abide by Indian laws and Telegram ToS_",
         {
           parse_mode: "Markdown",
           reply_markup: {
-            inline_keyboard: [[
-              { text: "✅  I Agree — I Am 18+", callback_data: "agree_terms" }
-            ]]
+            inline_keyboard: [
+              [{ text: "✅ I Accept — I Am 18+", callback_data: "agree_terms" }],
+              [{ text: "❌ I Decline", callback_data: "decline_terms" }]
+            ]
           }
         }
       );
@@ -3947,7 +3982,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
     // Welcome message only for truly first-time users
     if (isNew) {
       await bot.sendMessage(chatId,
-        "💕 Welcome to WorldMatch Dating Bot!\n\nConnect with people from all over the world. Find your perfect match and start chatting! 🌍"
+        "🌍 Welcome to *Global Chat Connect!*\n\nChat anonymously with people from around the world. Your identity is always protected.\n\n_This is an anonymous chat platform — not a dating or matrimonial service._"
       );
     }
 
@@ -3984,9 +4019,9 @@ bot.on('callback_query', async (query) => {
       await db.update(usersTable)
         .set({ termsAccepted: true, termsAcceptedAt: new Date(), updatedAt: new Date() })
         .where(eq(usersTable.id, userId));
-      await bot.answerCallbackQuery(query.id, { text: '✅ Welcome to WorldMatch!' });
+      await bot.answerCallbackQuery(query.id, { text: '✅ Welcome! Terms accepted.' });
       await bot.editMessageText(
-        '✅ *Terms accepted!* Welcome to WorldMatch 🌍\n\nSetting up your experience...',
+        '✅ *Terms Accepted!*\n\nWelcome to *Global Chat Connect* 🌍\n\nYour identity is anonymous. Chat safely and respectfully.\n\n_Type /privacy anytime to view our Privacy Policy._',
         { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
       ).catch(() => {});
       const user = await getUser(userId);
@@ -3995,6 +4030,16 @@ bot.on('callback_query', async (query) => {
       logger.error({ err }, 'agree_terms callback error');
       await bot.answerCallbackQuery(query.id, { text: 'Something went wrong. Send /start to try again.' });
     }
+    return;
+  }
+
+  // ── Terms decline ─────────────────────────────────────────────────────────
+  if (query.data === 'decline_terms') {
+    await bot.answerCallbackQuery(query.id, { text: 'You declined. You cannot use the bot without accepting.' });
+    await bot.editMessageText(
+      '❌ *Terms Declined*\n\nYou cannot use Global Chat Connect without accepting the Terms of Use and confirming you are 18+.\n\nIf you change your mind, send /start to try again.',
+      { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
+    ).catch(() => {});
     return;
   }
 
@@ -4180,7 +4225,8 @@ bot.onText(/\/help/, async (msg) => {
     "/block — Block current match\n" +
     "/premium — Upgrade to Premium 💎\n" +
     "/pay — Payment info\n" +
-    "/disclaimer — Terms of Use & Legal Notice\n" +
+    "/disclaimer — Full Terms of Use & Legal Notice\n" +
+    "/privacy — Privacy Policy\n" +
     "/help — Show this help",
     { parse_mode: "Markdown" }
   );
@@ -4188,51 +4234,120 @@ bot.onText(/\/help/, async (msg) => {
 
   // ── /disclaimer ───────────────────────────────────────────────────────────────
   bot.onText(/\/disclaimer/, async (msg) => {
+    const part1 =
+      "📋 *TERMS OF USE & FULL DISCLAIMER*\n" +
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+
+      "*1. Platform Nature*\n" +
+      "Global Chat Connect is an *anonymous chatting platform*. It is NOT a dating app, matrimonial service, or social network. The platform facilitates anonymous text-based conversations between consenting adults for entertainment and social interaction only.\n\n" +
+
+      "*2. Age Restriction (18+)*\n" +
+      "This service is strictly for users aged 18 years and above. Use by minors is prohibited under the Protection of Children from Sexual Offences (POCSO) Act, 2012, and the Information Technology (Intermediary Guidelines) Rules, 2021. By using this service you confirm you are 18+.\n\n" +
+
+      "*3. No Gender Guarantee*\n" +
+      "We do NOT guarantee the gender, age, location, nationality, or identity of any user you are matched with. Matching is random and subject to platform availability. No claims of any specific gender match are made or implied.\n\n" +
+
+      "*4. AI / Automated Sessions*\n" +
+      "Your first free chat session may be an AI-powered automated demo. This is disclosed at the start of every such session. You are never connected to a real user without being notified.\n\n" +
+
+      "*5. No Criminal Liability*\n" +
+      "The platform owner, developers, and administrators are NOT responsible for any criminal offence, civil wrong, harm, fraud, harassment, cheating, defamation, extortion, blackmail, or any illegal act committed by users. Each user is solely responsible for their conduct under the Indian Penal Code / Bharatiya Nyaya Sanhita (BNS) 2023, IT Act 2000, and all applicable laws.\n\n" +
+
+      "*6. Zero Tolerance Policy*\n" +
+      "We strictly PROHIBIT and do NOT support:\n" +
+      "• Sexual exploitation, grooming, or obscene content\n" +
+      "• Harassment, bullying, or threatening messages\n" +
+      "• Hate speech based on religion, caste, gender, or ethnicity\n" +
+      "• Fraud, phishing, or financial scams\n" +
+      "• Drug promotion or any illegal trade\n" +
+      "• Any content violating Telegram's Terms of Service\n" +
+      "Violations result in immediate and permanent ban. We cooperate fully with law enforcement.\n\n" +
+
+      "*7. Privacy & Data Protection*\n" +
+      "• Do NOT share: phone numbers, home address, Aadhaar/PAN, bank details, or photos showing your face or identity.\n" +
+      "• We collect only: your Telegram ID, chosen display name, age, gender preference.\n" +
+      "• Data is handled per the Digital Personal Data Protection Act (DPDPA) 2023.\n" +
+      "• Type /privacy for our complete Privacy Policy.\n\n" +
+
+      "*8. Payment Terms*\n" +
+      "• Premium features are optional. Basic features are free.\n" +
+      "• Payment is entirely your own choice — there is zero compulsion.\n" +
+      "• Payments are non-refundable once the premium service is activated.\n" +
+      "• Payment does NOT guarantee any specific type, gender, or quality of match.\n\n" +
+
+      "*9. Account Deletion*\n" +
+      "You may delete your profile and all associated data at any time by sending /deleteaccount. Data is removed within 30 days of the request.\n\n" +
+
+      "*10. Disclaimer of Warranties*\n" +
+      "The service is provided 'as is' without any warranty of uninterrupted access, error-free operation, or fitness for a particular purpose. Features may be modified or discontinued at any time.\n\n" +
+
+      "*11. Governing Law*\n" +
+      "This service is governed by the laws of India. Any disputes are subject to the jurisdiction of courts in India. Users must also comply with Telegram's Terms of Service (https://telegram.org/tos).\n\n" +
+
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+      "_Last updated: 2025. By using this bot you confirm you have read, understood, and agreed to these terms._\n\n" +
+      "_Type /privacy for our Privacy Policy._";
+
+    await bot.sendMessage(msg.chat.id, part1, { parse_mode: "Markdown", disable_web_page_preview: true });
+  });
+
+
+  // ── /privacy ─────────────────────────────────────────────────────────────────
+  bot.onText(/\/privacy/, async (msg) => {
     await bot.sendMessage(msg.chat.id,
-      "📋 *DISCLAIMER / TERMS OF USE*\n" +
-      "─────────────────────────────────\n\n" +
+      "🔐 *PRIVACY POLICY — Global Chat Connect*\n" +
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
 
-      "*1. Nature of Service*\n" +
-      "• This platform provides chat-based interactions for entertainment and social connection.\n" +
-      "• We do not guarantee real-life meetings, relationships, or outcomes.\n\n" +
+      "*1. Data We Collect*\n" +
+      "• Your Telegram User ID (assigned by Telegram, not chosen by you)\n" +
+      "• Display name and age you enter during profile setup\n" +
+      "• Gender and chat preference\n" +
+      "• Country (optional)\n" +
+      "• Premium payment status (Stars transaction reference only)\n" +
+      "• Chat activity timestamps (no message content is stored)\n\n" +
 
-      "*2. Matching & Users*\n" +
-      "• We do NOT guarantee connection with any specific gender.\n" +
-      "• We do NOT guarantee connection with female users.\n" +
-      "• Matches depend on availability, activity, and system logic.\n\n" +
+      "*2. Data We Do NOT Collect*\n" +
+      "• Your real name, phone number, email, or address\n" +
+      "• The content of your chats (messages are not logged or stored)\n" +
+      "• Your IP address or device information\n" +
+      "• Any financial/payment instrument details\n\n" +
 
-      "*3. Demo Match*\n" +
-      "• New users receive one free Demo Match as a sample of the platform experience.\n" +
-      "• Demo Matches are automated previews — not connections to real users.\n" +
-      "• This is clearly disclosed at the start of every Demo Match session.\n\n" +
+      "*3. How We Use Your Data*\n" +
+      "• To match you with other users\n" +
+      "• To maintain your account and premium status\n" +
+      "• To enforce our Terms of Use and ban policy\n" +
+      "• To send platform-related announcements via the bot\n\n" +
 
-      "*4. No Guarantee of Match*\n" +
-      "• Premium connects you with real registered users, subject to their availability.\n" +
-      "• We do not guarantee gender, location, or personality of your match.\n" +
-      "• Delays or unavailability of matches may occur.\n\n" +
+      "*4. Data Sharing*\n" +
+      "• We do NOT sell, rent, or share your data with third parties for marketing.\n" +
+      "• We may share data with Indian law enforcement agencies if legally required under the IT Act 2000 or court order.\n\n" +
 
-      "*5. Payments*\n" +
-      "• Payments unlock features such as extended chat access or priority matching.\n" +
-      "• Payment does NOT guarantee a specific type of match (e.g., female users).\n" +
-      "• All payments are final and non-refundable once service is activated.\n\n" +
+      "*5. Data Retention*\n" +
+      "• Your data is retained while your account is active.\n" +
+      "• Send /deleteaccount to request deletion. All personal data is erased within 30 days.\n" +
+      "• Logs required for legal compliance may be retained for up to 90 days as per IT Rules 2021.\n\n" +
 
-      "*6. User Responsibility*\n" +
-      "• You agree to use respectful language and behavior.\n" +
-      "• Abuse, harassment, or misuse may result in suspension or ban without refund.\n\n" +
+      "*6. Children's Privacy*\n" +
+      "This service is strictly for adults (18+). We do not knowingly collect data from minors. If we become aware a minor has used the service, their account is immediately deleted.\n\n" +
 
-      "*7. Privacy*\n" +
-      "• Do not share sensitive personal information (phone, address, etc.).\n" +
-      "• We are not responsible for information voluntarily shared with others.\n\n" +
+      "*7. Security*\n" +
+      "• Data is stored on secured servers.\n" +
+      "• Chat sessions are anonymous — your Telegram identity is never revealed to your match.\n" +
+      "• We recommend you never share personal information in chat.\n\n" +
 
-      "*8. Service Availability*\n" +
-      "• We do not guarantee uninterrupted or error-free service.\n" +
-      "• Features may change at any time without notice.\n\n" +
+      "*8. Your Rights (DPDPA 2023)*\n" +
+      "• Right to access your data: send /profile\n" +
+      "• Right to correct your data: send /edit\n" +
+      "• Right to delete your data: send /deleteaccount\n\n" +
 
-      "*9. Age Requirement*\n" +
-      "• You must be 18+ to use this service.\n\n" +
+      "*9. Cookies & Tracking*\n" +
+      "This is a Telegram bot — no cookies, tracking pixels, or analytics scripts are used.\n\n" +
 
-      "─────────────────────────────────\n" +
-      "_By continuing to use the bot, you confirm that you understand and accept these terms._",
+      "*10. Contact*\n" +
+      "For privacy concerns or data requests, contact the platform admin via Telegram.\n\n" +
+
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+      "_Governed by the Digital Personal Data Protection Act (DPDPA) 2023, India._",
       { parse_mode: "Markdown" }
     );
   });
