@@ -4240,20 +4240,17 @@ bot.onText(/\/help/, async (msg) => {
   // ── Profile helpers ──────────────────────────────────────────────────────────
 
 const EDIT_FIELD_LABELS = [
-  "📝 Change Name", "🎂 Change Age", "⚤ Change Gender",
-  "💞 Change Looking For", "📖 Change Bio", "🌍 Change Country", "❌ Cancel",
+  "📝 Change Name", "🎂 Change Age", "❌ Cancel",
 ];
 
 async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<typeof getUser>>>) {
   const gLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", other: "🧑 Other" };
-  const lfLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", any: "💞 Any" };
   await bot.sendMessage(chatId,
     `👤 <b>Your Profile</b>\n\n` +
     `🏷 Name: <b>${escHtml(user.name)}</b>\n` +
     `🎂 Age: <b>${escHtml(user.age)}</b>\n` +
     `⚤ Gender: <b>${escHtml(gLabel[user.gender ?? ""] ?? "—")}</b>\n` +
-    `💞 Looking for: <b>${escHtml(lfLabel[user.lookingFor ?? ""] ?? "—")}</b>\n` +
-    `🌍 Country: <b>${escHtml(user.country)}</b>\n` +
+        `🌍 Country: <b>${escHtml(user.country)}</b>\n` +
     `📖 Bio: <i>${escHtml(user.bio)}</i>\n\n` +
     (() => {
       const active = isPremiumActive(user);
@@ -4294,19 +4291,13 @@ async function startSetup(chatId: number, id: number) {
 // Edit an existing profile — shows field picker
 async function startEditProfile(chatId: number, id: number) {
   editModeMap.set(id, "choosing");
-  const editUser = await getUser(id);
-  const isLockedFemale = editUser?.gender === "female";
   await bot.sendMessage(chatId,
-    "✏️ *Edit Profile*\n\nWhich field do you want to change?",
+    "✏️ *Edit Profile*\n\nWhat do you want to change?",
     {
       parse_mode: "Markdown",
       reply_markup: {
         keyboard: [
           [{ text: "📝 Change Name" }, { text: "🎂 Change Age" }],
-          ...(isLockedFemale
-            ? [[{ text: "💞 Change Looking For" }]]
-            : [[{ text: "⚤ Change Gender" }, { text: "💞 Change Looking For" }]]),
-          [{ text: "📖 Change Bio" }, { text: "🌍 Change Country" }],
           [{ text: "❌ Cancel" }],
         ],
         resize_keyboard: true,
@@ -4412,13 +4403,6 @@ bot.on("message", async (msg) => {
           `⚤ *Change Gender*\n\nCurrent: *${escMd(user.gender)}*`,
           { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
         );
-      } else if (text === "💞 Change Looking For") {
-        editModeMap.set(id, "looking_for");
-        await upsertUser(id, { state: "setup_looking_for" });
-        await bot.sendMessage(chatId,
-          `💞 *Change Looking For*\n\nCurrent: *${escMd(user.lookingFor)}*`,
-          { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
-        );
       } else if (text === "📖 Change Bio") {
         editModeMap.set(id, "bio");
         await upsertUser(id, { state: "setup_bio" });
@@ -4467,15 +4451,15 @@ bot.on("message", async (msg) => {
         return;
       }
       const skipGenderStep = !isEdit && user.gender === "female";
-      await upsertUser(id, { age, state: isEdit ? "idle" : (skipGenderStep ? "setup_looking_for" : "setup_gender") });
-      if (isEdit) { await finishEditField(chatId, id); return; }
       if (skipGenderStep) {
-        await bot.sendMessage(chatId, `♀️ *Gender: Female* (permanent — cannot be changed)\n\n*Step 3 of 3* — 💞 Looking for?`, {
-          parse_mode: "Markdown",
-          reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }], [{ text: "Any" }]], resize_keyboard: true, one_time_keyboard: true },
-        });
+        // Female gender is locked — skip gender step, complete profile right here
+        await upsertUser(id, { age, lookingFor: "any", state: "idle", isProfileComplete: true });
+        const updatedFemale = await getUser(id);
+        await sendMain(chatId, updatedFemale!, "🎉 Profile ready! 🆓 As a female user, you get *free unlimited matches*! Tap 💘 *Find Match* to begin!");
         return;
       }
+      await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
+      if (isEdit) { await finishEditField(chatId, id); return; }
       await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ Tumhara gender?`, {
         parse_mode: "Markdown",
         reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true },
@@ -4511,20 +4495,6 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    if (user.state === "setup_looking_for") {
-      const isEdit = editModeMap.get(id) === "looking_for";
-      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
-      const lfMap: Record<string, "male"|"female"|"any"> = { male:"male", female:"female", any:"any" };
-      const lf = lfMap[text.toLowerCase()];
-      if (!lf) { await bot.sendMessage(chatId, "Please tap Male, Female, or Any."); return; }
-      await upsertUser(id, { lookingFor: lf, state: isEdit ? "idle" : "setup_bio" });
-      if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `*Step 5 of 6* — 📖 Write a short *bio* about yourself (max 300 chars):`, {
-        parse_mode: "Markdown",
-        reply_markup: { remove_keyboard: true },
-      });
-      return;
-    }
 
     if (user.state === "setup_bio") {
       const isEdit = editModeMap.get(id) === "bio";
