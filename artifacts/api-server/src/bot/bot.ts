@@ -1624,9 +1624,9 @@ const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha
   async function sendPayGate(chatId: number, _prefix?: string, matchName?: string) {
     const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
     const teasers = [
-      `⏰ <b>${name} abhi bhi online hai...</b> woh tumhara wait kar rahi hai 🥺`,
-      `💬 <b>${name} ne message kiya:</b> "kya tum wapas aoge?" 🥺`,
-      `📵 <b>${name} typing kar rahi hai...</b> — ruko mat, connect karo! 💪`,
+      `⏰ <b>${name} is still online...</b> waiting for you 🥺`,
+      `💬 <b>${name} sent a message:</b> "Are you coming back?" 🥺`,
+      `📵 <b>${name} is typing...</b> — don't wait, connect now! 💪`,
     ];
     const teaser = teasers[Math.floor(Math.random() * teasers.length)];
     const fullText = teaser + `\n\n` +
@@ -1685,7 +1685,7 @@ async function startFakeChat(chatId: number, userId: number, lookingFor: string 
 
 await bot.sendMessage(
     chatId,
-    `✅ Match found! You've been connected with *${name}* 💬\n\nSay hello!`,
+    `✅ Demo mode: You've been connected with *${name}* 💬\n\nSay hello!`,
     { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
@@ -1715,7 +1715,7 @@ await bot.sendMessage(
           .where(eq(usersTable.id, userId));
         // 30 seconds are up — show pay gate immediately
         // sendPayGate may throw 403 if user blocked the bot — swallow that case quietly
-        await sendPayGate(chatId, "⏰ Free preview khatam...", persona?.name).catch((err) => {
+        await sendPayGate(chatId, undefined).catch((err) => {
           if (isUserUnreachableError(err)) {
             logger.info({ userId, chatId }, "Free-trial pay gate skipped — user unreachable (blocked bot)");
             return;
@@ -3681,7 +3681,7 @@ async function stopChat(chatId: number, userId: number) {
 
       if (disconnected.length > 0) {
         // We were first — send the partner exactly one notification
-        if (!isPremiumActive(partner) && (partner.chatCount ?? 0) > 0 && partner.gender !== "female") {
+        if (!isPremiumActive(partner) && partner.gender !== "female") {
           await sendPayGate(partnerId);
         } else {
           await sendMain(partnerId, partner, "Your match ended the chat.");
@@ -3692,9 +3692,9 @@ async function stopChat(chatId: number, userId: number) {
   }
 
   const updated = await getUser(userId);
-  // Non-premium users who've used their trial → show pay gate with correct girl name
-  if (updated && !isPremiumActive(updated) && (updated.chatCount ?? 0) > 0 && updated.gender !== "female") {
-    await sendPayGate(chatId, undefined, fakePersonaName);
+  // Non-premium users → show pay gate
+  if (updated && !isPremiumActive(updated) && updated.gender !== "female") {
+    await sendPayGate(chatId);
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
   }
@@ -3764,23 +3764,17 @@ async function findMatch(chatId: number, userId: number) {
       return;
     }
 
-    // ── FREE / EXPIRED USERS: AI chat ONLY — never touch real user pool ───
+    // ── NON-PREMIUM USERS: require payment — no free demo ──────────────────
     // Female users are always free — bypass the pay gate entirely
     const userIsFemale = me.gender === "female";
     if (!userIsFemale && !isPremiumActive(me)) {
       if (me.hasPaid && me.premiumExpiresAt && me.premiumExpiresAt <= new Date()) {
-        // Premium expired — clear hasPaid flag and show expiry message + paygate
+        // Premium expired — clear hasPaid flag
         await db.update(usersTable)
           .set({ hasPaid: false, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await sendPayGate(chatId, "⏳ *Tumhara Premium expire ho gaya!*\n\nRenew karo — real matches ka wait kar rahi hai! 💕");
-      } else if (me.chatCount > 0) {
-        // Already used free trial — require payment
-        await sendPayGate(chatId);
-      } else {
-        // First ever chat — AI demo only
-        await startFakeChat(chatId, userId, me.lookingFor, me.gender);
       }
+      await sendPayGate(chatId);
       return;
     }
 
@@ -3937,8 +3931,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         "🎭 *No Gender Guarantee*\n" +
         "We do NOT guarantee the gender, age, location, or identity of your match. Matches are random and depend on availability.\n\n" +
 
-        "🤖 *First Chat May Be Automated*\n" +
-        "Your first free session may be an AI-powered demo to show you how the platform works. This is clearly notified at the start.\n\n" +
+        
 
         "🚫 *No Criminal Liability*\n" +
         "The platform owner/admin is NOT responsible for any criminal offence, harm, fraud, harassment, or illegal activity carried out by users. Users are solely responsible for their actions under IPC/BNS and IT Act 2000.\n\n" +
@@ -3951,8 +3944,8 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         "⚖️ *Zero Tolerance for Illegal Activity*\n" +
         "We strictly prohibit and do NOT support: sexual exploitation, harassment, hate speech, threats, fraud, drugs, or any activity illegal under Indian law or Telegram's Terms of Service. Violations result in immediate permanent ban.\n\n" +
 
-        "💳 *Payment is Optional*\n" +
-        "Basic features are free. Premium features require payment. Paying is entirely your choice — there is no compulsion. Payments once activated are non-refundable.\n\n" +
+        "💳 *Premium Required to Match*\n" +
+        "Matching with real users requires a Premium membership (paid via Telegram Stars). Female users get free access. Payments once activated are non-refundable.\n\n" +
 
         "🗑️ *Delete Your Profile*\n" +
         "You may delete all your data at any time by sending /deleteaccount.\n\n" +
@@ -4051,7 +4044,7 @@ bot.on('callback_query', async (query) => {
       await (bot as any).sendInvoice(
         chatId,
         `${plan.emoji} ${plan.label} Premium`,
-        `WorldMatch Premium unlock karo — ${plan.label} access. Stars se instant payment!`,
+        `Unlock ${plan.label} Premium access with Telegram Stars!`,
         key, "", "XTR",
         [{ label: plan.label, amount: plan.stars }]
       );
@@ -4247,8 +4240,8 @@ bot.onText(/\/help/, async (msg) => {
       "*3. No Gender Guarantee*\n" +
       "We do NOT guarantee the gender, age, location, nationality, or identity of any user you are matched with. Matching is random and subject to platform availability. No claims of any specific gender match are made or implied.\n\n" +
 
-      "*4. AI / Automated Sessions*\n" +
-      "Your first free chat session may be an AI-powered automated demo. This is disclosed at the start of every such session. You are never connected to a real user without being notified.\n\n" +
+      "*4. Premium Required*\n" +
+      "Matching with real users requires an active Premium membership. Female users are granted free access. No AI-simulated chat sessions are provided.\n\n" +
 
       "*5. No Criminal Liability*\n" +
       "The platform owner, developers, and administrators are NOT responsible for any criminal offence, civil wrong, harm, fraud, harassment, cheating, defamation, extortion, blackmail, or any illegal act committed by users. Each user is solely responsible for their conduct under the Indian Penal Code / Bharatiya Nyaya Sanhita (BNS) 2023, IT Act 2000, and all applicable laws.\n\n" +
@@ -4270,8 +4263,8 @@ bot.onText(/\/help/, async (msg) => {
       "• Type /privacy for our complete Privacy Policy.\n\n" +
 
       "*8. Payment Terms*\n" +
-      "• Premium features are optional. Basic features are free.\n" +
-      "• Payment is entirely your own choice — there is zero compulsion.\n" +
+      "• Matching requires a Premium membership (paid via Telegram Stars).\n" +
+      "• Female users have free access to all matching features.\n" +
       "• Payments are non-refundable once the premium service is activated.\n" +
       "• Payment does NOT guarantee any specific type, gender, or quality of match.\n\n" +
 
@@ -4447,7 +4440,7 @@ bot.on("message", async (msg) => {
     if (!userFloodWarned.has(id)) {
       userFloodWarned.add(id);
       await bot.sendMessage(chatId,
-        "⏳ Ek second — bahut fast messages aa rahe hain. 30 seconds baad phir try karo."
+        "⏳ Slow down — too many messages at once. Please wait 30 seconds and try again."
       ).catch(() => {});
     }
     return;
@@ -4603,9 +4596,10 @@ bot.on("message", async (msg) => {
       await upsertUser(id, { gender: g, lookingFor: "any", state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
       if (lockGender) {
-        await sendMain(chatId, updated!, "🎉 Profile ready! \n\n🆓 *Females get FREE unlimited matches!* Tap 💘 *Find Match* to begin!");
+        await sendMain(chatId, updated!, "🎉 Profile complete! 🆓 *Females get FREE unlimited matches!* Tap 💘 *Find Match* to begin!");
       } else {
-        await sendMain(chatId, updated!, "🎉 Profile ready! Ab shuru karte hain — tap 💘 *Find Match* to begin!");
+        await bot.sendMessage(chatId, "🎉 Profile complete! Unlock Premium to start matching with real people. 👇", { parse_mode: "Markdown" });
+        await sendPayGate(chatId);
       }
       return;
     }
@@ -4834,7 +4828,7 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, `✅ You're a *Premium* member — unlimited real matches enabled! 💎${expStr}`, { parse_mode: "Markdown" });
       } else {
         // Premium expired while button was still shown
-        await sendPayGate(chatId, "⏳ *Tumhara Premium expire ho gaya!* Renew karo 💕");
+        await sendPayGate(chatId, "⏳ *Your Premium has expired.* Renew now to keep matching! 💕");
       }
       return;
     }
@@ -4843,8 +4837,8 @@ bot.on("message", async (msg) => {
     // Unrecognised input:
     // — if free user who used trial, they're probably confused & trying to chat → show paygate
     // — otherwise re-show the menu so buttons are always visible
-    if (!isPremiumActive(user) && (user.chatCount ?? 0) > 0 && user.gender !== "female") {
-      await sendPayGate(chatId, "💬 Want to keep chatting? Unlock Premium to connect with real people! 💕");
+    if (!isPremiumActive(user) && user.gender !== "female") {
+      await sendPayGate(chatId);
     } else {
       await sendMain(chatId, user);
     }
@@ -5370,10 +5364,10 @@ bot.onText(/\/deals/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const DEALS_MSG =
     "Hey! 👋\n\n" +
-    "Ek useful cheez share karna tha — ek channel hai @dealsatyourdoo jahan daily discount deals post hoti hain.\n\n" +
-    "Electronics, fashion, daily essentials — kaafi baar 50-70% tak ka discount milta hai. Agar deals dhundhte ho toh worth checking out hai.\n\n" +
-    "Join karo: @dealsatyourdoo\n\n" +
-    "Bas itna hi, enjoy chatting! 😊";
+    "Sharing something useful — @dealsatyourdoo posts daily discount deals.\n\n" +
+    "Electronics, fashion, daily essentials — often 50-70% off. Worth checking out!\n\n" +
+    "Join here: @dealsatyourdoo\n\n" +
+    "That's all, enjoy chatting! 😊";
 
   const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
   await bot.sendMessage(msg.chat.id,
@@ -5506,7 +5500,7 @@ async function setupBotProfile() {
           "🌍 Connect with singles from every corner of the world\n" +
           "💬 Start chatting instantly with real matches\n" +
           "🔒 Safe, private & fun\n\n" +
-          "✨ Your first chat is FREE — find your match right now!\n\n" +
+          "✨ Upgrade to Premium and start matching with real people now!\n\n" +
           "Tap START to begin your journey 👇",
       }),
     });
@@ -5516,7 +5510,7 @@ async function setupBotProfile() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        short_description: "💕 Meet & chat with singles worldwide. Your first match is FREE! 🌍",
+        short_description: "💕 Chat anonymously worldwide. Get Premium to start matching! 🌍",
       }),
     });
 
