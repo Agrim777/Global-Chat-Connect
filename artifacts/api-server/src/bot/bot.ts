@@ -442,8 +442,8 @@ async function handleNsfwViolation(chatId: number, userId: number): Promise<bool
   // Second offence — restrict for 1 hour
   restrictedUntil.set(userId, Date.now() + 3_600_000);
   await bot.sendMessage(chatId,
-    "🚫 Tumhara account 1 ghante ke liye restrict kar diya gaya hai inappropriate content ki wajah se.\n\n" +
-    "Iske baad bhi agar aisa hua toh permanent ban ho sakta hai.",
+    "🚫 Your account has been restricted for 1 hour due to inappropriate content.\n\n" +
+    "If this happens again, you may be permanently banned.",
     { parse_mode: "Markdown" }
   ).catch(() => {});
   return true; // drop the message
@@ -1632,8 +1632,8 @@ const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha
     const fullText = teaser + `\n\n` +
       `⭐ <b>Unlock Premium with Telegram Stars</b>\n` +
       `✅ Unlimited real matches\n` +
-      `✅ Koi timer nahi, koi rukawat nahi\n\n` +
-      `👇 Apna plan choose karo:`;
+      `✅ No timer, no interruptions\n\n` +
+      `👇 Choose your plan:`;
     await bot.sendMessage(chatId, fullText, {
       parse_mode: "HTML",
       reply_markup: { inline_keyboard: [
@@ -5291,13 +5291,13 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   for (const u of allUsers) {
     try {
       await bot.sendMessage(u.id,
-        "⭐ <b>WorldMatch Premium — Telegram Stars se unlock karo!</b>\n\n" +
+        "⭐ <b>WorldMatch Premium — Unlock with Telegram Stars!</b>\n\n" +
         "✅ Unlimited real matches\n" +
-        "✅ Koi timer nahi — lifetime access available\n\n" +
+        "✅ No timer — lifetime access available\n\n" +
         `⚡ 2 Weeks — ${PLANS.week2.stars} Stars\n` +
         `💎 1 Month — ${PLANS.month.stars} Stars\n` +
         `👑 Lifetime — ${PLANS.yearly.stars} Stars\n\n` +
-        "👇 Bot mein /premium tap karo aur plan choose karo — instant unlock!",
+        "👇 Tap /premium in the bot and choose your plan — instant unlock!",
         {
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: [[{ text: "⭐ Choose Plan — Premium", callback_data: "plan_yearly" }]] },
