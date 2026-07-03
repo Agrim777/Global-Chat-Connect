@@ -5334,22 +5334,16 @@ bot.onText(/\/broadcastfemales/, async (msg) => {
   }
 
   const PREVIEW_MSG =
-    "💌 <b>Special Message for You!</b>
+    `💌 <b>Special Message for You!</b>
 
-" +
-    "🎉 <b>Great news — this bot is completely FREE for you!</b>
+🎉 <b>Great news — this bot is completely FREE for you!</b>
 
-" +
-    "✅ Unlimited matches — no limit, no timer
-" +
-    "✅ Connect with people from all over the world
-" +
-    "✅ Anonymous & safe chatting
-" +
-    "✅ No payment needed — ever!
+✅ Unlimited matches — no limit, no timer
+✅ Connect with people from all over the world
+✅ Anonymous & safe chatting
+✅ No payment needed — ever!
 
-" +
-    "💘 Tap below to find your match right now 👇";
+💘 Tap below to find your match right now 👇`;
 
   await bot.sendMessage(chatId,
     `👀 <b>Preview — exactly as females will see it:</b>
