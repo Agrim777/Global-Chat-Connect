@@ -4398,7 +4398,7 @@ async function startSetup(chatId: number, id: number) {
     state: "setup_name",
   });
   await bot.sendMessage(chatId,
-    "Sirf 3 sawaal — phir dating shuru! 🎉\n\n*Step 1 of 3* — 📝 Apna naam batao?\n\n_Sirf first name._",
+    "Just 3 questions — let's get started! 🎉\n\n*Step 1 of 3* — 📝 What is your name?\n\n_First name only._",
     { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
   );
 }
@@ -4553,7 +4553,7 @@ bot.on("message", async (msg) => {
       const capitalized = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
       await upsertUser(id, { name: capitalized, state: isEdit ? "idle" : "setup_age" });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 😊\n\n*Step 2 of 3* — 🎂 Umar kitni hai?`, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 😊\n\n*Step 2 of 3* — 🎂 How old are you?`, { parse_mode: "Markdown" });
       return;
     }
 
@@ -4575,7 +4575,7 @@ bot.on("message", async (msg) => {
       }
       await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ Tumhara gender?`, {
+      await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ What is your gender?`, {
         parse_mode: "Markdown",
         reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true },
       });
