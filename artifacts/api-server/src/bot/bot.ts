@@ -5291,16 +5291,18 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   for (const u of allUsers) {
     try {
       await bot.sendMessage(u.id,
-        "⭐ <b>WorldMatch Premium — Unlock with Telegram Stars!</b>\n\n" +
+        "💬 <b>You have a match waiting for you!</b>\n\n" +
+        "⭐ <b>Unlock Premium with Telegram Stars</b>\n" +
         "✅ Unlimited real matches\n" +
-        "✅ No timer — lifetime access available\n\n" +
-        `⚡ 2 Weeks — ${PLANS.week2.stars} Stars\n` +
-        `💎 1 Month — ${PLANS.month.stars} Stars\n` +
-        `👑 Lifetime — ${PLANS.yearly.stars} Stars\n\n` +
-        "👇 Tap /premium in the bot and choose your plan — instant unlock!",
+        "✅ No timer, no interruptions\n\n" +
+        "👇 Choose your plan:",
         {
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: [[{ text: "⭐ Choose Plan — Premium", callback_data: "plan_yearly" }]] },
+          reply_markup: { inline_keyboard: [
+            [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} ⭐`, callback_data: "plan_week2" }],
+            [{ text: `💎 1 Month — ${PLANS.month.stars} ⭐`, callback_data: "plan_month" }],
+            [{ text: `👑 Lifetime — ${PLANS.yearly.stars} ⭐`, callback_data: "plan_yearly" }],
+          ]},
         }
       );
       sent++;
