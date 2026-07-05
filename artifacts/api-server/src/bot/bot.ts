@@ -4653,10 +4653,15 @@ bot.on("message", async (msg) => {
         await upsertUser(id, { gender: g, state: "idle" });
         await finishEditField(chatId, id); return;
       }
-      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle", isProfileComplete: true });
+      // Grant lifetime premium to female users on first setup
+      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle" as const, isProfileComplete: true });
+      if (lockGender) {
+        // hasPaid=true + premiumExpiresAt=null → lifetime (no expiry = lifetime, per isPremiumActive logic)
+        await upsertUser(id, { hasPaid: true, premiumExpiresAt: null });
+      }
       const updated = await getUser(id);
       if (lockGender) {
-        await sendMain(chatId, updated!, "🎉 Profile complete! 🆓 *Females get FREE unlimited matches!* Tap 💘 *Find Match* to begin!");
+        await sendMain(chatId, updated!, "🎉 Profile complete! 💎 *You've been granted Lifetime Premium — FREE, forever!* Tap 💘 *Find Match* to begin!");
         // Notify admin: a new female user just joined (females get free unlimited access)
         bot.sendMessage(
           ADMIN_ID,
@@ -5723,6 +5728,87 @@ setupBotProfile();
 })();
 
 logger.info("Telegram bot polling started");
+
+// ── One-time Female Lifetime Grant + Message broadcast ────────────────────────
+// Set FEMALE_LIFETIME_GRANT=true in Railway env vars, redeploy ONCE, then remove it.
+// This grants hasPaid=true + premiumExpiresAt=null (lifetime) to every female user
+// and sends them a warm appreciation message.
+(async () => {
+  if (process.env.FEMALE_LIFETIME_GRANT !== "true") return;
+
+  // Wait 20s for bot to settle before blasting messages
+  await new Promise(r => setTimeout(r, 20_000));
+
+  const FEMALE_MSG =
+    "💖 A Special Message Just For You 💖\n\n" +
+    "Hey beautiful! 🌸\n\n" +
+    "We want to take a moment to celebrate YOU — every girl, every woman, every female who has joined our community. " +
+    "We stand with girlhood, femalehood, and womanhood — fully, proudly, and unconditionally. 🌺\n\n" +
+    "As a token of our love and respect, we have gifted you 💎 *Lifetime Premium* — completely FREE. " +
+    "No payments, no expiry, no catches. This is yours forever, because you deserve the very best. " +
+    "This would normally cost thousands of rupees — consider it our heartfelt gift to you. 🎁✨\n\n" +
+    "You bring warmth, depth, and joy to this space, and we are endlessly grateful for that. 🙏\n\n" +
+    "━━━━━━━━━━━━━━━━━━━━━\n" +
+    "⚠️ *A note on safety:*\n" +
+    "We take your security very seriously. Any man who attempts to disguise himself as a female to misuse this " +
+    "community will be *immediately and permanently blocked* from the bot and reported to Telegram. " +
+    "This space is safe — and we will keep it that way for you. 🛡️\n" +
+    "━━━━━━━━━━━━━━━━━━━━━\n\n" +
+    "With all our love,\n" +
+    "💗 The Global Chat Connect Team";
+
+  try {
+    const females = await db
+      .select({ id: usersTable.id })
+      .from(usersTable)
+      .where(eq(usersTable.gender, "female"));
+
+    logger.info({ count: females.length }, "Female lifetime grant: starting");
+
+    // Grant lifetime premium to all females in bulk first
+    if (females.length > 0) {
+      await db
+        .update(usersTable)
+        .set({ hasPaid: true, premiumExpiresAt: null, updatedAt: new Date() })
+        .where(eq(usersTable.gender, "female"));
+      logger.info({ count: females.length }, "Female lifetime grant: DB update done");
+    }
+
+    let sent = 0, failed = 0;
+    for (const u of females) {
+      let retries = 3;
+      while (retries-- > 0) {
+        try {
+          await bot.sendMessage(u.id, FEMALE_MSG, { parse_mode: "Markdown" });
+          sent++;
+          break;
+        } catch (e: any) {
+          const retryAfter = e?.response?.body?.parameters?.retry_after;
+          if (retryAfter) {
+            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+          } else {
+            failed++;
+            break;
+          }
+        }
+      }
+      await new Promise(r => setTimeout(r, 60)); // ~16 msg/sec, safe under Telegram limits
+    }
+
+    logger.info({ sent, failed }, "Female lifetime grant: broadcast complete");
+    bot.sendMessage(
+      ADMIN_ID,
+      `✅ *Female Lifetime Grant done!*\n\n` +
+      `👩 Total females: ${females.length}\n` +
+      `📤 Messages sent: ${sent}\n` +
+      `❌ Failed: ${failed}\n\n` +
+      `⚠️ Remove FEMALE_LIFETIME_GRANT from Railway env vars now.`,
+      { parse_mode: "Markdown" }
+    ).catch(() => {});
+  } catch (err) {
+    logger.error({ err }, "Female lifetime grant broadcast failed");
+  }
+})();
 
 // ── One-time deals broadcast (triggered by STARTUP_BROADCAST_DEALS=true env var) ──
 // Set STARTUP_BROADCAST_DEALS=true in Railway env vars, redeploy once, then remove it.
