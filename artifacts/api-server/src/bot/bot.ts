@@ -4597,6 +4597,16 @@ bot.on("message", async (msg) => {
       const updated = await getUser(id);
       if (lockGender) {
         await sendMain(chatId, updated!, "🎉 Profile complete! 🆓 *Females get FREE unlimited matches!* Tap 💘 *Find Match* to begin!");
+        // Notify admin: a new female user just joined (females get free unlimited access)
+        bot.sendMessage(
+          ADMIN_ID,
+          `👩 *New Girl Joined\\!*\n\n` +
+          `Name: *${escMd(updated?.name ?? "Unknown")}*\n` +
+          `Age: ${escMd(updated?.age ?? "?")} yrs\n` +
+          `ID: \`${id}\`\n` +
+          `Username: @${escMd(updated?.telegramUsername ?? "none")}`,
+          { parse_mode: "MarkdownV2" }
+        ).catch(() => {});
       } else {
         await bot.sendMessage(chatId, "🎉 Profile complete! Unlock Premium to start matching with real people. 👇", { parse_mode: "Markdown" });
         await sendPayGate(chatId);
