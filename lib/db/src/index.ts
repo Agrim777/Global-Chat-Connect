@@ -24,3 +24,19 @@ export const pool = new Pool({
 export const db = drizzle(pool, { schema });
 
 export * from "./schema";
+
+/**
+ * Run safe, idempotent schema migrations at startup.
+ * Uses ADD COLUMN IF NOT EXISTS so it's a no-op if the column already exists.
+ */
+export async function runMigrations(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS premium_expires_at TIMESTAMP;
+    `);
+  } finally {
+    client.release();
+  }
+}

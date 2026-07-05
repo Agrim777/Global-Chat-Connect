@@ -1,5 +1,5 @@
 import TelegramBot from "node-telegram-bot-api";
-import { db, usersTable } from "@workspace/db";
+import { db, usersTable, runMigrations } from "@workspace/db";
 import { eq, and, ne, inArray, notInArray, or } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
@@ -284,6 +284,14 @@ process.on("unhandledRejection", (reason) => {
 });
 
 (async () => {
+  // Run DB migrations first — adds any missing columns before queries run
+  try {
+    await runMigrations();
+    logger.info("DB migrations applied successfully");
+  } catch (err) {
+    logger.error({ err }, "DB migration failed — bot may be unstable");
+  }
+
   // Call getUpdates multiple times to boot any stale polling session off Telegram's server
   for (let i = 0; i < 3; i++) {
     try { await bot.getUpdates({ offset: -1, timeout: 0, limit: 1 }); } catch (_) { /* ignore */ }
@@ -4127,6 +4135,49 @@ bot.on('callback_query', async (query) => {
       `✅ *Broadcast complete!*\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n\n🔒 Custom broadcast is now locked for this session.`,
       { parse_mode: 'Markdown' }
     );
+    return;
+  }
+
+  // ── Delete account confirmation ──────────────────────────────────────────
+  if (query.data === 'delete_confirm') {
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    try {
+      const target = await getUser(userId);
+      if (!target) {
+        await bot.editMessageText('❌ Account not found.', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
+        return;
+      }
+      // Disconnect from any active chat first
+      if (target.state === 'chatting' && target.chattingWith && target.chattingWith !== FAKE_CHAT_ID) {
+        const partnerId = target.chattingWith;
+        const partner = await getUser(partnerId);
+        if (partner) {
+          await db.update(usersTable).set({ state: 'idle', chattingWith: null, updatedAt: new Date() })
+            .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, userId)));
+          await sendMain(partnerId, partner, 'Your match disconnected. Tap 💘 Find Match to connect with someone new!').catch(() => {});
+        }
+      }
+      if (target.state === 'chatting' && target.chattingWith === FAKE_CHAT_ID) {
+        const fakeTimer = chatTimerMap.get(userId);
+        if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(userId); }
+        fakePersonaMap.delete(userId);
+        fakeReplySet.delete(userId);
+      }
+      await db.delete(usersTable).where(eq(usersTable.id, userId));
+      await bot.editMessageText(
+        '🗑️ *Account deleted.*\n\nAll your data has been removed. You can start fresh anytime with /start.',
+        { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
+      ).catch(() => {});
+    } catch (err) {
+      logger.error({ err, userId }, 'delete_confirm callback error');
+      await bot.sendMessage(chatId, '❌ Something went wrong. Try again or contact support.').catch(() => {});
+    }
+    return;
+  }
+
+  if (query.data === 'delete_cancel') {
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' }).catch(() => {});
+    await bot.editMessageText('✅ Your account is safe — nothing was deleted.', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
     return;
   }
 
