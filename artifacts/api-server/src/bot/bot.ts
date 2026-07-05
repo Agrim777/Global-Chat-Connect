@@ -4542,6 +4542,15 @@ bot.on("message", async (msg) => {
     // ── Edit field picker (idle + editModeMap = "choosing") ─────────────
     if (user.state === "idle" && editModeMap.get(id) === "choosing") {
       if (text === "📝 Change Name") {
+        // Female users cannot change their name — it is permanently locked
+        if (user.gender === "female") {
+          await bot.sendMessage(chatId, "♀️ Female profiles have a locked name and cannot be changed.", { reply_markup: { remove_keyboard: true } });
+          editModeMap.delete(id);
+          await upsertUser(id, { state: "idle" });
+          const fresh = await getUser(id);
+          await sendMain(chatId, fresh!);
+          return;
+        }
         editModeMap.set(id, "name");
         await upsertUser(id, { state: "setup_name" });
         await bot.sendMessage(chatId,
@@ -4651,12 +4660,12 @@ bot.on("message", async (msg) => {
         // Notify admin: a new female user just joined (females get free unlimited access)
         bot.sendMessage(
           ADMIN_ID,
-          `👩 *New Girl Joined\\!*\n\n` +
-          `Name: *${escMd(updated?.name ?? "Unknown")}*\n` +
-          `Age: ${escMd(updated?.age ?? "?")} yrs\n` +
-          `ID: \`${id}\`\n` +
-          `Username: @${escMd(updated?.telegramUsername ?? "none")}`,
-          { parse_mode: "MarkdownV2" }
+          `👩 <b>New Girl Joined!</b>\n\n` +
+          `Name: <b>${escHtml(updated?.name ?? "Unknown")}</b>\n` +
+          `Age: ${escHtml(updated?.age ?? "?")} yrs\n` +
+          `ID: <code>${id}</code>\n` +
+          `Username: @${escHtml(updated?.telegramUsername ?? "none")}`,
+          { parse_mode: "HTML" }
         ).catch(() => {});
       } else {
         await bot.sendMessage(chatId, "🎉 Profile complete! Unlock Premium to start matching with real people. 👇", { parse_mode: "Markdown" });
@@ -5212,6 +5221,30 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
   }
 });
 
+// ── /deleteaccount — self-service account deletion ────────────────────────────
+bot.onText(/\/deleteaccount/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id;
+  if (!userId) return;
+  const user = await getUser(userId).catch(() => null);
+  if (!user) {
+    await bot.sendMessage(chatId, "No account found. Send /start to create one.");
+    return;
+  }
+  await bot.sendMessage(chatId,
+    "🗑️ *Delete Account*\n\nThis will permanently erase your profile and all data. This cannot be undone.\n\nAre you sure?",
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✅ Yes, delete my account", callback_data: "delete_confirm" }],
+          [{ text: "❌ No, keep my account",    callback_data: "delete_cancel"  }],
+        ],
+      },
+    }
+  );
+});
+
 // ── Admin: /banhealth — quick health snapshot (block-rate, paid users, etc.) ─
 // Surfaces early-warning signals BEFORE Telegram bans the bot:
 //  - block-rate spike in last hour (sudden mass-block ⇒ likely spam-report storm)
@@ -5545,6 +5578,34 @@ bot.onText(/\/users/, async (msg) => {
     page += line + "\n";
   }
   if (page.trim()) await bot.sendMessage(chatId, page || "_No users yet._", { parse_mode: "Markdown" });
+});
+
+// ── Admin: /femalecount — count female users ──────────────────────────────────
+bot.onText(/\/femalecount/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+  try {
+    const all = await db.select({ id: usersTable.id, gender: usersTable.gender, name: usersTable.name, age: usersTable.age, telegramUsername: usersTable.telegramUsername, createdAt: usersTable.createdAt }).from(usersTable);
+    const females = all.filter(u => u.gender === "female");
+    const lines = females.map(u =>
+      `• ${escMd(u.name ?? "—")} (${escMd(u.age ?? "?")}) | \`${u.id}\` | @${escMd(u.telegramUsername ?? "none")}`
+    );
+    const header = `👩 *Female Users: ${females.length}* / Total: ${all.length}\n\n`;
+    const MAX = 3800;
+    let page = header;
+    let pageNum = 1;
+    for (const line of lines) {
+      if ((page + line + "\n").length > MAX) {
+        await bot.sendMessage(chatId, page, { parse_mode: "Markdown" });
+        page = `_(page ${++pageNum})_\n`;
+      }
+      page += line + "\n";
+    }
+    await bot.sendMessage(chatId, page || "_No female users yet._", { parse_mode: "Markdown" });
+  } catch (err) {
+    logger.error({ err }, "/femalecount error");
+    await bot.sendMessage(chatId, "❌ Failed to fetch data.").catch(() => {});
+  }
 });
 
 // ── Bot profile setup (runs once at startup) ──────────────────────────────
