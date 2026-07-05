@@ -5627,12 +5627,10 @@ bot.onText(/\/broadcastfemales/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const chatId = msg.chat.id;
 
-  await bot.sendMessage(chatId,
-    "⏳ Starting female lifetime grant broadcast\\.\\.\\.\n\nI'll DM you when it's done\\.",
-    { parse_mode: "MarkdownV2" }
-  ).catch(() => {});
+  // Acknowledge immediately — plain text, no parse_mode, can't fail on formatting
+  await bot.sendMessage(chatId, "⏳ Starting broadcast to all female users... I'll DM you when done.");
 
-  // Run in background so it doesn't block
+  // Run in background so command returns instantly
   (async () => {
     try {
       const females = await db
@@ -5642,27 +5640,29 @@ bot.onText(/\/broadcastfemales/, async (msg) => {
 
       logger.info({ count: females.length }, "/broadcastfemales: starting");
 
-      // Grant lifetime premium to all females in bulk
+      // Grant lifetime premium to every female in one DB call
       if (females.length > 0) {
         await db
           .update(usersTable)
           .set({ hasPaid: true, premiumExpiresAt: null, updatedAt: new Date() })
           .where(eq(usersTable.gender, "female"));
+        logger.info({ count: females.length }, "/broadcastfemales: DB grant done");
       }
 
+      // Use HTML — no special-character escaping pitfalls unlike Markdown
       const FEMALE_MSG =
-        "💖 A Special Message Just For You 💖\n\n" +
+        "💖 <b>A Special Message Just For You</b> 💖\n\n" +
         "Hey beautiful! 🌸\n\n" +
         "We want to take a moment to celebrate YOU — every girl, every woman, every female who has joined our community. " +
         "We stand with girlhood, femalehood, and womanhood — fully, proudly, and unconditionally. 🌺\n\n" +
-        "As a token of our love and respect, we have gifted you 💎 *Lifetime Premium* — completely FREE. " +
+        "As a token of our love and respect, we have gifted you 💎 <b>Lifetime Premium</b> — completely FREE. " +
         "No payments, no expiry, no catches. This is yours forever, because you deserve the very best. " +
         "This would normally cost thousands of rupees — consider it our heartfelt gift to you. 🎁✨\n\n" +
         "You bring warmth, depth, and joy to this space, and we are endlessly grateful for that. 🙏\n\n" +
         "━━━━━━━━━━━━━━━━━━━━━\n" +
-        "⚠️ *A note on safety:*\n" +
+        "⚠️ <b>A note on safety:</b>\n" +
         "We take your security very seriously. Any man who attempts to disguise himself as a female to misuse this " +
-        "community will be *immediately and permanently blocked* from the bot and reported to Telegram. " +
+        "community will be <b>immediately and permanently blocked</b> from the bot and reported to Telegram. " +
         "This space is safe — and we will keep it that way for you. 🛡️\n" +
         "━━━━━━━━━━━━━━━━━━━━━\n\n" +
         "With all our love,\n" +
@@ -5671,36 +5671,38 @@ bot.onText(/\/broadcastfemales/, async (msg) => {
       let sent = 0, failed = 0;
       for (const u of females) {
         let retries = 3;
+        let delivered = false;
         while (retries-- > 0) {
           try {
-            await bot.sendMessage(u.id, FEMALE_MSG, { parse_mode: "Markdown" });
-            sent++;
+            await bot.sendMessage(u.id, FEMALE_MSG, { parse_mode: "HTML" });
+            delivered = true;
             break;
           } catch (e: any) {
             const retryAfter = e?.response?.body?.parameters?.retry_after;
             if (retryAfter) {
+              // Telegram rate-limit — wait and retry
               await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
             } else {
-              failed++;
+              // Permanent error (bot blocked, account deleted) — skip
               break;
             }
           }
         }
-        await new Promise(r => setTimeout(r, 60)); // ~16 msg/sec
+        if (delivered) { sent++; } else { failed++; }
+        await new Promise(r => setTimeout(r, 60)); // ~16 msg/sec — safe under Telegram limits
       }
 
       logger.info({ sent, failed }, "/broadcastfemales: complete");
-      bot.sendMessage(
+      await bot.sendMessage(
         ADMIN_ID,
-        `✅ *Female broadcast done\\!*\n\n` +
+        `✅ Female broadcast done!\n\n` +
         `👩 Total females: ${females.length}\n` +
         `📤 Sent: ${sent}\n` +
-        `❌ Failed \\(blocked bot\\): ${failed}`,
-        { parse_mode: "MarkdownV2" }
-      ).catch(() => {});
+        `❌ Failed (blocked/deleted): ${failed}`
+      );
     } catch (err) {
       logger.error({ err }, "/broadcastfemales failed");
-      bot.sendMessage(ADMIN_ID, "❌ broadcastfemales failed. Check logs.").catch(() => {});
+      await bot.sendMessage(ADMIN_ID, `❌ /broadcastfemales failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
     }
   })();
 });
