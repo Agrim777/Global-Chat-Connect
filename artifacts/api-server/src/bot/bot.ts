@@ -5622,6 +5622,89 @@ bot.onText(/\/femalecount/, async (msg) => {
   }
 });
 
+// ── Admin: /broadcastfemales — grant lifetime premium + send love message ────
+bot.onText(/\/broadcastfemales/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+
+  await bot.sendMessage(chatId,
+    "⏳ Starting female lifetime grant broadcast\\.\\.\\.\n\nI'll DM you when it's done\\.",
+    { parse_mode: "MarkdownV2" }
+  ).catch(() => {});
+
+  // Run in background so it doesn't block
+  (async () => {
+    try {
+      const females = await db
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(eq(usersTable.gender, "female"));
+
+      logger.info({ count: females.length }, "/broadcastfemales: starting");
+
+      // Grant lifetime premium to all females in bulk
+      if (females.length > 0) {
+        await db
+          .update(usersTable)
+          .set({ hasPaid: true, premiumExpiresAt: null, updatedAt: new Date() })
+          .where(eq(usersTable.gender, "female"));
+      }
+
+      const FEMALE_MSG =
+        "💖 A Special Message Just For You 💖\n\n" +
+        "Hey beautiful! 🌸\n\n" +
+        "We want to take a moment to celebrate YOU — every girl, every woman, every female who has joined our community. " +
+        "We stand with girlhood, femalehood, and womanhood — fully, proudly, and unconditionally. 🌺\n\n" +
+        "As a token of our love and respect, we have gifted you 💎 *Lifetime Premium* — completely FREE. " +
+        "No payments, no expiry, no catches. This is yours forever, because you deserve the very best. " +
+        "This would normally cost thousands of rupees — consider it our heartfelt gift to you. 🎁✨\n\n" +
+        "You bring warmth, depth, and joy to this space, and we are endlessly grateful for that. 🙏\n\n" +
+        "━━━━━━━━━━━━━━━━━━━━━\n" +
+        "⚠️ *A note on safety:*\n" +
+        "We take your security very seriously. Any man who attempts to disguise himself as a female to misuse this " +
+        "community will be *immediately and permanently blocked* from the bot and reported to Telegram. " +
+        "This space is safe — and we will keep it that way for you. 🛡️\n" +
+        "━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "With all our love,\n" +
+        "💗 The Global Chat Connect Team";
+
+      let sent = 0, failed = 0;
+      for (const u of females) {
+        let retries = 3;
+        while (retries-- > 0) {
+          try {
+            await bot.sendMessage(u.id, FEMALE_MSG, { parse_mode: "Markdown" });
+            sent++;
+            break;
+          } catch (e: any) {
+            const retryAfter = e?.response?.body?.parameters?.retry_after;
+            if (retryAfter) {
+              await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+            } else {
+              failed++;
+              break;
+            }
+          }
+        }
+        await new Promise(r => setTimeout(r, 60)); // ~16 msg/sec
+      }
+
+      logger.info({ sent, failed }, "/broadcastfemales: complete");
+      bot.sendMessage(
+        ADMIN_ID,
+        `✅ *Female broadcast done\\!*\n\n` +
+        `👩 Total females: ${females.length}\n` +
+        `📤 Sent: ${sent}\n` +
+        `❌ Failed \\(blocked bot\\): ${failed}`,
+        { parse_mode: "MarkdownV2" }
+      ).catch(() => {});
+    } catch (err) {
+      logger.error({ err }, "/broadcastfemales failed");
+      bot.sendMessage(ADMIN_ID, "❌ broadcastfemales failed. Check logs.").catch(() => {});
+    }
+  })();
+});
+
 // ── Bot profile setup (runs once at startup) ──────────────────────────────
 
 async function setupBotProfile() {
