@@ -4597,6 +4597,15 @@ bot.on("message", async (msg) => {
       const isEdit = editModeMap.get(id) === "name";
       // Allow "skip" during edit to keep current value
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      // Block female users from changing their name (name is permanently locked for females)
+      if (isEdit && user.gender === "female") {
+        await bot.sendMessage(chatId, "♀️ Female profiles have a permanently locked name and cannot be changed.", { reply_markup: { remove_keyboard: true } });
+        editModeMap.delete(id);
+        await upsertUser(id, { state: "idle" });
+        const fresh = await getUser(id);
+        await sendMain(chatId, fresh!);
+        return;
+      }
       const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat",
         "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
       if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text) || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text)) {
