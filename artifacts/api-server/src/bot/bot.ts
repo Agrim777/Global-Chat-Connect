@@ -474,22 +474,21 @@ async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInse
 }
 
 async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean; premiumExpiresAt?: Date | null }, customText?: string) {
+  const isAdminChat = chatId === ADMIN_ID;
   let kb: TelegramBot.ReplyKeyboardMarkup;
   if (user.isProfileComplete) {
     const premiumBtn = isPremiumActive(user as { hasPaid: boolean; premiumExpiresAt?: Date | null }) ? { text: "✅ Premium" } : { text: "💎 Go Premium" };
     kb = {
-      keyboard: [
-        [{ text: "💘 Find Match" }, { text: "👤 My Profile" }],
-        [{ text: "✏️ Edit Profile" }, premiumBtn],
-      ],
+      keyboard: isAdminChat
+        ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]]
+        : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, premiumBtn]],
       resize_keyboard: true,
     };
   } else {
     kb = {
-      keyboard: [
-        [{ text: "🚀 Setup Profile" }],
-        [{ text: "💎 Go Premium" }],
-      ],
+      keyboard: isAdminChat
+        ? [[{ text: "🚀 Setup Profile" }]]
+        : [[{ text: "🚀 Setup Profile" }], [{ text: "💎 Go Premium" }]],
       resize_keyboard: true,
     };
   }
@@ -1630,6 +1629,7 @@ const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
   async function sendPayGate(chatId: number, _prefix?: string, matchName?: string) {
+    if (chatId === ADMIN_ID) return; // Admin has free access — no pay gate
     const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
     const teasers = [
       `⏰ <b>${name} is still online...</b> waiting for you 🥺`,
@@ -3710,7 +3710,7 @@ async function stopChat(chatId: number, userId: number) {
 
 // ── Find eligible real users ──────────────────────────────────────────────────
 
-async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number) {
+async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number, genderFilter?: "male" | "female") {
   const meIsFemale = me.gender === "female";
   const meIsAdmin = userId === ADMIN_ID;
   // Female users and admin get free real matches; others need active premium
@@ -3742,13 +3742,15 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     if (matchingSet.has(c.id)) return false;
     // Exclude users this person has blocked or reported
     if (myBlockList.has(c.id)) return false;
+    // Admin gender filter — only applied when admin explicitly chose a gender
+    if (genderFilter && c.gender !== genderFilter) return false;
     return true;
   });
 }
 
 // ── Find match ───────────────────────────────────────────────────────────────
 
-async function findMatch(chatId: number, userId: number) {
+async function findMatch(chatId: number, userId: number, genderFilter?: "male" | "female") {
   // Prevent this user from being picked as a match while we're searching
   if (matchingSet.has(userId)) return;
   matchingSet.add(userId);
@@ -3792,11 +3794,11 @@ async function findMatch(chatId: number, userId: number) {
     }
 
     // ── PAID USERS: find a real match ─────────────────────────────────────
-    const eligible = await findEligibleUsers(me, userId);
+    const eligible = await findEligibleUsers(me, userId, genderFilter);
 
     if (eligible.length === 0) {
       await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-        reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
       });
       return;
     }
@@ -3831,7 +3833,7 @@ async function findMatch(chatId: number, userId: number) {
       const currentState = await getUser(userId);
       if (currentState?.state === "chatting") return; // already connected — stay silent
       await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-        reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
       });
       return;
     }
@@ -3867,7 +3869,7 @@ async function findMatch(chatId: number, userId: number) {
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
         await bot.sendMessage(chatId, "😔 That match just went offline. Tap 💘 Find Match to try again!", {
-          reply_markup: { keyboard: [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+          reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
         });
       }
       // Non-403 errors: leave the connection as-is (transient network issue)
@@ -4068,6 +4070,16 @@ bot.on('callback_query', async (query) => {
       );
       return;
     }
+  // ── Admin gender-picker: connect with males or females ───────────────────
+  if (query.data === 'admin_match_female' || query.data === 'admin_match_male') {
+    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
+    const gender = query.data === 'admin_match_female' ? 'female' : 'male';
+    await findMatch(chatId, userId, gender);
+    return;
+  }
+
   // ── Deals channel broadcast ───────────────────────────────────────────────
   if (query.data === 'deals_broadcast_confirm') {
     if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
@@ -4888,13 +4900,30 @@ bot.on("message", async (msg) => {
       await startSetup(chatId, id);
       return;
     }
-    if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
+    if (text === "💘 Find Match") {
+      // Admin gets a gender-choice picker before matching
+      if (id === ADMIN_ID) {
+        await bot.sendMessage(chatId, "👑 *Admin Match* — Who do you want to connect with?", {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "👩 Active Females", callback_data: "admin_match_female" }],
+              [{ text: "👨 Active Males",   callback_data: "admin_match_male"   }],
+            ],
+          },
+        });
+        return;
+      }
+      await findMatch(chatId, id);
+      return;
+    }
     if (text === "👤 My Profile") {
       await showProfile(chatId, user);
       return;
     }
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
     if (text === "💎 Go Premium") {
+      if (id === ADMIN_ID) { await bot.sendMessage(chatId, "👑 You have admin access — no premium required!"); return; }
       if (isPremiumActive(user)) {
         const expStr = user.premiumExpiresAt
           ? `\n📅 Valid until: *${user.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
@@ -4915,6 +4944,7 @@ bot.on("message", async (msg) => {
       return;
     }
     if (text === "✅ Premium") {
+      if (id === ADMIN_ID) { await bot.sendMessage(chatId, "👑 You have admin access — no premium required!"); return; }
       if (isPremiumActive(user)) {
         const expStr = user.premiumExpiresAt
           ? `\n📅 Expires: *${user.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
@@ -4926,7 +4956,7 @@ bot.on("message", async (msg) => {
       }
       return;
     }
-    if (text === "💳 Support Us") { await sendPayGate(chatId); return; }
+    if (text === "💳 Support Us") { if (id !== ADMIN_ID) await sendPayGate(chatId); return; }
 
     // Unrecognised input:
     // — if free user who used trial, they're probably confused & trying to chat → show paygate
