@@ -4787,7 +4787,8 @@ bot.on("message", async (msg) => {
       // Real chat relay — allow messages whenever both sides are still connected to each other
 
       // ── SAFETY GATE: non-premium, non-female users must NEVER relay to real users ──
-      if (!isPremiumActive(user) && user.gender !== "female") {
+      // Admin always bypasses this gate
+      if (!isPremiumActive(user) && user.gender !== "female" && id !== ADMIN_ID) {
         logger.warn({ userId: id }, "Relay blocked: no active premium in real chat — force-disconnecting");
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
@@ -4809,7 +4810,7 @@ bot.on("message", async (msg) => {
           recipient?.state === "chatting" &&
           recipient.chattingWith === id &&
           recipient.chattingWith !== FAKE_CHAT_ID && // recipient must NOT be in AI fake chat
-          (isPremiumActive(recipient) || recipient.gender === "female") // paid OR female (free tier)
+          (isPremiumActive(recipient) || recipient.gender === "female" || recipientId === ADMIN_ID) // paid OR female (free tier) OR admin
         ) {
           // Both still connected and both verified paid — relay the message
           try {
