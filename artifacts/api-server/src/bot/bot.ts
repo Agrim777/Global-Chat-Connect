@@ -3712,14 +3712,17 @@ async function stopChat(chatId: number, userId: number) {
 
 async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number) {
   const meIsFemale = me.gender === "female";
-  // Female users get free real matches; others need active premium
-  if (!meIsFemale && !isPremiumActive(me)) return [];
+  const meIsAdmin = userId === ADMIN_ID;
+  // Female users and admin get free real matches; others need active premium
+  if (!meIsFemale && !meIsAdmin && !isPremiumActive(me)) return [];
 
-  // Fetch idle, complete users — paid OR female (female always free)
+  // Fetch idle, active, non-banned, complete users — paid OR female (female always free)
   const candidates = await db.select().from(usersTable).where(
     and(
       eq(usersTable.isProfileComplete, true),
       eq(usersTable.state, "idle"),
+      eq(usersTable.isActive, true),
+      eq(usersTable.isBanned, false),
       or(
         eq(usersTable.hasPaid, true),
         eq(usersTable.gender, "female")
@@ -3732,6 +3735,7 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
   return candidates.filter((c) => {
     if (c.id === userId) return false;
     if (!c.isActive) return false;
+    if (c.isBanned) return false;
     // Candidate must be premium-active OR female (free tier)
     if (!isPremiumActive(c) && c.gender !== "female") return false;
     // Exclude users already inside findMatch (race condition guard)
@@ -3773,9 +3777,10 @@ async function findMatch(chatId: number, userId: number) {
     }
 
     // ── NON-PREMIUM USERS: require payment — no free demo ──────────────────
-    // Female users are always free — bypass the pay gate entirely
+    // Female users and admin are always free — bypass the pay gate entirely
     const userIsFemale = me.gender === "female";
-    if (!userIsFemale && !isPremiumActive(me)) {
+    const userIsAdmin = userId === ADMIN_ID;
+    if (!userIsFemale && !userIsAdmin && !isPremiumActive(me)) {
       if (me.hasPaid && me.premiumExpiresAt && me.premiumExpiresAt <= new Date()) {
         // Premium expired — clear hasPaid flag
         await db.update(usersTable)
@@ -3893,6 +3898,11 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
   try {
     let user = await getUser(id);
     const isNew = !user;
+    // ── Banned gate ──────────────────────────────────────────────────────────
+    if (user?.isBanned) {
+      await bot.sendMessage(chatId, "🚫 Your account has been banned. You cannot use this platform.");
+      return;
+    }
     if (!user) {
       user = await upsertUser(id, {
         firstName: msg.from!.first_name ?? "",
@@ -5232,6 +5242,117 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     await bot.sendMessage(chatId, `❌ Delete failed: ${errMsg.slice(0, 200)}`).catch(() => {});
+  }
+});
+
+// ── Admin: /ban <userId> — ban a user from the platform ──────────────────────
+
+bot.onText(/\/ban (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "⛔ Not authorised.");
+    return;
+  }
+  const targetId = parseInt(match![1].trim(), 10);
+  if (isNaN(targetId)) {
+    await bot.sendMessage(chatId, "❌ Invalid user ID. Usage: /ban 1234567890");
+    return;
+  }
+  if (isProtected(targetId)) {
+    await bot.sendMessage(chatId, "⛔ Cannot ban a protected account.");
+    return;
+  }
+  try {
+    const target = await getUser(targetId);
+    if (!target) {
+      await bot.sendMessage(chatId, `❌ User ${targetId} not found in DB.`);
+      return;
+    }
+    if (target.isBanned) {
+      await bot.sendMessage(chatId, `ℹ️ User ${targetId} (${target.name ?? "Unknown"}) is already banned.`);
+      return;
+    }
+
+    // Disconnect from any active chat first
+    if (target.state === "chatting" && target.chattingWith && target.chattingWith !== FAKE_CHAT_ID) {
+      const partnerId = target.chattingWith;
+      const partner = await getUser(partnerId);
+      if (partner) {
+        await db.update(usersTable)
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, targetId)));
+        await sendMain(partnerId, partner, "Your match is no longer available. Tap 💘 Find Match to connect with someone new!").catch(() => {});
+      }
+    }
+    // Clear fake chat state
+    if (target.state === "chatting" && target.chattingWith === FAKE_CHAT_ID) {
+      const fakeTimer = chatTimerMap.get(targetId);
+      if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(targetId); }
+      fakePersonaMap.delete(targetId);
+      fakeReplySet.delete(targetId);
+    }
+
+    await db.update(usersTable)
+      .set({ isBanned: true, isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
+      .where(eq(usersTable.id, targetId));
+
+    await bot.sendMessage(chatId,
+      `🚫 *User Banned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target.name ?? "Unknown")}\n*Username:* @${escMd(target.telegramUsername ?? "none")}\n\nThey can no longer use the bot or connect with anyone.`,
+      { parse_mode: "Markdown" }
+    );
+
+    // Notify the banned user
+    await bot.sendMessage(targetId,
+      "🚫 Your account has been banned by an administrator. You can no longer use this platform."
+    ).catch(() => {});
+
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await bot.sendMessage(chatId, `❌ Ban failed: ${errMsg.slice(0, 200)}`).catch(() => {});
+  }
+});
+
+// ── Admin: /unban <userId> — unban a user ────────────────────────────────────
+
+bot.onText(/\/unban (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "⛔ Not authorised.");
+    return;
+  }
+  const targetId = parseInt(match![1].trim(), 10);
+  if (isNaN(targetId)) {
+    await bot.sendMessage(chatId, "❌ Invalid user ID. Usage: /unban 1234567890");
+    return;
+  }
+  try {
+    const target = await getUser(targetId);
+    if (!target) {
+      await bot.sendMessage(chatId, `❌ User ${targetId} not found in DB.`);
+      return;
+    }
+    if (!target.isBanned) {
+      await bot.sendMessage(chatId, `ℹ️ User ${targetId} (${target.name ?? "Unknown"}) is not banned.`);
+      return;
+    }
+
+    await db.update(usersTable)
+      .set({ isBanned: false, isActive: true, updatedAt: new Date() })
+      .where(eq(usersTable.id, targetId));
+
+    await bot.sendMessage(chatId,
+      `✅ *User Unbanned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target.name ?? "Unknown")}\n*Username:* @${escMd(target.telegramUsername ?? "none")}\n\nThey can now use the bot again.`,
+      { parse_mode: "Markdown" }
+    );
+
+    // Notify the unbanned user
+    await bot.sendMessage(targetId,
+      "✅ Your account ban has been lifted. You can now use the platform again. Send /start to continue."
+    ).catch(() => {});
+
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await bot.sendMessage(chatId, `❌ Unban failed: ${errMsg.slice(0, 200)}`).catch(() => {});
   }
 });
 

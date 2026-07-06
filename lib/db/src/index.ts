@@ -36,6 +36,10 @@ export async function runMigrations(): Promise<void> {
       ALTER TABLE users
         ADD COLUMN IF NOT EXISTS premium_expires_at TIMESTAMP;
     `);
+    await client.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
   } finally {
     client.release();
   }
