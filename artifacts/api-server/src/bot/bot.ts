@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, usersTable, bannedUsersTable, runMigrations } from "@workspace/db";
-import { eq, and, ne, inArray, notInArray, or, gte } from "drizzle-orm";
+import { eq, and, ne, inArray, notInArray, or } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -466,7 +466,32 @@ async function getUser(id: number) {
 // "currently active" for matchmaking purposes. `isActive` alone only means
 // "hasn't been deactivated" (e.g. blocked the bot) — it says nothing about
 // whether the person is around right now, which is what matters for a match.
-const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes — "recent" tier for matching
+
+// ── Matching priority tiers ───────────────────────────────────────────────────
+// Matching no longer hard-excludes anyone by recency — instead it prefers the
+// most-recently-seen tier available and only falls back to an older tier when
+// nobody in a better one is eligible. Order: online > recent > last used
+// recently > used some time ago > never used.
+const ONLINE_WINDOW_MS = 2 * 60 * 1000;              // seen in the last 2 minutes — "online"
+const RECENTLY_USED_WINDOW_MS = 24 * 60 * 60 * 1000; // seen in the last 24 hours — "last used recently"
+const USED_A_WHILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // seen in the last 7 days — "used some time ago"
+// anything older than that, or never seen at all, is tier 4 — "never used"
+
+/** Lower tier number = more recently active = higher matching priority. */
+function matchTier(lastSeenAt: Date | null | undefined): 0 | 1 | 2 | 3 | 4 {
+  if (!lastSeenAt) return 4; // never used
+  const age = Date.now() - lastSeenAt.getTime();
+  if (age <= ONLINE_WINDOW_MS) return 0;      // online
+  if (age <= ACTIVE_WINDOW_MS) return 1;      // recent
+  if (age <= RECENTLY_USED_WINDOW_MS) return 2; // last used recently
+  if (age <= USED_A_WHILE_WINDOW_MS) return 3;  // used some time ago
+  return 4; // never used / long gone
+}
+
+function isOnline(lastSeenAt: Date | null | undefined): boolean {
+  return matchTier(lastSeenAt) === 0;
+}
 
 /** Stamps lastSeenAt = now for a user. Fire-and-forget is fine; never blocks the reply. */
 function touchLastSeen(id: number) {
@@ -3772,16 +3797,17 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
   if (!meIsFemale && !meIsAdmin && !isPremiumActive(me)) return [];
 
   const effectiveGenderFilter = genderFilter ?? defaultGenderFilter(me);
-  const activeSince = new Date(Date.now() - ACTIVE_WINDOW_MS);
 
-  // Fetch idle, currently-active (seen recently), non-banned, complete users — paid OR female (female always free)
+  // Fetch idle, non-banned, complete users — paid OR female (female always free).
+  // No recency filter here: everyone eligible is a candidate, but findMatch()
+  // below prioritizes the most-recently-seen tier and only reaches for an
+  // older one when nobody better is available.
   const candidates = await db.select().from(usersTable).where(
     and(
       eq(usersTable.isProfileComplete, true),
       eq(usersTable.state, "idle"),
       eq(usersTable.isActive, true),
       eq(usersTable.isBanned, false),
-      gte(usersTable.lastSeenAt, activeSince),
       or(
         eq(usersTable.hasPaid, true),
         eq(usersTable.gender, "female")
@@ -3795,9 +3821,6 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     if (c.id === userId) return false;
     if (!c.isActive) return false;
     if (c.isBanned) return false;
-    // Must have interacted with the bot recently — "isActive" alone only means
-    // "hasn't been deactivated", not "currently online".
-    if (!c.lastSeenAt || c.lastSeenAt < activeSince) return false;
     // Candidate must be premium-active OR female (free tier)
     if (!isPremiumActive(c) && c.gender !== "female") return false;
     // Exclude users already inside findMatch (race condition guard)
@@ -3810,6 +3833,7 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     return true;
   });
 }
+
 
 // ── Find match ───────────────────────────────────────────────────────────────
 
@@ -3866,7 +3890,13 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
       return;
     }
 
-    const match = pickRandom(eligible);
+    // Prioritize the most-recently-seen tier available: online > recent >
+    // last used recently > used some time ago > never used. Only reach into
+    // an older tier when nobody better is eligible.
+    const bestTier = Math.min(...eligible.map((c: typeof usersTable.$inferSelect) => matchTier(c.lastSeenAt)));
+    const topTierMatches = eligible.filter((c: typeof usersTable.$inferSelect) => matchTier(c.lastSeenAt) === bestTier);
+    const match: typeof usersTable.$inferSelect = pickRandom(topTierMatches);
+    const matchWasOffline = !isOnline(match.lastSeenAt);
     const newCount      = (me.chatCount    ?? 0) + 1;
     const matchNewCount = (match.chatCount ?? 0) + 1;
 
@@ -3910,10 +3940,14 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
       { parse_mode: "Markdown", reply_markup: stopKb }
     );
 
-    // Try to notify match partner — if they deactivated/blocked, clean up and tell searcher
+    // Try to notify match partner — if they deactivated/blocked, clean up and tell searcher.
+    // If they're offline right now, this Telegram message still delivers as a push
+    // notification, so word it as one to pull them back into the chat.
     try {
-      await bot.sendMessage(match.id,
-        `✅ Match found! You're now connected with *${me.name}*, ${me.age}. Say hello! 👋`,
+      const partnerText = matchWasOffline
+        ? `🔔 *New match while you were away!* You're now connected with *${me.name}*, ${me.age}. Come back and say hello! 👋`
+        : `✅ Match found! You're now connected with *${me.name}*, ${me.age}. Say hello! 👋`;
+      await bot.sendMessage(match.id, partnerText,
         { parse_mode: "Markdown", reply_markup: stopKb }
       );
     } catch (notifyErr: unknown) {
