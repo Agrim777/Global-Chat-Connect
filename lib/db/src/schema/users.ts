@@ -39,6 +39,9 @@ export const usersTable = pgTable("users", {
   referralCount: integer("referral_count").default(0).notNull(),
   bonusChats: integer("bonus_chats").default(0).notNull(),
   premiumExpiresAt: timestamp("premium_expires_at"),
+  // Updated on every incoming message/interaction — used to tell "has an account"
+  // apart from "is actually online right now" when building the match pool.
+  lastSeenAt: timestamp("last_seen_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -40,6 +40,18 @@ export async function runMigrations(): Promise<void> {
       ALTER TABLE users
         ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
     `);
+    await client.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP NOT NULL DEFAULT NOW();
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS banned_users (
+        id BIGINT PRIMARY KEY,
+        banned_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        banned_by BIGINT,
+        reason TEXT
+      );
+    `);
   } finally {
     client.release();
   }

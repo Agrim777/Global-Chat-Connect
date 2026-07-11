@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
-import { db, usersTable, runMigrations } from "@workspace/db";
-import { eq, and, ne, inArray, notInArray, or } from "drizzle-orm";
+import { db, usersTable, bannedUsersTable, runMigrations } from "@workspace/db";
+import { eq, and, ne, inArray, notInArray, or, gte } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
@@ -460,6 +460,30 @@ async function handleNsfwViolation(chatId: number, userId: number): Promise<bool
 async function getUser(id: number) {
   const [u] = await db.select().from(usersTable).where(eq(usersTable.id, id));
   return u ?? null;
+}
+
+// How recently a user must have interacted with the bot to count as
+// "currently active" for matchmaking purposes. `isActive` alone only means
+// "hasn't been deactivated" (e.g. blocked the bot) — it says nothing about
+// whether the person is around right now, which is what matters for a match.
+const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+/** Stamps lastSeenAt = now for a user. Fire-and-forget is fine; never blocks the reply. */
+function touchLastSeen(id: number) {
+  db.update(usersTable)
+    .set({ lastSeenAt: new Date() })
+    .where(eq(usersTable.id, id))
+    .catch((err: unknown) => logger.warn({ err, id }, "touchLastSeen failed"));
+}
+
+/**
+ * Checks the permanent ban ledger. Source of truth for "is this Telegram id
+ * banned" — independent of the mutable `users` row, so it still says yes
+ * even after the user hard-deletes their account and /start's again.
+ */
+async function isPermanentlyBanned(id: number): Promise<boolean> {
+  const [row] = await db.select({ id: bannedUsersTable.id }).from(bannedUsersTable).where(eq(bannedUsersTable.id, id));
+  return !!row;
 }
 
 async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInsert>) {
@@ -3689,7 +3713,11 @@ async function stopChat(chatId: number, userId: number) {
 
       if (disconnected.length > 0) {
         // We were first — send the partner exactly one notification
-        if (!isPremiumActive(partner) && partner.gender !== "female") {
+        if (!isPremiumActive(partner) && partner.gender !== "female" && partnerId !== ADMIN_ID) {
+          // Clear the stale "🛑 Stop Chat" keyboard first — sendPayGate only
+          // attaches an inline keyboard, so without this the old persistent
+          // reply keyboard button lingers and needs an extra, confusing tap.
+          await bot.sendMessage(partnerId, "Your match ended the chat.", { reply_markup: { remove_keyboard: true } }).catch(() => {});
           await sendPayGate(partnerId);
         } else {
           await sendMain(partnerId, partner, "Your match ended the chat.");
@@ -3700,8 +3728,13 @@ async function stopChat(chatId: number, userId: number) {
   }
 
   const updated = await getUser(userId);
-  // Non-premium users → show pay gate
-  if (updated && !isPremiumActive(updated) && updated.gender !== "female") {
+  // Non-premium users → show pay gate. Admin always gets the main menu:
+  // sendPayGate() is a no-op for ADMIN_ID, so routing admin into it here left
+  // them with no reply at all and a stale "Stop Chat" button — looking like
+  // Stop Chat "didn't work" until a second/third tap happened to land on the
+  // idle-state branch above, which does call sendMain.
+  if (updated && !isPremiumActive(updated) && updated.gender !== "female" && userId !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "Chat ended.", { reply_markup: { remove_keyboard: true } }).catch(() => {});
     await sendPayGate(chatId);
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
@@ -3710,19 +3743,35 @@ async function stopChat(chatId: number, userId: number) {
 
 // ── Find eligible real users ──────────────────────────────────────────────────
 
+/**
+ * Default opposite-gender pairing: female users only ever see male candidates
+ * and vice versa. "other" is left unrestricted (matches anyone). Admin's
+ * manual gender-picker (genderFilter passed in explicitly) always wins over
+ * this default.
+ */
+function defaultGenderFilter(me: { gender: string | null }): "male" | "female" | undefined {
+  if (me.gender === "female") return "male";
+  if (me.gender === "male") return "female";
+  return undefined;
+}
+
 async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number, genderFilter?: "male" | "female") {
   const meIsFemale = me.gender === "female";
   const meIsAdmin = userId === ADMIN_ID;
   // Female users and admin get free real matches; others need active premium
   if (!meIsFemale && !meIsAdmin && !isPremiumActive(me)) return [];
 
-  // Fetch idle, active, non-banned, complete users — paid OR female (female always free)
+  const effectiveGenderFilter = genderFilter ?? defaultGenderFilter(me);
+  const activeSince = new Date(Date.now() - ACTIVE_WINDOW_MS);
+
+  // Fetch idle, currently-active (seen recently), non-banned, complete users — paid OR female (female always free)
   const candidates = await db.select().from(usersTable).where(
     and(
       eq(usersTable.isProfileComplete, true),
       eq(usersTable.state, "idle"),
       eq(usersTable.isActive, true),
       eq(usersTable.isBanned, false),
+      gte(usersTable.lastSeenAt, activeSince),
       or(
         eq(usersTable.hasPaid, true),
         eq(usersTable.gender, "female")
@@ -3736,14 +3785,18 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     if (c.id === userId) return false;
     if (!c.isActive) return false;
     if (c.isBanned) return false;
+    // Must have interacted with the bot recently — "isActive" alone only means
+    // "hasn't been deactivated", not "currently online".
+    if (!c.lastSeenAt || c.lastSeenAt < activeSince) return false;
     // Candidate must be premium-active OR female (free tier)
     if (!isPremiumActive(c) && c.gender !== "female") return false;
     // Exclude users already inside findMatch (race condition guard)
     if (matchingSet.has(c.id)) return false;
     // Exclude users this person has blocked or reported
     if (myBlockList.has(c.id)) return false;
-    // Admin gender filter — only applied when admin explicitly chose a gender
-    if (genderFilter && c.gender !== genderFilter) return false;
+    // Opposite-gender pairing by default (female↔male); admin's explicit
+    // gender-picker filter takes precedence when provided.
+    if (effectiveGenderFilter && c.gender !== effectiveGenderFilter) return false;
     return true;
   });
 }
@@ -3898,10 +3951,14 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
   const id = msg.from.id;
   const param = (match?.[1] ?? "").trim();
   try {
+    touchLastSeen(id);
     let user = await getUser(id);
     const isNew = !user;
     // ── Banned gate ──────────────────────────────────────────────────────────
-    if (user?.isBanned) {
+    // Checked against the permanent ban ledger (not just the `users` row) so a
+    // banned user can't escape the ban by deleting their account and starting
+    // over — the ledger entry survives account deletion until an admin /unban.
+    if (await isPermanentlyBanned(id) || user?.isBanned) {
       await bot.sendMessage(chatId, "🚫 Your account has been banned. You cannot use this platform.");
       return;
     }
@@ -4025,6 +4082,8 @@ bot.on('callback_query', async (query) => {
   const userId = query.from.id;
   const chatId = query.message?.chat.id;
   if (!chatId) return;
+  touchLastSeen(userId);
+  if (await isPermanentlyBanned(userId)) { await bot.answerCallbackQuery(query.id, { text: "🚫 Your account has been banned." }).catch(() => {}); return; }
 
   // ── Terms acceptance ────────────────────────────────────────────────────────
   if (query.data === 'agree_terms') {
@@ -4506,6 +4565,13 @@ bot.on("message", async (msg) => {
   const text = (msg.text ?? "").trim();
 
   if (text.startsWith("/")) return;
+
+  touchLastSeen(id);
+
+  // ── Banned gate ────────────────────────────────────────────────────────────
+  // Checked against the permanent ledger, not just the `users.isBanned` flag,
+  // so a ban still applies even if the account row was deleted and recreated.
+  if (await isPermanentlyBanned(id)) return; // silently drop — no reply for banned users
 
   // ── Flood protection ──────────────────────────────────────────────────────
   if (isFloodRestricted(id)) return; // silently drop while restricted
@@ -5300,6 +5366,11 @@ bot.onText(/\/ban (.+)/, async (msg, match) => {
       return;
     }
     if (target.isBanned) {
+      // Backfill the permanent ledger in case this account was banned before
+      // the ledger existed — so it still survives a future account deletion.
+      await db.insert(bannedUsersTable)
+        .values({ id: targetId, bannedBy: msg.from!.id })
+        .onConflictDoNothing({ target: bannedUsersTable.id });
       await bot.sendMessage(chatId, `ℹ️ User ${targetId} (${target.name ?? "Unknown"}) is already banned.`);
       return;
     }
@@ -5327,8 +5398,14 @@ bot.onText(/\/ban (.+)/, async (msg, match) => {
       .set({ isBanned: true, isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
       .where(eq(usersTable.id, targetId));
 
+    // Permanent ledger entry — outlives the `users` row, so deleting their
+    // account (/deleteaccount or /deleteuser) can never lift this ban.
+    await db.insert(bannedUsersTable)
+      .values({ id: targetId, bannedBy: msg.from!.id })
+      .onConflictDoUpdate({ target: bannedUsersTable.id, set: { bannedAt: new Date(), bannedBy: msg.from!.id } });
+
     await bot.sendMessage(chatId,
-      `🚫 *User Banned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target.name ?? "Unknown")}\n*Username:* @${escMd(target.telegramUsername ?? "none")}\n\nThey can no longer use the bot or connect with anyone.`,
+      `🚫 *User Banned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target.name ?? "Unknown")}\n*Username:* @${escMd(target.telegramUsername ?? "none")}\n\nThey can no longer use the bot or connect with anyone — even if they delete their account, this ban stays in effect until you /unban them.`,
       { parse_mode: "Markdown" }
     );
 
@@ -5358,28 +5435,34 @@ bot.onText(/\/unban (.+)/, async (msg, match) => {
   }
   try {
     const target = await getUser(targetId);
-    if (!target) {
-      await bot.sendMessage(chatId, `❌ User ${targetId} not found in DB.`);
-      return;
-    }
-    if (!target.isBanned) {
-      await bot.sendMessage(chatId, `ℹ️ User ${targetId} (${target.name ?? "Unknown"}) is not banned.`);
+    const [ledgerEntry] = await db.select().from(bannedUsersTable).where(eq(bannedUsersTable.id, targetId));
+
+    if (!target?.isBanned && !ledgerEntry) {
+      await bot.sendMessage(chatId, `ℹ️ User ${targetId}${target?.name ? ` (${target.name})` : ""} is not banned.`);
       return;
     }
 
-    await db.update(usersTable)
-      .set({ isBanned: false, isActive: true, updatedAt: new Date() })
-      .where(eq(usersTable.id, targetId));
+    // Ledger is the source of truth — a target row may not even exist if the
+    // user deleted their account while banned.
+    await db.delete(bannedUsersTable).where(eq(bannedUsersTable.id, targetId));
+
+    if (target) {
+      await db.update(usersTable)
+        .set({ isBanned: false, isActive: true, updatedAt: new Date() })
+        .where(eq(usersTable.id, targetId));
+    }
 
     await bot.sendMessage(chatId,
-      `✅ *User Unbanned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target.name ?? "Unknown")}\n*Username:* @${escMd(target.telegramUsername ?? "none")}\n\nThey can now use the bot again.`,
+      `✅ *User Unbanned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target?.name ?? "Unknown")}\n*Username:* @${escMd(target?.telegramUsername ?? "none")}\n\nThey can now use the bot again.`,
       { parse_mode: "Markdown" }
     );
 
-    // Notify the unbanned user
-    await bot.sendMessage(targetId,
-      "✅ Your account ban has been lifted. You can now use the platform again. Send /start to continue."
-    ).catch(() => {});
+    // Notify the unbanned user (only if their account still exists)
+    if (target) {
+      await bot.sendMessage(targetId,
+        "✅ Your account ban has been lifted. You can now use the platform again. Send /start to continue."
+      ).catch(() => {});
+    }
 
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
