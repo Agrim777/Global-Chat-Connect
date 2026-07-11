@@ -5665,20 +5665,16 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
     while (retries-- > 0) {
       try {
         await bot.sendMessage(u.id,
-          "💬 <b>You have a match waiting for you!</b>\n\n" +
-          "⭐ <b>Unlock Premium with Telegram Stars</b>\n" +
-          "✅ Unlimited real matches\n" +
-          "✅ No timer, no interruptions\n\n" +
-          "👇 Choose your plan:",
-          {
-            parse_mode: "HTML",
-            reply_markup: { inline_keyboard: [
-              [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} ⭐`, callback_data: "plan_week2" }],
-              [{ text: `💎 1 Month — ${PLANS.month.stars} ⭐`, callback_data: "plan_month" }],
-              [{ text: `👑 Lifetime — ${PLANS.yearly.stars} ⭐`, callback_data: "plan_yearly" }],
-            ]},
-          }
+          "💌 <b>Somewhere out there, someone's waiting to meet you.</b>\n\n" +
+          "Every day you wait is a conversation you never had, a connection you never made. " +
+          "Premium clears the way — no timers cutting you off mid-conversation, no limits on who you can talk to. " +
+          "Just you, real people, and the chance to actually find someone worth staying up late texting. 💫\n\n" +
+          "👇 Pick your plan and go find them.",
+          { parse_mode: "HTML" }
         );
+        // Follow up with the real pay gate — teaser + live Stars plan buttons —
+        // instead of a second hand-rolled keyboard duplicating the same buttons.
+        await sendPayGate(u.id);
         sent++;
         break;
       } catch (e: any) {
