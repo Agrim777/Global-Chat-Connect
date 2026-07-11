@@ -4216,10 +4216,25 @@ bot.on('callback_query', async (query) => {
     const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
     let sent = 0, failed = 0;
     for (const u of allUsers) {
-      try {
-        await bot.sendMessage(u.id, broadcastMsg, { parse_mode: 'Markdown' });
-        sent++;
-      } catch { failed++; }
+      // Retry on Telegram flood-control (429 retry_after) instead of giving up
+      // immediately — otherwise a brief rate-limit window silently drops
+      // whichever users happen to be in the queue at that moment.
+      let retries = 3;
+      while (retries-- > 0) {
+        try {
+          await bot.sendMessage(u.id, broadcastMsg, { parse_mode: 'Markdown' });
+          sent++;
+          break;
+        } catch (e: any) {
+          const retryAfter = e?.response?.body?.parameters?.retry_after;
+          if (retryAfter) {
+            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+          } else {
+            failed++;
+            break;
+          }
+        }
+      }
       await new Promise(r => setTimeout(r, 60)); // 60ms delay — stay under Telegram rate limits
     }
     await bot.sendMessage(chatId,
@@ -5642,24 +5657,40 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users... (one-time only)`);
   let sent = 0, failed = 0;
   for (const u of allUsers) {
-    try {
-      await bot.sendMessage(u.id,
-        "💬 <b>You have a match waiting for you!</b>\n\n" +
-        "⭐ <b>Unlock Premium with Telegram Stars</b>\n" +
-        "✅ Unlimited real matches\n" +
-        "✅ No timer, no interruptions\n\n" +
-        "👇 Choose your plan:",
-        {
-          parse_mode: "HTML",
-          reply_markup: { inline_keyboard: [
-            [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} ⭐`, callback_data: "plan_week2" }],
-            [{ text: `💎 1 Month — ${PLANS.month.stars} ⭐`, callback_data: "plan_month" }],
-            [{ text: `👑 Lifetime — ${PLANS.yearly.stars} ⭐`, callback_data: "plan_yearly" }],
-          ]},
+    // Retry on Telegram flood-control (429 retry_after) instead of giving up
+    // immediately — a plain catch-and-skip was silently dropping recipients
+    // any time Telegram briefly rate-limited the bot, even though the same
+    // user would have gone through fine a second or two later.
+    let retries = 3;
+    while (retries-- > 0) {
+      try {
+        await bot.sendMessage(u.id,
+          "💬 <b>You have a match waiting for you!</b>\n\n" +
+          "⭐ <b>Unlock Premium with Telegram Stars</b>\n" +
+          "✅ Unlimited real matches\n" +
+          "✅ No timer, no interruptions\n\n" +
+          "👇 Choose your plan:",
+          {
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: [
+              [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} ⭐`, callback_data: "plan_week2" }],
+              [{ text: `💎 1 Month — ${PLANS.month.stars} ⭐`, callback_data: "plan_month" }],
+              [{ text: `👑 Lifetime — ${PLANS.yearly.stars} ⭐`, callback_data: "plan_yearly" }],
+            ]},
+          }
+        );
+        sent++;
+        break;
+      } catch (e: any) {
+        const retryAfter = e?.response?.body?.parameters?.retry_after;
+        if (retryAfter) {
+          await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+        } else {
+          failed++;
+          break;
         }
-      );
-      sent++;
-    } catch { failed++; }
+      }
+    }
     await new Promise(r => setTimeout(r, 55));
   }
   await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}\n\n🔒 Broadcast is now DISABLED for this session.`);
