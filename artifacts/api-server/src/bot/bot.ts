@@ -482,8 +482,18 @@ function touchLastSeen(id: number) {
  * even after the user hard-deletes their account and /start's again.
  */
 async function isPermanentlyBanned(id: number): Promise<boolean> {
-  const [row] = await db.select({ id: bannedUsersTable.id }).from(bannedUsersTable).where(eq(bannedUsersTable.id, id));
-  return !!row;
+  try {
+    const [row] = await db.select({ id: bannedUsersTable.id }).from(bannedUsersTable).where(eq(bannedUsersTable.id, id));
+    return !!row;
+  } catch (err) {
+    // Fail OPEN, not closed: this check runs on every single message and
+    // callback. If it throws unguarded (e.g. migration hasn't applied yet,
+    // transient DB blip), it would silently kill message processing for
+    // everyone, which is a far worse outcome than one banned user briefly
+    // slipping through until the DB recovers.
+    logger.error({ err, id }, "isPermanentlyBanned check failed — defaulting to not-banned");
+    return false;
+  }
 }
 
 async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInsert>) {
