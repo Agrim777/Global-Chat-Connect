@@ -16,9 +16,10 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
 // ── Premium pricing tiers (Telegram Stars) ────────────────────────────────────
 const PLANS = {
-  week2:  { stars: 150,  label: "2 Weeks",    days: 14,   emoji: "⚡" },
-  month:  { stars: 250,  label: "1 Month",    days: 30,   emoji: "💎" },
-  yearly: { stars: 1000, label: "Lifetime",   days: 36500, emoji: "👑" },
+  week2:   { stars: 150,  label: "2 Weeks",            days: 14,    emoji: "⚡" },
+  month:   { stars: 250,  label: "1 Month",             days: 30,    emoji: "💎" },
+  yearly:  { stars: 1000, label: "Lifetime",            days: 36500, emoji: "👑" },
+  offer48: { stars: 250,  label: "🔥 Lifetime (OFFER)", days: 36500, emoji: "🔥" },
 } as const;
 
 type PlanKey = keyof typeof PLANS;
@@ -46,6 +47,7 @@ function isPremiumActive(user: { hasPaid: boolean; premiumExpiresAt?: Date | nul
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 let broadcastUsed = false; // one-time broadcast lock
 let customBroadcastUsed = false; // one-time custom text broadcast lock
+let offerEndsAt: Date | null = null;  // set by /broadcastoffer — expires after 48h
 const awaitingBroadcastText = new Map<number, string>(); // adminId → "awaiting" | "preview:<text>"
 // Extra protected accounts (admin's alts, co-admins, test accounts).
 // These users are NEVER auto-deactivated, flood-restricted, NSFW-restricted,
@@ -4190,6 +4192,28 @@ bot.on('callback_query', async (query) => {
       );
       return;
     }
+
+  // ── 48-hour flash offer ────────────────────────────────────────────────────
+  if (query.data === 'plan_offer48') {
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    // Enforce the 48-hour expiry window
+    if (!offerEndsAt || new Date() > offerEndsAt) {
+      await bot.sendMessage(chatId,
+        "⏰ <b>This offer has expired.</b>\n\nDon't worry — you can still grab Premium at regular prices! Tap 💎 Go Premium from the main menu.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    const plan = PLANS.offer48;
+    await (bot as any).sendInvoice(
+      chatId,
+      `🔥 FLASH OFFER — Lifetime Premium`,
+      `48-Hour Special: Lifetime Premium for just ${plan.stars} Stars — one-time, never expires!`,
+      "offer48", "", "XTR",
+      [{ label: "Lifetime Premium (48H Flash Offer)", amount: plan.stars }]
+    );
+    return;
+  }
   // ── Admin gender-picker: connect with males or females ───────────────────
   if (query.data === 'admin_match_female' || query.data === 'admin_match_male') {
     if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
@@ -4374,8 +4398,12 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  const expiry = getPremiumExpiry(plan.days);
-  const expStr = expiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+  // Lifetime plans (yearly + offer48) get null expiry so isPremiumActive treats them as permanent
+  const isLifetime = payload === "yearly" || payload === "offer48";
+  const expiry = isLifetime ? null : getPremiumExpiry(plan.days);
+  const expStr = expiry
+    ? expiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
+    : "Forever ♾️";
 
   try {
     await db.update(usersTable)
@@ -4398,7 +4426,7 @@ bot.on('message', async (msg) => {
       await sendMain(userId, user,
         `🎉 *Payment successful!* Welcome to Premium ${plan.emoji}\n\n` +
         `✅ *${plan.label}* access activated\n` +
-        `📅 Valid until: *${expStr}*\n\n` +
+        (isLifetime ? `♾️ *Lifetime access — never expires!*\n\n` : `📅 Valid until: *${expStr}*\n\n`) +
         `Tap 💘 Find Match to connect with real people now!`
       );
     }
@@ -5928,6 +5956,79 @@ bot.onText(/\/femalecount/, async (msg) => {
   } catch (err) {
     logger.error({ err }, "/femalecount error");
     await bot.sendMessage(chatId, "❌ Failed to fetch data.").catch(() => {});
+  }
+});
+
+// ── Admin: /broadcastoffer — 48-hour flash sale broadcast ────────────────────
+bot.onText(/\/broadcastoffer/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+
+  try {
+    // Set the 48-hour window from NOW
+    offerEndsAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    const expiryStr = offerEndsAt.toLocaleString("en-IN", {
+      day: "numeric", month: "long", year: "numeric",
+      hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata"
+    });
+
+    await bot.sendMessage(chatId,
+      `⏳ <b>48-Hour Flash Offer started!</b>\n\nOffer valid until: <b>${expiryStr} IST</b>\n\nBroadcasting to all users... I'll DM you the result.`,
+      { parse_mode: "HTML" }
+    );
+
+    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
+    let sent = 0, failed = 0;
+
+    const OFFER_MSG =
+      "🔥 <b>48-HOUR FLASH OFFER — Don't Miss This!</b> 🔥\n\n" +
+      "Hey! 💘 There's someone out there waiting to talk to you right now.\n\n" +
+      "<b>Global Chat Connect</b> connects you with real people anonymously — no numbers, no profiles, just real conversations. 🌍\n\n" +
+      "━━━━━━━━━━━━━━━━━━━━━\n" +
+      "🎁 <b>SPECIAL OFFER — FOR THE NEXT 48 HOURS ONLY:</b>\n\n" +
+      "👑 <b>Lifetime Premium — just 250 ⭐ Stars</b>\n" +
+      "🏷️ <s>Normal price: 1000 ⭐ Stars</s> → <b>Save 750 Stars!</b>\n\n" +
+      "✅ Unlimited real matches — forever\n" +
+      "✅ No timers, no interruptions\n" +
+      "✅ One-time payment — never pay again\n" +
+      "━━━━━━━━━━━━━━━━━━━━━\n\n" +
+      "⏰ This offer <b>expires in 48 hours</b> — once it's gone, it's gone.\n\n" +
+      "👇 Tap the button below to grab it now!";
+
+    for (const u of allUsers) {
+      let retries = 3;
+      while (retries-- > 0) {
+        try {
+          await bot.sendMessage(u.id, OFFER_MSG, {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[
+                { text: "👑 Get Lifetime — 250 ⭐ (48H OFFER)", callback_data: "plan_offer48" },
+              ]],
+            },
+          });
+          sent++;
+          break;
+        } catch (e: any) {
+          const retryAfter = e?.response?.body?.parameters?.retry_after;
+          if (retryAfter) {
+            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+          } else {
+            failed++;
+            break;
+          }
+        }
+      }
+      await new Promise(r => setTimeout(r, 55)); // stay under Telegram rate limits
+    }
+
+    await bot.sendMessage(chatId,
+      `✅ <b>Offer broadcast complete!</b>\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n\n⏰ Offer expires: <b>${expiryStr} IST</b>`,
+      { parse_mode: "HTML" }
+    );
+  } catch (err) {
+    logger.error({ err }, "/broadcastoffer error");
+    await bot.sendMessage(chatId, `❌ Broadcast failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
   }
 });
 
