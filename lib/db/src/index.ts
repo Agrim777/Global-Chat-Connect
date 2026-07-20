@@ -52,6 +52,12 @@ export async function runMigrations(): Promise<void> {
         reason TEXT
       );
     `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bot_settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
   } finally {
     client.release();
   }

@@ -1,5 +1,5 @@
 import TelegramBot from "node-telegram-bot-api";
-import { db, usersTable, bannedUsersTable, runMigrations } from "@workspace/db";
+import { db, pool, usersTable, bannedUsersTable, runMigrations } from "@workspace/db";
 import { eq, and, ne, inArray, notInArray, or } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
@@ -47,7 +47,40 @@ function isPremiumActive(user: { hasPaid: boolean; premiumExpiresAt?: Date | nul
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 let broadcastUsed = false; // one-time broadcast lock
 let customBroadcastUsed = false; // one-time custom text broadcast lock
-let offerEndsAt: Date | null = null;  // set by /broadcastoffer — expires after 48h
+let offerEndsAt: Date | null = null;  // in-memory cache — loaded from DB at startup, persisted on set
+
+/** Persist offer expiry to DB so it survives Railway restarts. */
+async function saveOfferExpiry(date: Date | null): Promise<void> {
+  try {
+    if (date === null) {
+      await pool.query(`DELETE FROM bot_settings WHERE key = 'offer48_ends_at'`);
+    } else {
+      await pool.query(
+        `INSERT INTO bot_settings (key, value) VALUES ('offer48_ends_at', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [date.toISOString()]
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, "saveOfferExpiry failed");
+  }
+}
+
+/** Load offer expiry from DB into the in-memory cache. Called once at startup. */
+async function loadOfferExpiry(): Promise<void> {
+  try {
+    const { rows } = await pool.query<{ value: string }>(
+      `SELECT value FROM bot_settings WHERE key = 'offer48_ends_at'`
+    );
+    if (rows.length > 0) {
+      const d = new Date(rows[0].value);
+      offerEndsAt = d > new Date() ? d : null; // discard if already expired
+      if (offerEndsAt) logger.info({ offerEndsAt }, "Loaded active flash offer from DB");
+    }
+  } catch (err) {
+    logger.error({ err }, "loadOfferExpiry failed — offer may not work after restart");
+  }
+}
 const awaitingBroadcastText = new Map<number, string>(); // adminId → "awaiting" | "preview:<text>"
 // Extra protected accounts (admin's alts, co-admins, test accounts).
 // These users are NEVER auto-deactivated, flood-restricted, NSFW-restricted,
@@ -293,6 +326,9 @@ process.on("unhandledRejection", (reason) => {
   } catch (err) {
     logger.error({ err }, "DB migration failed — bot may be unstable");
   }
+
+  // Restore flash-offer expiry from DB so it survives restarts
+  await loadOfferExpiry();
 
   // Call getUpdates multiple times to boot any stale polling session off Telegram's server
   for (let i = 0; i < 3; i++) {
@@ -5965,8 +6001,9 @@ bot.onText(/\/broadcastoffer/, async (msg) => {
   const chatId = msg.chat.id;
 
   try {
-    // Set the 48-hour window from NOW
+    // Set the 48-hour window from NOW and persist to DB so restarts don't kill it
     offerEndsAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    await saveOfferExpiry(offerEndsAt);
     const expiryStr = offerEndsAt.toLocaleString("en-IN", {
       day: "numeric", month: "long", year: "numeric",
       hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata"
