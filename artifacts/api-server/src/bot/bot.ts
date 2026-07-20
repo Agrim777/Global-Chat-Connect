@@ -4141,7 +4141,8 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 bot.on('callback_query', async (query) => {
   const userId = query.from.id;
   const chatId = query.message?.chat.id;
-  if (!chatId) return;
+  if (!chatId) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
+  try {
   touchLastSeen(userId);
   if (await isPermanentlyBanned(userId)) { await bot.answerCallbackQuery(query.id, { text: "🚫 Your account has been banned." }).catch(() => {}); return; }
 
@@ -4339,6 +4340,10 @@ bot.on('callback_query', async (query) => {
 
   // Unknown callback — ignore silently
   await bot.answerCallbackQuery(query.id).catch(() => {});
+  } catch (err) {
+    logger.error({ err, userId, data: query.data }, "callback_query unhandled error");
+    bot.answerCallbackQuery(query.id, { text: "Something went wrong. Please try again." }).catch(() => {});
+  }
 });
 
 // ── Telegram Stars: approve all incoming pre-checkout queries ─────────────────
@@ -5199,13 +5204,23 @@ bot.onText(/\/restore/, async (msg) => {
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 bot.onText(/\/profile/, async (msg) => {
-  const u = await getUser(msg.from!.id);
-  if (!u?.isProfileComplete) { await bot.sendMessage(msg.chat.id, "Set up your profile first! Send /start."); return; }
-  await showProfile(msg.chat.id, u);
+  try {
+    const u = await getUser(msg.from!.id);
+    if (!u?.isProfileComplete) { await bot.sendMessage(msg.chat.id, "Set up your profile first! Send /start."); return; }
+    await showProfile(msg.chat.id, u);
+  } catch (err) {
+    logger.error({ err, userId: msg.from?.id }, "/profile error");
+    await bot.sendMessage(msg.chat.id, "Something went wrong. Please try again.").catch(() => {});
+  }
 });
 
 bot.onText(/\/edit/, async (msg) => {
-  await startSetup(msg.chat.id, msg.from!.id);
+  try {
+    await startSetup(msg.chat.id, msg.from!.id);
+  } catch (err) {
+    logger.error({ err, userId: msg.from?.id }, "/edit error");
+    await bot.sendMessage(msg.chat.id, "Something went wrong. Please try again or send /start.").catch(() => {});
+  }
 });
 bot.onText(/\/match/, async (msg) => {
   const id = msg.from!.id;
@@ -5761,54 +5776,7 @@ bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
   await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}\n\n🔒 Broadcast is now DISABLED for this session.`);
 });
 
-// ── Admin: /broadcastfemales — send free-access message to all active females ──
-
-bot.onText(/\/broadcastfemales/, async (msg) => {
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-
-  // Find all active female users
-  const females = await db
-    .select({ id: usersTable.id, name: usersTable.name })
-    .from(usersTable)
-    .where(and(eq(usersTable.gender, "female"), eq(usersTable.isActive, true)));
-
-  if (females.length === 0) {
-    await bot.sendMessage(chatId, "ℹ️ No active female users found.");
-    return;
-  }
-
-  const PREVIEW_MSG =
-    `💌 <b>Special Message for You!</b>
-
-🎉 <b>Great news — this bot is completely FREE for you!</b>
-
-✅ Unlimited matches — no limit, no timer
-✅ Connect with people from all over the world
-✅ Anonymous & safe chatting
-✅ No payment needed — ever!
-
-💘 Tap below to find your match right now 👇`;
-
-  await bot.sendMessage(chatId,
-    `👀 <b>Preview — exactly as females will see it:</b>
-
-─────────────────
-${PREVIEW_MSG}
-─────────────────
-
-📤 Will send to <b>${females.length} active female users</b>. Tap to confirm:`,
-    {
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [[
-          { text: `✅ Send to ${females.length} females now`, callback_data: "broadcastfemales_confirm" },
-          { text: "❌ Cancel", callback_data: "broadcastfemales_cancel" },
-        ]]
-      }
-    }
-  );
-});
+// (duplicate /broadcastfemales handler removed — active handler is below)
 
 // ── Admin: /deals — preview & send deals channel broadcast ───────────────────
 bot.onText(/\/deals/, async (msg) => {
