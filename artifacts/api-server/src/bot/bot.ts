@@ -349,6 +349,16 @@ const userFloodWarned   = new Set<number>();              // userId → already 
 const nsfwWarnings      = new Map<number, number>();      // userId → count of NSFW violations
 const matchBlockList    = new Map<number, Set<number>>(); // userId → set of blocked match userIds (session-level)
 const restrictedUntil   = new Map<number, number>();      // userId → epoch ms when restriction lifts
+const recentPartnersMap = new Map<number, number[]>();    // userId → ordered list of recent partner IDs (newest first)
+
+const RECENT_PARTNERS_LIMIT = 10; // how many past partners to remember per user
+
+function addRecentPartner(userId: number, partnerId: number) {
+  const current = recentPartnersMap.get(userId) ?? [];
+  // Remove if already present (re-insert at front), then cap
+  const updated = [partnerId, ...current.filter(id => id !== partnerId)].slice(0, RECENT_PARTNERS_LIMIT);
+  recentPartnersMap.set(userId, updated);
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -3736,6 +3746,10 @@ async function stopChat(chatId: number, userId: number) {
     .where(eq(usersTable.id, userId));
 
   if (partnerId && partnerId !== FAKE_CHAT_ID) {
+    // Record both sides so neither gets matched with the other again soon
+    addRecentPartner(userId, partnerId);
+    addRecentPartner(partnerId, userId);
+
     const partner = await getUser(partnerId);
     if (partner) {
       // Atomic: only disconnect partner if they're STILL pointing at us.
@@ -3815,23 +3829,25 @@ async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUs
     )
   );
 
-  const myBlockList = matchBlockList.get(userId) ?? new Set<number>();
+  const myBlockList      = matchBlockList.get(userId) ?? new Set<number>();
+  const myRecentPartners = new Set(recentPartnersMap.get(userId) ?? []);
 
-  return candidates.filter((c) => {
+  const baseFilter = (c: typeof candidates[number]) => {
     if (c.id === userId) return false;
     if (!c.isActive) return false;
     if (c.isBanned) return false;
-    // Candidate must be premium-active OR female (free tier)
     if (!isPremiumActive(c) && c.gender !== "female") return false;
-    // Exclude users already inside findMatch (race condition guard)
     if (matchingSet.has(c.id)) return false;
-    // Exclude users this person has blocked or reported
     if (myBlockList.has(c.id)) return false;
-    // Opposite-gender pairing by default (female↔male); admin's explicit
-    // gender-picker filter takes precedence when provided.
     if (effectiveGenderFilter && c.gender !== effectiveGenderFilter) return false;
     return true;
-  });
+  };
+
+  // First try: exclude recent partners so users don't get the same person repeatedly
+  const fresh = candidates.filter(c => baseFilter(c) && !myRecentPartners.has(c.id));
+
+  // Fallback: if the pool is exhausted (small user base), allow recent partners back in
+  return fresh.length > 0 ? fresh : candidates.filter(baseFilter);
 }
 
 
