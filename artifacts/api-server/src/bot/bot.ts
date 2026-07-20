@@ -4567,10 +4567,11 @@ async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<
 // First-time profile setup (only called when no profile exists)
 async function startSetup(chatId: number, id: number) {
   editModeMap.delete(id); // ensure we're NOT in edit mode
-  // Female gender is permanent — preserve it if already set so the lock survives re-setup
+  // Gender is permanent once chosen — preserve it for ALL genders so users can't
+  // re-do setup to swap gender (e.g. male trying to flip to female for free access)
   const existingForSetup = await getUser(id);
-  const isGenderLocked = existingForSetup?.gender === "female";
-  // Wipe all old profile fields — but keep gender if permanently locked female
+  const isGenderLocked = existingForSetup?.gender != null;
+  // Wipe all old profile fields — but always keep gender if already set
   await upsertUser(id, {
     name: null as any,
     age: null as any,
@@ -4774,12 +4775,29 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, "Please enter a valid age between 18 and 80.");
         return;
       }
-      const skipGenderStep = !isEdit && user.gender === "female";
+      // Skip gender step if gender is already locked (all genders, not just female)
+      const skipGenderStep = !isEdit && user.gender != null;
       if (skipGenderStep) {
-        // Female gender is locked — skip gender step, complete profile right here
-        await upsertUser(id, { age, lookingFor: "any", state: "idle", isProfileComplete: true });
-        const updatedFemale = await getUser(id);
-        await sendMain(chatId, updatedFemale!, "🎉 Profile ready! 🆓 As a female user, you get *free unlimited matches*! Tap 💘 *Find Match* to begin!");
+        if (user.gender === "female") {
+          // Female: grant lifetime premium and tell her she matches with males only
+          await upsertUser(id, { age, lookingFor: "any", state: "idle" as const, isProfileComplete: true, hasPaid: true, premiumExpiresAt: null });
+          const updatedFemale = await getUser(id);
+          await sendMain(chatId, updatedFemale!,
+            "🎉 Profile ready! 💎 *Lifetime Premium granted — FREE, forever!*\n\n" +
+            "💘 You will be matched with *male users only*. Tap 💘 *Find Match* to begin!"
+          );
+          bot.sendMessage(
+            ADMIN_ID,
+            `👩 <b>New Girl Joined!</b>\n\nName: <b>${escHtml(updatedFemale?.name ?? "Unknown")}</b>\nAge: ${escHtml(updatedFemale?.age ?? "?")} yrs\nID: <code>${id}</code>\nUsername: @${escHtml(updatedFemale?.telegramUsername ?? "none")}`,
+            { parse_mode: "HTML" }
+          ).catch(() => {});
+        } else {
+          // Male / Other: gender is locked, complete profile normally
+          await upsertUser(id, { age, lookingFor: "any", state: "idle", isProfileComplete: true });
+          const updatedMale = await getUser(id);
+          await sendMain(chatId, updatedMale!, "🎉 Profile complete! Unlock Premium to start matching. 👇");
+          await sendPayGate(chatId);
+        }
         return;
       }
       await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
@@ -4794,31 +4812,32 @@ bot.on("message", async (msg) => {
     if (user.state === "setup_gender") {
       const isEdit = editModeMap.get(id) === "gender";
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
-      // Block gender change if already permanently set as female
-      if (user.gender === "female") {
-        await bot.sendMessage(chatId, "♀️ Your gender is permanently set to *Female* and cannot be changed.", { parse_mode: "Markdown" });
+      // Gender is permanently locked for everyone once chosen — cannot be changed at all
+      if (user.gender != null) {
+        const gLabel = user.gender === "female" ? "♀️ Female" : user.gender === "male" ? "♂️ Male" : "⚧ Other";
+        await bot.sendMessage(chatId,
+          `🔒 Your gender is permanently set to *${gLabel}* and cannot be changed.`,
+          { parse_mode: "Markdown" }
+        );
         if (isEdit) { await finishEditField(chatId, id); } else { await upsertUser(id, { state: "idle" }); }
         return;
       }
       const gMap: Record<string, "male"|"female"|"other"> = { male:"male", female:"female", other:"other" };
       const g = gMap[text.toLowerCase()];
       if (!g) { await bot.sendMessage(chatId, "Please tap Male, Female, or Other."); return; }
-      // Permanently lock gender when female is selected — can never be changed
-      const lockGender = g === "female";
-      if (isEdit) {
-        await upsertUser(id, { gender: g, state: "idle" });
-        await finishEditField(chatId, id); return;
-      }
-      // Grant lifetime premium to female users on first setup
-      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle" as const, isProfileComplete: true });
-      if (lockGender) {
-        // hasPaid=true + premiumExpiresAt=null → lifetime (no expiry = lifetime, per isPremiumActive logic)
-        await upsertUser(id, { hasPaid: true, premiumExpiresAt: null });
+      const isFemale = g === "female";
+      // Grant lifetime premium immediately for females; complete profile for all
+      if (isFemale) {
+        await upsertUser(id, { gender: g, lookingFor: "any", state: "idle" as const, isProfileComplete: true, hasPaid: true, premiumExpiresAt: null });
+      } else {
+        await upsertUser(id, { gender: g, lookingFor: "any", state: "idle" as const, isProfileComplete: true });
       }
       const updated = await getUser(id);
-      if (lockGender) {
-        await sendMain(chatId, updated!, "🎉 Profile complete! 💎 *You've been granted Lifetime Premium — FREE, forever!* Tap 💘 *Find Match* to begin!");
-        // Notify admin: a new female user just joined (females get free unlimited access)
+      if (isFemale) {
+        await sendMain(chatId, updated!,
+          "🎉 Profile complete! 💎 *Lifetime Premium granted — FREE, forever!*\n\n" +
+          "💘 You will be matched with *male users only*. Tap 💘 *Find Match* to begin!"
+        );
         bot.sendMessage(
           ADMIN_ID,
           `👩 <b>New Girl Joined!</b>\n\n` +
