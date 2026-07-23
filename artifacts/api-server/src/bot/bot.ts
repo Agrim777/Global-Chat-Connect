@@ -587,15 +587,15 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
     const premiumBtn = isPremiumActive(user as { hasPaid: boolean; premiumExpiresAt?: Date | null }) ? { text: "✅ Premium" } : { text: "💎 Go Premium" };
     kb = {
       keyboard: isAdminChat
-        ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]]
-        : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, premiumBtn]],
+        ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "🛍️ Satisfy Yourself" }, { text: "🌟 Gift Stars" }]]
+        : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, premiumBtn], [{ text: "🛍️ Satisfy Yourself" }, { text: "🌟 Gift Stars" }]],
       resize_keyboard: true,
     };
   } else {
     kb = {
       keyboard: isAdminChat
-        ? [[{ text: "🚀 Setup Profile" }]]
-        : [[{ text: "🚀 Setup Profile" }], [{ text: "💎 Go Premium" }]],
+        ? [[{ text: "🚀 Setup Profile" }], [{ text: "🛍️ Satisfy Yourself" }]]
+        : [[{ text: "🚀 Setup Profile" }], [{ text: "💎 Go Premium" }], [{ text: "🛍️ Satisfy Yourself" }]],
       resize_keyboard: true,
     };
   }
@@ -3939,7 +3939,7 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
 
     if (eligible.length === 0) {
       await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "🛍️ Satisfy Yourself" }, { text: "🌟 Gift Stars" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }], [{ text: "🛍️ Satisfy Yourself" }, { text: "🌟 Gift Stars" }]], resize_keyboard: true },
       });
       return;
     }
@@ -3980,7 +3980,7 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
       const currentState = await getUser(userId);
       if (currentState?.state === "chatting") return; // already connected — stay silent
       await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
+        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "🛍️ Satisfy Yourself" }, { text: "🌟 Gift Stars" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }], [{ text: "🛍️ Satisfy Yourself" }, { text: "🌟 Gift Stars" }]], resize_keyboard: true },
       });
       return;
     }
@@ -4398,6 +4398,28 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
+  // ── Gift Stars callbacks ─────────────────────────────────────────────────
+  if (query.data && ["gift_10","gift_25","gift_50","gift_100"].includes(query.data)) {
+    const starMap = { gift_10: 10, gift_25: 25, gift_50: 50, gift_100: 100 } as Record<string,number>;
+    const stars = starMap[query.data];
+    const sender = await getUser(userId);
+    if (!sender?.chattingWith) {
+      await bot.answerCallbackQuery(query.id, { text: "You need to be in a chat to gift stars!" });
+      return;
+    }
+    await bot.answerCallbackQuery(query.id);
+    await (bot as any).sendInvoice(
+      chatId,
+      "Gift " + stars + " Stars to your partner",
+      "Your partner will receive a " + stars + "⭐ star gift from you!",
+      "gift_" + stars + "_to_" + sender.chattingWith,
+      "",
+      "XTR",
+      [{ label: stars + " Stars Gift", amount: stars }]
+    );
+    return;
+  }
+
   // Unknown callback — ignore silently
   await bot.answerCallbackQuery(query.id).catch(() => {});
   } catch (err) {
@@ -4481,6 +4503,37 @@ bot.on('message', async (msg) => {
   }
 });
 
+
+// ── Gift Stars: notify recipient after successful payment ────────────────────
+bot.on('message', async (msg) => {
+  if (!msg.successful_payment) return;
+  const payload = msg.successful_payment.invoice_payload as string;
+  if (!payload.startsWith('gift_')) return;
+
+  const senderId = msg.from!.id;
+  const chatId = msg.chat.id;
+  const parts = payload.split('_');
+  const stars = parseInt(parts[1], 10);
+  const recipientId = parseInt(parts[3], 10);
+
+  if (recipientId && Number.isFinite(recipientId)) {
+    await bot.sendMessage(recipientId,
+      "🌟 *You received a star gift!*\n\nYour chat partner sent you " + stars + "⭐ stars! How sweet 😊",
+      { parse_mode: 'Markdown' }
+    ).catch(() => {});
+  }
+
+  await bot.sendMessage(chatId,
+    "✅ *Stars sent!*\n\nYou gifted " + stars + "⭐ stars to your partner. 🌟",
+    { parse_mode: 'Markdown' }
+  ).catch(() => {});
+
+  await bot.sendMessage(ADMIN_ID,
+    "🌟 Star gift!\nFrom: " + senderId + " → To: " + recipientId + "\nAmount: " + stars + "⭐"
+  ).catch(() => {});
+
+  logger.info({ senderId, recipientId, stars }, 'Gift Stars payment completed');
+});
 
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
@@ -4748,10 +4801,49 @@ bot.on("message", async (msg) => {
       return;
     }
 
+    // ── Satisfy Yourself: Amazon Deals ───────────────────────────────────────
+    if (text === "🛍️ Satisfy Yourself") {
+      await bot.sendMessage(chatId,
+        "🛍️ *Satisfy Yourself!*\n\nCheck out top Amazon deals — great discounts on electronics, fashion & more! 🔥",
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🛒 Shop Amazon Deals", url: "https://www.amazon.in/dp/B06O5WQB2?tag=buyandslay02-21" }
+            ]]
+          }
+        }
+      );
+      return;
+    }
+
+    // ── Gift Stars ────────────────────────────────────────────────────────────
+    if (text === "🌟 Gift Stars") {
+      const me = await getUser(userId);
+      if (!me?.chattingWith) {
+        await bot.sendMessage(chatId, "🌟 You can gift stars while you're connected to a partner!\n\nTap 💘 Find Match to start a chat first.");
+        return;
+      }
+      await bot.sendMessage(chatId,
+        "🌟 *Gift Stars to your partner!*\n\nChoose how many stars to send — they'll love it! ✨",
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "⭐ 10 Stars", callback_data: "gift_10" }, { text: "⭐ 25 Stars", callback_data: "gift_25" }],
+              [{ text: "⭐ 50 Stars", callback_data: "gift_50" }, { text: "⭐ 100 Stars", callback_data: "gift_100" }]
+            ]
+          }
+        }
+      );
+      return;
+    }
+
     // ── Escape hatch: pressing any main-menu button while stuck in a setup step resets to idle ──
     const MAIN_MENU_BUTTONS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile",
       "🛑 Stop Matching", "🛑 Stop Chat", "💎 Go Premium",
-      "✅ Premium", "💳 Support Us", "🚀 Setup Profile"];
+      "✅ Premium", "💳 Support Us", "🚀 Setup Profile",
+      "🛍️ Satisfy Yourself", "🌟 Gift Stars"];
     if (MAIN_MENU_BUTTONS.includes(text) &&
         user.state !== "idle" && user.state !== "chatting") {
       editModeMap.delete(id);
