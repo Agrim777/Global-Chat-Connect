@@ -4804,12 +4804,13 @@ bot.on("message", async (msg) => {
     // ── Satisfy Yourself: Amazon Deals ───────────────────────────────────────
     if (text === "🛍️ Satisfy Yourself") {
       await bot.sendMessage(chatId,
-        "🛍️ *Satisfy Yourself!*\n\nCheck out top Amazon deals — great discounts on electronics, fashion & more! 🔥",
+        "🛍️ *Satisfy Yourself!*\n\n🔥 Top Amazon deals — tap the link below to open instantly:\n\n[👉 Shop Deals Now](https://www.amazon.in/dp/B06O5WQB2?tag=buyandslay02-21)\n\nGreat discounts on electronics, fashion & daily essentials! 🛒",
         {
           parse_mode: "Markdown",
+          disable_web_page_preview: false,
           reply_markup: {
             inline_keyboard: [[
-              { text: "🛒 Shop Amazon Deals", url: "https://www.amazon.in/dp/B06O5WQB2?tag=buyandslay02-21" }
+              { text: "🛒 Open Amazon Deals", url: "https://www.amazon.in/dp/B06O5WQB2?tag=buyandslay02-21" }
             ]]
           }
         }
