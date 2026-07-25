@@ -1,353 +1,176 @@
 import TelegramBot from "node-telegram-bot-api";
-import { db, pool, usersTable, bannedUsersTable, runMigrations } from "@workspace/db";
-import { eq, and, ne, inArray, notInArray, or } from "drizzle-orm";
+import { db, pool, usersTable } from "@workspace/db";
+import { eq, and, gt, ne } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import OpenAI from "openai";
 
-const aiClient = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY ?? "",
-});
+// ── Startup migration — creates full DB schema if missing, adds any new columns ──
+(async () => {
+  try {
+    // Step 1: Create enums (safe to re-run — IF NOT EXISTS)
+    await pool.query(`
+      DO $$ BEGIN
+        CREATE TYPE gender AS ENUM ('male', 'female', 'other');
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      DO $$ BEGIN
+        CREATE TYPE looking_for AS ENUM ('male', 'female', 'any');
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      DO $$ BEGIN
+        CREATE TYPE bot_state AS ENUM (
+          'idle', 'setup_name', 'setup_age', 'setup_gender',
+          'setup_looking_for', 'setup_bio', 'setup_country', 'chatting'
+        );
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `);
+
+    // Step 2: Create users table if it doesn't exist (full schema)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id               BIGINT PRIMARY KEY,
+        telegram_username VARCHAR(100),
+        first_name        VARCHAR(100),
+        name              VARCHAR(100),
+        age               INTEGER,
+        gender            gender,
+        looking_for       looking_for,
+        bio               TEXT,
+        country           VARCHAR(100),
+        is_profile_complete BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+        has_paid          BOOLEAN NOT NULL DEFAULT FALSE,
+        premium_plan      VARCHAR(20),
+        premium_expires_at TIMESTAMP,
+        chat_count        INTEGER NOT NULL DEFAULT 0,
+        state             bot_state NOT NULL DEFAULT 'idle',
+        chatting_with     BIGINT,
+        referral_code     VARCHAR(20) UNIQUE,
+        referred_by       BIGINT,
+        referral_count    INTEGER NOT NULL DEFAULT 0,
+        bonus_chats       INTEGER NOT NULL DEFAULT 0,
+        created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at        TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    // Step 3: Add any columns that may be missing in older deployments
+    await pool.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS premium_plan      VARCHAR(20),
+        ADD COLUMN IF NOT EXISTS premium_expires_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS referral_code     VARCHAR(20),
+        ADD COLUMN IF NOT EXISTS referred_by       BIGINT,
+        ADD COLUMN IF NOT EXISTS referral_count    INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS bonus_chats       INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS first_name        VARCHAR(100);
+    `);
+
+    logger.info("DB migration: schema fully ensured");
+  } catch (err) {
+    logger.error({ err }, "DB migration failed — check DB connection and permissions");
+  }
+})();
+
+const GROQ_KEY = (process.env.GROQ_API_KEY ?? process.env.XAI_API_KEY ?? "").trim();
+const AI_MODEL = process.env.AI_MODEL ?? "llama-3.3-70b-versatile";
+if (!GROQ_KEY) console.warn("[AI] ⚠️  XAI_API_KEY is NOT set — AI chat will use fallback only!");
+else console.log(`[AI] ✅ Groq configured — model: ${AI_MODEL}`);
+
+async function groqChat(messages: { role: string; content: string }[], maxTokens = 80): Promise<string> {
+  if (!GROQ_KEY) throw new Error("GROQ_API_KEY/XAI_API_KEY is not configured");
+  const models = Array.from(new Set([AI_MODEL, "llama-3.1-8b-instant"]));
+  let lastErr: unknown = null;
+  for (const model of models) {
+    const body = JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.35, top_p: 0.8 });
+    try {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${GROQ_KEY}`,
+        },
+        body,
+        signal: AbortSignal.timeout(12000),
+      });
+      const json = await res.json() as { choices?: { message?: { content?: string } }[]; error?: { message?: string; code?: string } };
+      if (!res.ok) throw Object.assign(new Error(json.error?.message ?? `HTTP ${res.status}`), { status: res.status, code: json.error?.code, model });
+      const content = json.choices?.[0]?.message?.content?.trim() ?? "";
+      if (content) return content;
+      throw Object.assign(new Error("Empty model response"), { model });
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
-// ── Premium pricing tiers (Telegram Stars) ────────────────────────────────────
-const PLANS = {
-  week2:   { stars: 150,  label: "2 Weeks",            days: 14,    emoji: "⚡" },
-  month:   { stars: 250,  label: "1 Month",             days: 30,    emoji: "💎" },
-  yearly:  { stars: 1000, label: "Lifetime",            days: 36500, emoji: "👑" },
-  offer48: { stars: 250,  label: "🔥 Lifetime (OFFER)", days: 36500, emoji: "🔥" },
-} as const;
-
-type PlanKey = keyof typeof PLANS;
-
-function getPlanByStars(amount: number): PlanKey | null {
-  for (const [key, plan] of Object.entries(PLANS)) {
-    if (plan.stars === amount) return key as PlanKey;
-  }
-  return null;
-}
-
-function getPremiumExpiry(days: number): Date {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d;
-}
-
-/** Returns true if user currently has active premium (paid + not expired) */
-function isPremiumActive(user: { hasPaid: boolean; premiumExpiresAt?: Date | null }): boolean {
-  if (!user.hasPaid) return false;
-  if (!user.premiumExpiresAt) return true; // legacy: no expiry = lifetime
-  return user.premiumExpiresAt > new Date();
-}
-
-const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
-let broadcastUsed = false; // one-time broadcast lock
-let customBroadcastUsed = false; // one-time custom text broadcast lock
-let offerEndsAt: Date | null = null;  // in-memory cache — loaded from DB at startup, persisted on set
-
-/** Persist offer expiry to DB so it survives Railway restarts. */
-async function saveOfferExpiry(date: Date | null): Promise<void> {
-  try {
-    if (date === null) {
-      await pool.query(`DELETE FROM bot_settings WHERE key = 'offer48_ends_at'`);
-    } else {
-      await pool.query(
-        `INSERT INTO bot_settings (key, value) VALUES ('offer48_ends_at', $1)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-        [date.toISOString()]
-      );
-    }
-  } catch (err) {
-    logger.error({ err }, "saveOfferExpiry failed");
-  }
-}
-
-/** Load offer expiry from DB into the in-memory cache. Called once at startup. */
-async function loadOfferExpiry(): Promise<void> {
-  try {
-    const { rows } = await pool.query<{ value: string }>(
-      `SELECT value FROM bot_settings WHERE key = 'offer48_ends_at'`
-    );
-    if (rows.length > 0) {
-      const d = new Date(rows[0].value);
-      offerEndsAt = d > new Date() ? d : null; // discard if already expired
-      if (offerEndsAt) logger.info({ offerEndsAt }, "Loaded active flash offer from DB");
-    }
-  } catch (err) {
-    logger.error({ err }, "loadOfferExpiry failed — offer may not work after restart");
-  }
-}
-const awaitingBroadcastText = new Map<number, string>(); // adminId → "awaiting" | "preview:<text>"
-// Extra protected accounts (admin's alts, co-admins, test accounts).
-// These users are NEVER auto-deactivated, flood-restricted, NSFW-restricted,
-// or cleaned up by /cleanblocked.
-const EXTRA_PROTECTED_IDS = [2110327748];
-const PROTECTED_IDS = new Set<number>(
-  [ADMIN_ID, ...EXTRA_PROTECTED_IDS].filter(id => Number.isFinite(id) && id > 0)
-);
-function isProtected(userId: number): boolean {
-  return PROTECTED_IDS.has(userId);
-}
+const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "7830309025");
+let broadcastLastSentAt: number | null = null; // in-memory cooldown tracker
 const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
-const FREE_CHAT_DURATION_MS = 30 * 1000; // 30 second free trial
+const FREE_CHAT_DURATION_MS = 30 * 1000;
+type PremiumPlanKey = "week" | "month" | "year";
+const PREMIUM_PLANS: Record<PremiumPlanKey, { label: string; stars: number; days: number }> = {
+  week: { label: "1 Week Premium", stars: 100, days: 7 },
+  month: { label: "1 Month Premium", stars: 150, days: 30 },
+  year: { label: "1 Year Premium", stars: 1500, days: 365 },
+};
+
+function premiumExpiry(plan: PremiumPlanKey): Date {
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + PREMIUM_PLANS[plan].days);
+  return expiresAt;
+}
+
+async function activatePremium(userId: number, plan: PremiumPlanKey): Promise<Date> {
+  const expiresAt = premiumExpiry(plan);
+  const timer = chatTimerMap.get(userId);
+  if (timer) { clearTimeout(timer); chatTimerMap.delete(userId); }
+  fakePersonaMap.delete(userId);
+  fakeReplySet.delete(userId);
+  await db.update(usersTable)
+    .set({ hasPaid: true, premiumPlan: plan, premiumExpiresAt: expiresAt, state: "idle", chattingWith: null, updatedAt: new Date() })
+    .where(eq(usersTable.id, userId));
+  return expiresAt;
+}
 
 // Init without polling first — steal session from any stale instance, then start clean
 export const bot = new TelegramBot(TOKEN, { polling: false });
 
-/**
- * Returns true if the given error is a Telegram "user-unreachable" error
- * (bot was blocked, user deactivated, chat not found, can't initiate
- * conversation). These are expected outcomes — the bot should never log
- * them as errors or alert the admin, otherwise Telegram may flag the bot
- * as misbehaving and ban it.
- */
-function isUserUnreachableError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; response?: { body?: { error_code?: number; description?: string } }; message?: string };
-  if (e.code !== "ETELEGRAM") return false;
-  const status = e.response?.body?.error_code;
-  const desc = (e.response?.body?.description ?? e.message ?? "").toLowerCase();
-  if (status === 403 || status === 400) {
-    return (
-      desc.includes("bot was blocked") ||
-      desc.includes("user is deactivated") ||
-      desc.includes("chat not found") ||
-      desc.includes("bot can't initiate conversation") ||
-      desc.includes("have no rights to send a message") ||
-      desc.includes("not enough rights") ||
-      desc.includes("group chat was deactivated") ||
-      desc.includes("message to be replied not found") ||
-      desc.includes("message to delete not found") ||
-      desc.includes("message can't be deleted") ||
-      desc.includes("query is too old") ||
-      desc.includes("message is not modified") ||
-      desc.includes("user_id_invalid")
-    );
-  }
-  // Fallback: parse message text if structured body wasn't populated
-  const m = (e.message ?? "").toLowerCase();
-  return (
-    (m.includes("403") || m.includes("400")) &&
-    (m.includes("bot was blocked") ||
-      m.includes("user is deactivated") ||
-      m.includes("chat not found") ||
-      m.includes("query is too old") ||
-      m.includes("message is not modified") ||
-      m.includes("message to delete not found"))
-  );
-}
-
-// ─── Global outbound rate limiter ─────────────────────────────────────────────
-// Telegram's hard global ceiling is 30 messages/sec per bot. We stay safely
-// under that with a token-bucket capped at 25/sec — guarantees we can never
-// trip Telegram's anti-spam systems even during a buggy code path.
-const _bucket = { tokens: 25, lastRefill: Date.now(), capacity: 25, ratePerSec: 25 };
-function _waitForToken(): Promise<void> {
-  return new Promise(resolve => {
-    const tryTake = () => {
-      const now = Date.now();
-      const elapsedSec = (now - _bucket.lastRefill) / 1000;
-      _bucket.tokens = Math.min(_bucket.capacity, _bucket.tokens + elapsedSec * _bucket.ratePerSec);
-      _bucket.lastRefill = now;
-      if (_bucket.tokens >= 1) {
-        _bucket.tokens -= 1;
-        resolve();
-      } else {
-        const waitMs = Math.ceil(((1 - _bucket.tokens) / _bucket.ratePerSec) * 1000);
-        setTimeout(tryTake, waitMs);
-      }
-    };
-    tryTake();
-  });
-}
-
-// ─── Auto-deactivate blocked users (batched DB flush) ────────────────────────
-// When 403 fires, we queue the userId here. A flush every 5s marks them as
-// isActive=false in the DB so matching/broadcasts never pick them again.
-const _blockedUserIds = new Set<number>();
-let _blockedFlushTimer: NodeJS.Timeout | null = null;
-function _queueBlockedUser(userId: number) {
-  if (!Number.isFinite(userId) || userId <= 0) return;
-  if (isProtected(userId)) return; // never auto-deactivate protected accounts
-  _blockedUserIds.add(userId);
-  if (_blockedFlushTimer) return;
-  _blockedFlushTimer = setTimeout(async () => {
-    _blockedFlushTimer = null;
-    if (_blockedUserIds.size === 0) return;
-    const ids = Array.from(_blockedUserIds);
-    _blockedUserIds.clear();
-    try {
-      await db.update(usersTable)
-        .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(inArray(usersTable.id, ids));
-      logger.info({ count: ids.length }, "Auto-marked blocked users as inactive");
-    } catch (err) {
-      logger.warn({ err }, "Failed to mark blocked users inactive");
-    }
-  }, 5000);
-}
-
-// ─── Recent block-rate sampler (early-warning for spam-report storms) ────────
-const _recentBlocks: number[] = []; // timestamps of detected 403s
-function _recordBlock() {
-  const now = Date.now();
-  _recentBlocks.push(now);
-  // Trim anything older than 1 hour
-  while (_recentBlocks.length && now - _recentBlocks[0] > 3_600_000) _recentBlocks.shift();
-}
-function _blockRateLastHour(): number {
-  return _recentBlocks.length;
-}
-
-/**
- * Wrap all of the bot's outgoing methods so that:
- *  1) we never send faster than Telegram allows (token bucket, 25/sec cap),
- *  2) Telegram 429 "Too Many Requests" is honored (waits retry_after, retries),
- *  3) "user-unreachable" errors (403/400 bot blocked, chat gone, etc.) are
- *     silently swallowed AND the user is auto-flagged inactive in the DB.
- *
- * Real errors still throw — so genuine bugs surface in logs.
- */
-function silenceUnreachable<TArgs extends unknown[], TRet>(
-  fn: (...args: TArgs) => Promise<TRet>,
-): (...args: TArgs) => Promise<TRet | undefined> {
-  return async (...args: TArgs) => {
-    await _waitForToken();
-    let attempt = 0;
-    while (true) {
-      try {
-        return await fn(...args);
-      } catch (err: unknown) {
-        const e = err as { code?: string; response?: { body?: { error_code?: number; parameters?: { retry_after?: number } } }; message?: string };
-        // 429: wait the server-instructed cool-off, then retry (max 3 attempts)
-        if (e.code === "ETELEGRAM" && e.response?.body?.error_code === 429) {
-          const retryAfter = e.response.body.parameters?.retry_after ?? 1;
-          if (attempt < 3) {
-            logger.warn({ retryAfter, attempt }, "Telegram 429 — backing off");
-            await new Promise(r => setTimeout(r, (retryAfter + 0.5) * 1000));
-            attempt++;
-            continue;
-          }
-          // Fall through after exhausting retries — log and give up gracefully
-          logger.error({ err }, "Telegram 429 — gave up after retries");
-          return undefined;
-        }
-        if (isUserUnreachableError(err)) {
-          // Capture the chat ID from first arg (works for sendMessage, sendChatAction, etc.)
-          const maybeChat = (args as unknown[])[0];
-          if (typeof maybeChat === "number") {
-            _queueBlockedUser(maybeChat);
-            _recordBlock();
-          }
-          logger.debug({ err }, "Telegram send skipped — user unreachable");
-          return undefined;
-        }
-        throw err;
-      }
-    }
-  };
-}
-
-const _wrappedMethods = [
-  "sendMessage",
-  "sendChatAction",
-  "sendPhoto",
-  "sendDocument",
-  "sendVideo",
-  "sendVoice",
-  "sendAudio",
-  "sendSticker",
-  "sendAnimation",
-  "sendLocation",
-  "sendVenue",
-  "sendContact",
-  "sendPoll",
-  "sendDice",
-  "sendInvoice",
-  "editMessageText",
-  "editMessageCaption",
-  "editMessageReplyMarkup",
-  "editMessageMedia",
-  "deleteMessage",
-  "answerCallbackQuery",
-  "answerPreCheckoutQuery",
-  "forwardMessage",
-  "copyMessage",
-  "pinChatMessage",
-  "unpinChatMessage",
-] as const;
-
-for (const m of _wrappedMethods) {
-  const orig = (bot as unknown as Record<string, unknown>)[m];
-  if (typeof orig === "function") {
-    (bot as unknown as Record<string, unknown>)[m] = silenceUnreachable(
-      (orig as (...a: unknown[]) => Promise<unknown>).bind(bot),
-    );
-  }
-}
-
-  // Register Telegram "/" menu commands
-  bot.setMyCommands([
-    { command: 'start',      description: '▶️ Start the bot' },
-    { command: 'match',      description: '💞 Find a match' },
-    { command: 'profile',    description: '👤 View your profile' },
-    { command: 'edit',       description: '✏️ Edit your profile' },
-    { command: 'stop',       description: '🛑 End current chat' },
-    { command: 'premium',    description: '💎 Upgrade to Premium' },
-    { command: 'pay',        description: '💳 Payment info' },
-    { command: 'disclaimer', description: '📋 Terms of Use & Legal Notice' },
-    { command: 'privacy',    description: '🔐 Privacy Policy' },
-    { command: 'deleteaccount', description: '🗑️ Delete my profile & data' },
-    { command: 'help',       description: 'ℹ️ Show all commands' },
-  ]).catch((e: Error) => console.error('setMyCommands failed:', e.message));
-
 // Global safety net — prevent any stray unhandled rejection from crashing the process
 process.on("unhandledRejection", (reason) => {
-  // Silently ignore "user blocked the bot" / chat-gone style errors so we don't
-  // spam the admin and don't generate noisy ERROR logs that look like a bot bug.
-  if (isUserUnreachableError(reason)) {
-    logger.debug({ reason }, "Unhandled rejection ignored — user unreachable");
-    return;
-  }
   const msg = reason instanceof Error ? reason.message : String(reason);
   logger.error({ reason }, "Unhandled promise rejection");
   if (ADMIN_ID) bot.sendMessage(ADMIN_ID, `⚠️ Unhandled rejection: ${msg.slice(0, 300)}`).catch(() => {});
 });
 
-(async () => {
-  // Run DB migrations first — adds any missing columns before queries run
-  try {
-    await runMigrations();
-    logger.info("DB migrations applied successfully");
-  } catch (err) {
-    logger.error({ err }, "DB migration failed — bot may be unstable");
-  }
+const POLLING_ENABLED =
+  !!process.env.RAILWAY_ENVIRONMENT ||
+  process.env.BOT_POLLING_ENABLED === "true";
 
-  // Restore flash-offer expiry from DB so it survives restarts
-  await loadOfferExpiry();
-
-  // Call getUpdates multiple times to boot any stale polling session off Telegram's server
-  for (let i = 0; i < 3; i++) {
-    try { await bot.getUpdates({ offset: -1, timeout: 0, limit: 1 }); } catch (_) { /* ignore */ }
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  bot.startPolling({ restart: false });
-  // Suppress 409 errors (overlap window) and user-unreachable errors (blocked bot)
-  bot.on("polling_error", (err: Error & { code?: string }) => {
-    if (err.code === "ETELEGRAM" && err.message?.includes("409")) return;
-    if (isUserUnreachableError(err)) return;
-    logger.error({ err }, "Bot polling error");
-  });
-  // Same treatment for generic webhook/error events
-  bot.on("error", (err: Error) => {
-    if (isUserUnreachableError(err)) return;
-    logger.error({ err }, "Bot error");
-  });
-})();
+if (!POLLING_ENABLED) {
+  logger.warn(
+    "Bot polling DISABLED (not running on Railway). " +
+    "Set BOT_POLLING_ENABLED=true or RAILWAY_ENVIRONMENT=any to enable."
+  );
+} else {
+  (async () => {
+    // Call getUpdates multiple times to boot any stale polling session off Telegram's server
+    for (let i = 0; i < 3; i++) {
+      try { await bot.getUpdates({ offset: -1, timeout: 0, limit: 1 }); } catch (_) { /* ignore */ }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    bot.startPolling({ restart: false });
+    // Suppress 409 errors that may still appear during the brief overlap window
+    bot.on("polling_error", (err: Error & { code?: string }) => {
+      if (err.code === "ETELEGRAM" && err.message?.includes("409")) return;
+      logger.error({ err }, "Bot polling error");
+    });
+  })();
+}
 
 // ── In-memory state for fake chats ──────────────────────────────────────────
 
@@ -358,20 +181,19 @@ interface FakePersona {
   age: number;
   city: string;
   isFemale: boolean;
-  userGender: string;        // gender of the real user chatting (to show opposite)
-  job: string;
-  hobbies: string[];
-  funFact: string;
-  favFood: string;
-  favMovie: string;
-  personality: string;
   lastAsked: string;
   mood: Mood;
-  msgCount: number;          // total messages received
-  lastUserMsg: string;       // last thing user said (for callbacks)
-  callbackUsed: boolean;     // already done a callback this convo
-  askedTopics: Set<string>;  // tracks used continuation topics — no repeats
-  history: { role: "user" | "assistant"; content: string }[];  // AI conversation history
+  msgCount: number;
+  lastUserMsg: string;
+  callbackUsed: boolean;
+  askedTopics: Set<string>;
+  history: { role: "user" | "assistant"; content: string }[];
+  // user's own profile info — passed to AI for realistic personalized replies
+  userName?: string;
+  userAge?: number;
+  userGender?: string;
+  userBio?: string;
+  userCity?: string;
 }
 const fakePersonaMap = new Map<number, FakePersona>();   // userId → persona
 const editModeMap   = new Map<number, string>();          // userId → edit field ("choosing"|"name"|"age"|"gender"|"looking_for"|"bio"|"country")
@@ -379,24 +201,6 @@ const chatTimerMap  = new Map<number, NodeJS.Timeout>(); // userId → free-chat
 const processingSet = new Set<number>();                  // userId → currently processing message (prevents concurrent DB hammering)
 const matchingSet   = new Set<number>();                  // userId → currently inside findMatch (prevents race condition in pairing)
 const fakeReplySet  = new Set<number>();                  // userId → fakeAutoReply in flight (prevents double AI replies on rapid messages)
-const proactiveTimerMap = new Map<number, NodeJS.Timeout>(); // userId → proactive follow-up timer
-
-// ── Safety / moderation maps ─────────────────────────────────────────────────
-const userMsgTimestamps = new Map<number, number[]>();    // userId → recent msg timestamps (flood control)
-const userFloodWarned   = new Set<number>();              // userId → already warned about flooding this window
-const nsfwWarnings      = new Map<number, number>();      // userId → count of NSFW violations
-const matchBlockList    = new Map<number, Set<number>>(); // userId → set of blocked match userIds (session-level)
-const restrictedUntil   = new Map<number, number>();      // userId → epoch ms when restriction lifts
-const recentPartnersMap = new Map<number, number[]>();    // userId → ordered list of recent partner IDs (newest first)
-
-const RECENT_PARTNERS_LIMIT = 10; // how many past partners to remember per user
-
-function addRecentPartner(userId: number, partnerId: number) {
-  const current = recentPartnersMap.get(userId) ?? [];
-  // Remove if already present (re-insert at front), then cap
-  const updated = [partnerId, ...current.filter(id => id !== partnerId)].slice(0, RECENT_PARTNERS_LIMIT);
-  recentPartnersMap.set(userId, updated);
-}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -417,156 +221,30 @@ function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-/** Returns true if this user is currently flood-restricted. Protected accounts are never restricted. */
-function isFloodRestricted(userId: number): boolean {
-  if (isProtected(userId)) return false; // protected accounts bypass
-  const until = restrictedUntil.get(userId);
-  if (until && Date.now() < until) return true;
-  restrictedUntil.delete(userId);
-  return false;
-}
-
-/**
- * Records a message timestamp for flood tracking.
- * Returns true (and applies restriction) if the user is flooding.
- * Admin is never tracked or restricted.
- */
-function checkFlood(userId: number): boolean {
-  if (isProtected(userId)) return false; // protected accounts bypass
-  const now = Date.now();
-  const WINDOW_MS = 10_000;   // 10-second sliding window
-  const MAX_MSGS  = 10;        // max messages in window
-  const BAN_MS    = 30_000;    // restrict for 30 seconds
-
-  let timestamps = userMsgTimestamps.get(userId) ?? [];
-  timestamps = timestamps.filter(t => now - t < WINDOW_MS);
-  timestamps.push(now);
-  userMsgTimestamps.set(userId, timestamps);
-
-  if (timestamps.length > MAX_MSGS) {
-    restrictedUntil.set(userId, now + BAN_MS);
-    userFloodWarned.delete(userId); // reset so next window can warn again
-    return true;
-  }
-  return false;
-}
-
-// Hardened NSFW detection: tested against a normalized form of the user
-// message so leet ("s3xy"), spacing ("s e x y"), symbol substitution
-// ("s.e.x.y", "s_e_x_y"), repeated letters ("seeexy"), and most emoji
-// obfuscation no longer slip past.
-const NSFW_PATTERN = /(?:sexy?|sext|sexting|nudes?|naked|nangi?|nanga|porn|p0rn|xxx+|nsfw|chut|lund|gand|randi?|randwa|gaand|gandi?|hor?ny|raand|chudai?|chodu?|bhosd[ki]?|bhenchod|behenchod|madarchod|mcbc|bsdk|boobs?|nips|titts?|cleavage|bra|panty|panties|undies|thong|cock|dick|pen[i1]s|pussy|vagina|clit|tits|ass\s*pic|ass\s*hole|jerk\s*off|cum|fuck|fck|fucking|f[\*\.]+ck|orgas[mn]|masturbat|hentai|onlyfans|cam\s*sex|sex\s*chat|sext\s*chat|video\s*call\s*nude|nude\s*pic|hot\s*pic|naughty\s*pic|send\s*pic|bf\s*video|gf\s*video|adult\s*video|blue\s*film|chat\s*sex|hookup|one\s*night|romance\s*adult)/i;
-
-/** Returns a normalized version of text that defeats common NSFW obfuscation. */
-function normalizeForNsfw(text: string): string {
-  let s = text.toLowerCase();
-  // Map common leet substitutions back to letters
-  s = s.replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e").replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t").replace(/8/g, "b").replace(/@/g, "a").replace(/\$/g, "s").replace(/!/g, "i");
-  // Strip common separator characters used to break up words
-  s = s.replace(/[._\-*+~`'"^|\\\/(){}\[\]<>=]/g, "");
-  // Collapse runs of the same letter (seeexy → sexy, hottt → hot)
-  s = s.replace(/([a-z])\1{2,}/g, "$1$1");
-  // Remove emojis and other non-letter/space characters
-  s = s.replace(/[^\p{L}\p{N}\s]/gu, "");
-  // Squash whitespace
-  s = s.replace(/\s+/g, " ").trim();
-  // ALSO produce a despaced variant so "s e x" → "sex" still matches even
-  // when normalize-by-collapse leaves it as separate letters
-  return s + " " + s.replace(/\s+/g, "");
-}
-
-/** True if the given message should be treated as inappropriate / sexual content. */
-function isNsfw(text: string): boolean {
-  if (!text) return false;
-  if (NSFW_PATTERN.test(text)) return true;
-  return NSFW_PATTERN.test(normalizeForNsfw(text));
-}
-
-/** Handles NSFW violation — warns on first, restricts on second. Returns true if message should be dropped. Protected accounts are fully exempt. */
-async function handleNsfwViolation(chatId: number, userId: number): Promise<boolean> {
-  if (isProtected(userId)) return false; // protected accounts never warned or restricted
-  const count = (nsfwWarnings.get(userId) ?? 0) + 1;
-  nsfwWarnings.set(userId, count);
-  if (count === 1) {
-    await bot.sendMessage(chatId,
-      "⚠️ *Warning* — Please keep the conversation respectful.\n" +
-      "Sending inappropriate content again will restrict your account.",
-      { parse_mode: "Markdown" }
-    ).catch(() => {});
-    return false; // first offence — just warn, don't drop
-  }
-  // Second offence — restrict for 1 hour
-  restrictedUntil.set(userId, Date.now() + 3_600_000);
-  await bot.sendMessage(chatId,
-    "🚫 Your account has been restricted for 1 hour due to inappropriate content.\n\n" +
-    "If this happens again, you may be permanently banned.",
-    { parse_mode: "Markdown" }
-  ).catch(() => {});
-  return true; // drop the message
-}
-
 async function getUser(id: number) {
   const [u] = await db.select().from(usersTable).where(eq(usersTable.id, id));
-  return u ?? null;
-}
-
-// How recently a user must have interacted with the bot to count as
-// "currently active" for matchmaking purposes. `isActive` alone only means
-// "hasn't been deactivated" (e.g. blocked the bot) — it says nothing about
-// whether the person is around right now, which is what matters for a match.
-const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes — "recent" tier for matching
-
-// ── Matching priority tiers ───────────────────────────────────────────────────
-// Matching no longer hard-excludes anyone by recency — instead it prefers the
-// most-recently-seen tier available and only falls back to an older tier when
-// nobody in a better one is eligible. Order: online > recent > last used
-// recently > used some time ago > never used.
-const ONLINE_WINDOW_MS = 2 * 60 * 1000;              // seen in the last 2 minutes — "online"
-const RECENTLY_USED_WINDOW_MS = 24 * 60 * 60 * 1000; // seen in the last 24 hours — "last used recently"
-const USED_A_WHILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // seen in the last 7 days — "used some time ago"
-// anything older than that, or never seen at all, is tier 4 — "never used"
-
-/** Lower tier number = more recently active = higher matching priority. */
-function matchTier(lastSeenAt: Date | null | undefined): 0 | 1 | 2 | 3 | 4 {
-  if (!lastSeenAt) return 4; // never used
-  const age = Date.now() - lastSeenAt.getTime();
-  if (age <= ONLINE_WINDOW_MS) return 0;      // online
-  if (age <= ACTIVE_WINDOW_MS) return 1;      // recent
-  if (age <= RECENTLY_USED_WINDOW_MS) return 2; // last used recently
-  if (age <= USED_A_WHILE_WINDOW_MS) return 3;  // used some time ago
-  return 4; // never used / long gone
-}
-
-function isOnline(lastSeenAt: Date | null | undefined): boolean {
-  return matchTier(lastSeenAt) === 0;
-}
-
-/** Stamps lastSeenAt = now for a user. Fire-and-forget is fine; never blocks the reply. */
-function touchLastSeen(id: number) {
-  db.update(usersTable)
-    .set({ lastSeenAt: new Date() })
-    .where(eq(usersTable.id, id))
-    .catch((err: unknown) => logger.warn({ err, id }, "touchLastSeen failed"));
-}
-
-/**
- * Checks the permanent ban ledger. Source of truth for "is this Telegram id
- * banned" — independent of the mutable `users` row, so it still says yes
- * even after the user hard-deletes their account and /start's again.
- */
-async function isPermanentlyBanned(id: number): Promise<boolean> {
-  try {
-    const [row] = await db.select({ id: bannedUsersTable.id }).from(bannedUsersTable).where(eq(bannedUsersTable.id, id));
-    return !!row;
-  } catch (err) {
-    // Fail OPEN, not closed: this check runs on every single message and
-    // callback. If it throws unguarded (e.g. migration hasn't applied yet,
-    // transient DB blip), it would silently kill message processing for
-    // everyone, which is a far worse outcome than one banned user briefly
-    // slipping through until the DB recovers.
-    logger.error({ err, id }, "isPermanentlyBanned check failed — defaulting to not-banned");
-    return false;
+  if (!u) return null;
+  // Auto-revoke expired premium
+  if (u.hasPaid && u.premiumExpiresAt && u.premiumExpiresAt < new Date()) {
+    await db.update(usersTable)
+      .set({ hasPaid: false, premiumPlan: null, premiumExpiresAt: null, updatedAt: new Date() })
+      .where(eq(usersTable.id, id));
+    return { ...u, hasPaid: false, premiumPlan: null, premiumExpiresAt: null };
   }
+  return u;
+}
+
+// Auto-repair: if all 6 profile fields are filled but isProfileComplete=false,
+// set it to true silently. Handles cases where the bot crashed mid-setup.
+async function repairProfileIfNeeded(user: NonNullable<Awaited<ReturnType<typeof getUser>>>) {
+  if (!user.isProfileComplete && user.name && user.age && user.gender) {
+    logger.info({ userId: user.id }, "Auto-repairing profile: all fields present, setting isProfileComplete=true");
+    await db.update(usersTable)
+      .set({ isProfileComplete: true, state: "idle", updatedAt: new Date() })
+      .where(eq(usersTable.id, user.id));
+    return { ...user, isProfileComplete: true, state: "idle" } as typeof user;
+  }
+  return user;
 }
 
 async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInsert>) {
@@ -580,28 +258,31 @@ async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInse
   return getUser(id);
 }
 
-async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean; premiumExpiresAt?: Date | null }, customText?: string) {
-  const isAdminChat = chatId === ADMIN_ID;
+async function sendMain(chatId: number, user: { name?: string | null; isProfileComplete?: boolean; hasPaid?: boolean }, customText?: string) {
   let kb: TelegramBot.ReplyKeyboardMarkup;
   if (user.isProfileComplete) {
-    const premiumBtn = isPremiumActive(user as { hasPaid: boolean; premiumExpiresAt?: Date | null }) ? { text: "✅ Premium" } : { text: "💎 Go Premium" };
     kb = {
-      keyboard: isAdminChat
-        ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "🛍️ Satisfy Yourself" }]]
-        : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, premiumBtn], [{ text: "🛍️ Satisfy Yourself" }]],
+      keyboard: user.hasPaid
+        ? [
+            [{ text: "💘 Find Match" }],
+            [{ text: "👤 My Profile" }],
+          ]
+        : [
+            [{ text: "💘 Find Match" }],
+            [{ text: "👤 My Profile" }, { text: "⭐ Go Premium" }],
+          ],
       resize_keyboard: true,
     };
   } else {
     kb = {
-      keyboard: isAdminChat
-        ? [[{ text: "🚀 Setup Profile" }], [{ text: "🛍️ Satisfy Yourself" }]]
-        : [[{ text: "🚀 Setup Profile" }], [{ text: "💎 Go Premium" }], [{ text: "🛍️ Satisfy Yourself" }]],
+      keyboard: [[{ text: "✨ Create Profile" }]],
       resize_keyboard: true,
     };
   }
+  const firstName = user.name ? `, ${user.name}` : "";
   const defaultText = user.isProfileComplete
-    ? `What would you like to do?`
-    : `Hi ${String(user.name ?? "there")} 👋 You haven't set up your profile yet. Tap below to get started!`;
+    ? `Hey${firstName}! Ready to find your match? 💕`
+    : `👋 Welcome! Create your profile to start meeting people.`;
   await bot.sendMessage(chatId, customText ?? defaultText, { reply_markup: kb });
 }
 
@@ -610,87 +291,27 @@ async function sendMain(chatId: number, user: { name?: string | null; isProfileC
 const FEMALE_NAMES = ["Priya", "Neha", "Riya", "Komal", "Simran", "Pooja", "Ananya", "Kavya", "Shreya", "Nidhi"];
 const MALE_NAMES   = ["Arjun", "Rahul", "Rohan", "Vikram", "Karan", "Dev", "Ayaan", "Nikhil", "Siddharth", "Abhi"];
 
-const FEMALE_JOBS = [
-  "graphic designer at a startup", "BCA final year student", "HR at an IT company",
-  "content creator (mostly reels lol)", "MBA first year at Symbiosis", "school teacher (yes really 😅)",
-  "digital marketing executive", "CA student, currently dying in articleship", "nurse at a private hospital",
-  "working from home for a US company — night shift life 😭"
-];
-const MALE_JOBS = [
-  "software engineer at TCS", "doing MBA from NMIMS", "runs a small clothing brand",
-  "government job, IBPS cleared last year", "mechanical engineer, boring job tbh",
-  "freelance video editor", "playing for a state cricket team", "CA, finally done with exams",
-  "data analyst at a startup", "preparing for UPSC lol wish me luck"
-];
-const HOBBY_POOL = [
-  "going on long bike rides", "watching crime documentaries at 2am", "cooking (badly)",
-  "reading random Wikipedia articles", "playing BGMI", "gym (trying to be consistent lol)",
-  "listening to old Bollywood songs", "writing poetry (cringe I know)", "watching anime",
-  "street photography", "binge-watching sitcoms", "playing guitar (badly)",
-  "running every morning", "online chess", "sketching random faces"
-];
-const FUN_FACTS_F = [
-  "scared of lizards to a ridiculous level", "can eat maggi at any time of day",
-  "cried watching Taare Zameen Par twice", "knows all FRIENDS episodes by heart",
-  "never learned swimming and pretends to be okay with it",
-  "talks to plants and they're all alive so clearly it works",
-  "gets emotionally attached to fictional characters", "eats the same breakfast every single day"
-];
-const FUN_FACTS_M = [
-  "can't watch horror movies alone but acts brave in public", "stress eats when exams come",
-  "has a full cricket commentary running in his head during matches",
-  "sleeps with fan on even in winter", "knows random facts about space for no reason",
-  "gets too competitive in board games", "still has his childhood stuffed toy somewhere",
-  "laughs at his own jokes before finishing them"
-];
-const FAV_FOODS = ["rajma chawal", "butter chicken with garlic naan", "chole bhature", "biryani obviously", "maggi at midnight", "momos with extra schezwan", "dal makhni and rice", "pizza (but thin crust only)"];
-const FAV_MOVIES = ["3 Idiots", "Zindagi Na Milegi Dobara", "Dil Chahta Hai", "Queen", "Masaan", "Gangs of Wasseypur", "Taare Zameen Par", "Rockstar", "English Vinglish", "Dangal"];
-const PERSONALITIES = [
-  "overthinks everything but laughs about it after",
-  "sarcastic but in an affectionate way",
-  "quiet with new people, super loud with close friends",
-  "very direct, says what's on her mind",
-  "shy at first but opens up fast once comfortable",
-  "always cracking jokes, hates awkward silences",
-  "chill and easygoing, rarely gets stressed"
-];
-
-function generateBackstory(isFemale: boolean) {
-  const jobs = isFemale ? FEMALE_JOBS : MALE_JOBS;
-  const funFacts = isFemale ? FUN_FACTS_F : FUN_FACTS_M;
-  const shuffledHobbies = [...HOBBY_POOL].sort(() => Math.random() - 0.5);
-  return {
-    job: pickRandom(jobs),
-    hobbies: shuffledHobbies.slice(0, 3),
-    funFact: pickRandom(funFacts),
-    favFood: pickRandom(FAV_FOODS),
-    favMovie: pickRandom(FAV_MOVIES),
-    personality: pickRandom(PERSONALITIES),
-  };
-}
-
 interface Opener { text: string; lastAsked: string }
 
 const OPENERS_F: Opener[] = [
-  { text: "hii 🙈", lastAsked: "none" },
-  { text: "heyy\nomg match hua 😍\nkahan se ho?", lastAsked: "city" },
-  { text: "hiiii\nngl bore ho rahi thi bahut 😭\nbaat karo", lastAsked: "none" },
-  { text: "hey 👀\nkya karte ho?", lastAsked: "job" },
-  { text: "hii!\nfinally koi interesting lagaa 😄\nkahan se ho tum?", lastAsked: "city" },
-  { text: "heyy 🙈\nfirst impression — bolo kuch apne baare mein", lastAsked: "none" },
-  { text: "hiiii\nkya naam hai? 😊", lastAsked: "name" },
-  { text: "hey!\nakeli thi ghar pe bore hokar\ntum kya kar rahe the abhi? 😂", lastAsked: "none" },
-  { text: "hii 💕\nmatch hua toh sochaa hi — hi bol deti hun 😅", lastAsked: "none" },
-  { text: "heyy\nbolo bolo — student ya job wala? 😄", lastAsked: "job" },
+  { text: "heyy 😊 kahan se ho?", lastAsked: "location" },
+  { text: "hiii 🙈 finally koi match hua", lastAsked: "none" },
+  { text: "hey!! job karte ho ya college?", lastAsked: "job" },
+  { text: "hi 💕 bata kuch apne baare mein", lastAsked: "none" },
+  { text: "heyy 😄 dilli wale toh nahi ho?", lastAsked: "location" },
+  { text: "hiii 😅 kya chal raha hai?", lastAsked: "none" },
+  { text: "heyyy 💕 chai ya coffee?", lastAsked: "food" },
+  { text: "hi 😊 morning person ho ya night owl?", lastAsked: "habit" },
+  { text: "heyy 🙈 kya karte ho?", lastAsked: "job" },
+  { text: "hiii! student ho ya job?", lastAsked: "job" },
 ];
 const OPENERS_M: Opener[] = [
-  { text: "hey!\nkahan se ho tum? 😊", lastAsked: "city" },
-  { text: "hi\nomg finally koi match hua 😂\nbolo apne baare mein kuch", lastAsked: "none" },
-  { text: "heyy!\nkya karte ho? job ya college? 😊", lastAsked: "job" },
-  { text: "hey!\nboring lag raha tha akele 😂\nkya chal raha hai tumhara?", lastAsked: "none" },
-  { text: "heyy!\ntumhara naam kya hai? 😊", lastAsked: "name" },
-  { text: "hi!\nkahan se ho? 😊", lastAsked: "city" },
-  { text: "hey\nngl pehli baar try kar raha hun aisi app 😂\ntum bhi naye ho yahan?", lastAsked: "intro" },
+  { text: "hey kaisi ho?", lastAsked: "wellbeing" },
+  { text: "hi kahan se ho?", lastAsked: "location" },
+  { text: "hey student ya working?", lastAsked: "job" },
+  { text: "hi kya chal raha hai?", lastAsked: "none" },
+  { text: "hey bata kuch apne baare mein", lastAsked: "none" },
+  { text: "hi 😊 chai ya coffee?", lastAsked: "food" },
 ];
 
 // ── Language detection ────────────────────────────────────────────────────────
@@ -729,24 +350,6 @@ const CONTINUATION_TOPICS: TopicEntry[] = [
   { id: "introvert",     f: ["genuine question —", "introvert ho ya extrovert? ya dono thoda thoda? 😄"], m: ["introvert or extrovert?", "honest answer?"] },
   { id: "5yr_plan",      f: ["sochte ho future ke baare mein? 😊", "5 saal baad kahan hoge tum?"], m: ["5 year plan?", "any idea?"] },
   { id: "cooking_skill", f: ["haha serious question —", "ek dish hai jo ghar mein best banate ho?"], m: ["can you cook?", "best dish?"] },
-  { id: "zodiac",        f: ["haha okay astrology wali question 😄", "kaun sa zodiac sign ho? believe karte ho?"], m: ["zodiac sign?", "into astrology?"] },
-  { id: "reel_habit",    f: ["real talk 😂", "kitne time Insta reels scroll karti ho daily? honest answer 😂"], m: ["how much time on reels?", "honest answer 😂"] },
-  { id: "night_routine", f: ["acha bata 😄", "raat ko sone se pehle kya karte ho? phone ya seedha so jaate ho? 😄"], m: ["night routine?", "phone before sleep?"] },
-  { id: "dream_job",     f: ["okay serious question 😊", "agar paisa/degree matter na kare toh kya karna chahte ho life mein?"], m: ["dream job if money didn't matter?", "real answer?"] },
-  { id: "comfort_food",  f: ["haha okay important 😄", "jab bohot bura feel ho toh kaunsa khana khate ho? 😄"], m: ["comfort food?", "sad day food?"] },
-  { id: "phone_screen",  f: ["haha bata 😄", "phone ka daily screen time kitna hai? judge nahi karungi 😂"], m: ["daily screen time?", "how many hours?"] },
-  { id: "arranged_love", f: ["genuine question 😊", "arranged marriage ke liye ho ya love marriage? ya depend karta hai? 😊"], m: ["arranged or love marriage?", "honest opinion?"] },
-  { id: "hot_take",      f: ["okay unpopular opinion bolo 😂", "koi cheez jo tum sochte ho but log judge karte hain? 😂"], m: ["unpopular opinion?", "go 😄"] },
-  { id: "first_ever",    f: ["haha random 😊", "last time kab kuch pehli baar kiya? new food, new place, anything 😊"], m: ["last new thing you tried?", "recently?"] },
-  { id: "fav_app",       f: ["okay bata 😄", "phone se ek app permanently delete karna ho toh kaun sa? 😂"], m: ["one app you'd delete forever?", "honest?"] },
-  { id: "social_detox",  f: ["acha tell me 😊", "kya kabhi social media se break liya hai? how was it? 😊"], m: ["ever done social media detox?", "how was it?"] },
-  { id: "childhood_mem", f: ["haha okay nostalgia 😄", "bachpan ki ek cheez jo abhi bhi yaad aati hai? 🥺"], m: ["favourite childhood memory?", "anything?"] },
-  { id: "street_food",   f: ["important question 😄", "ghar ke paas sabse acha street food kya milta hai?"], m: ["best street food near your place?", "go on 😋"] },
-  { id: "bad_habit",     f: ["okay honest hona 😂", "ek aisi habit jo chodni chahte ho but nahi choot rahi? 😂"], m: ["one habit you want to quit?", "honest?"] },
-  { id: "role_model",    f: ["real question 😊", "life mein koi ek person hai jo genuinely inspire karta ho? 😊"], m: ["who inspires you most?", "real answer?"] },
-  { id: "money_spend",   f: ["haha okay 😄", "pehli salary pe sabse pehle kya kharida tha ya khareedoge? 😄"], m: ["first salary — what'd you buy?", "or plan to?"] },
-  { id: "ipl_team",      f: ["okay serious question 😂", "IPL mein konsi team support karti ho? sach bolo"], m: ["IPL team?", "be honest 😄"] },
-  { id: "worst_movie",   f: ["haha okay honest bao 😂", "life ki worst movie jo regret karte ho dekhke? 😂"], m: ["worst movie you watched?", "biggest regret?"] },
 ];
 
 // Pick a continuation topic the persona hasn't used yet.
@@ -812,6 +415,33 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     }
   }
 
+  // ── Bot / AI / real / fake question — always deny in user's language ────────
+  if (/\b(bot|ai|artificial|robot|fake|automated|auto|chatbot|gpt|program|machine|computer|software)\b/i.test(t)
+    || /\b(real ho|real hai|insaan ho|insaan hai|human ho|human hai|banda ho|banda hai|ladki real|real ladki|asli ho|asli hai|asli insaan|nakli|fake ho|fake hai|bot ho|bot hai|ai ho|ai hai|robot ho|robot hai|are you real|are you human|are you bot|are you ai|are you fake|r u real|r u bot|r u ai|real person|actual person)\b/i.test(t)) {
+    persona.lastAsked = "continuation";
+    if (lang === "hindi") {
+      return rnd([
+        f ? ["haha nahi yaar 😂", "main bilkul real hun", "bot nahi hun main!"] : ["haha nahi bhai 😂", "bilkul real hun", "bot nahi hun!"],
+        f ? ["arre main real hun 🙄", "yeh sawaal kyun?", "bot lagti hun kya? 😅"] : ["bhai main real hun 😂", "bot nahi hun yaar", "kyon laga?"],
+        f ? ["real hun main 😊", "bot hoti toh itni interesting hoti kya? 😄"] : ["real hun bhai 😄", "bot hota toh itni baat karta?"],
+      ]);
+    }
+    if (lang === "hinglish") {
+      return rnd([
+        f ? ["haha main real hun yaar 😂", "bot nahi hun", "itna doubt? 🙈"] : ["bhai real hun 😂", "bot nahi hun yaar", "shak kyun?"],
+        f ? ["omg real hun main 😅", "bot hoti toh tum itna enjoy karte? 😄"] : ["haha real hun bro 😄", "bot hota toh itni baatein karta?"],
+        f ? ["real ladki hun main 😊", "bot wali baatein nahi karti aisi 😄"] : ["real banda hun 😄", "bot nahi hun yaar"],
+        f ? ["nahi yaar main real hun 🙈", "bot nahi hun promise 😊"] : ["nahi bhai bot nahi hun 😄", "ekdum real"],
+      ]);
+    }
+    // English
+    return rnd([
+      f ? ["haha i'm real 😂", "not a bot i promise 🙈", "why would you even think that?"] : ["lol i'm real bro 😄", "not a bot", "why though?"],
+      f ? ["omg i'm literally a real person 😅", "bots don't talk like this 😄"] : ["real person here 😄", "bots aren't this fun 😂"],
+      f ? ["not a bot 😊", "just a real girl on this app 🙈"] : ["not a bot 😄", "real guy here"],
+    ]);
+  }
+
   if (/kitne saal|umar|how old|your age|age kya|tumhari umar|teri umar/.test(t)) {
     persona.lastAsked = "hobby";
     if (lang === "hindi")    return two(`${persona.age} 😊`, "tumhara?");
@@ -819,67 +449,80 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     return f ? two(`${persona.age} 🙈`, "and you?") : two(String(persona.age), "you?");
   }
 
-  if (/kahan se|kaha se|kahan ho|kaha ho|where.*from|ur from|you from|kahan ki|kaha ki|kahan ka|kaha ka|kahan ke|kaha ke|city|state/.test(t)) {
+  if (/kahan se|kahan ho|where.*from|ur from|you from|kahan ki|kahan ka|city|state/.test(t)) {
     persona.lastAsked = "job";
-    const cities = ["Delhi NCR", "Mumbai side", "Pune", "Bangalore"];
-    const city = rnd(cities);
-    if (lang === "hindi")    return two(`${city} se hun 😊`, "tum?");
-    if (lang === "hinglish") return two(`${city} 😊`, "aur tum?");
-    return f ? two(`${city} 🙈`, "you?") : two(city, "you?");
+    const botCity = persona.city ?? rnd(["Delhi", "Mumbai", "Pune", "Bangalore", "Lucknow", "Jaipur"]);
+    if (f) return rnd([
+      one(`${botCity} 😊`),
+      one(`${botCity} se hun 🙈`),
+      two(`${botCity}`, "tum?"),
+      two(`${botCity} side se`, "aur tum kahan se?"),
+      one(`${botCity} wali hoon 😄`),
+    ]);
+    return rnd([
+      one(`${botCity}`),
+      two(`${botCity} se`, "you?"),
+      one(`${botCity} side`),
+    ]);
   }
 
+  // User tells their city — bot reacts warmly
+  if (/\b(lucknow|delhi|mumbai|pune|bangalore|bengaluru|hyderabad|jaipur|chandigarh|kolkata|chennai|noida|gurugram|gurgaon|ahmedabad|surat|indore|bhopal|patna|nagpur|agra|varanasi|kota|kanpur)\b/.test(t)) {
+    const userCity = t.match(/\b(lucknow|delhi|mumbai|pune|bangalore|bengaluru|hyderabad|jaipur|chandigarh|kolkata|chennai|noida|gurugram|gurgaon|ahmedabad|surat|indore|bhopal|patna|nagpur|agra|varanasi|kota|kanpur)\b/i)?.[0] ?? "wahan";
+    persona.lastAsked = "continuation";
+    if (f) return rnd([
+      one(`omg ${userCity}! 😄`),
+      two(`${userCity} nice 😊`, "kaisa hai wahan?"),
+      one(`haha ${userCity} wale 😄`),
+      two(`acha ${userCity}`, "maza aata hai wahan?"),
+      one(`${userCity}! cool 😊`),
+    ]);
+    return rnd([
+      one(`${userCity} nice 😊`),
+      two(`${userCity}`, "how's it there?"),
+      one(`cool area 😄`),
+    ]);
+  }
 
-    // ── Delhi area deep-dive — when user asks which part of Delhi ────────────
-    if (/delhi mein kahan|delhi ka kaunsa|delhi ka konsa|south delhi|north delhi|west delhi|kaun sa area|konsa area|kaunsa area|area kya|which area|rohini|dwarka|saket|hauz khas|lajpat|janakpuri|pitampura|karol bagh|rajouri|gk |greater kailash|cp |connaught|noida|gurgaon|gurugram|faridabad|ghaziabad|vasant|malviya|nehru place|preet vihar|mayur vihar|laxmi nagar|vikaspuri|paschim|uttam nagar|shalimar|model town/.test(t)) {
-      persona.lastAsked = "job";
-      const myAreas = ["Lajpat Nagar", "Rohini Sector 14", "Dwarka Sector 10", "Saket", "Hauz Khas Village", "Karol Bagh", "Janakpuri", "Pitampura", "Greater Kailash 1", "Rajouri Garden", "Defence Colony", "Preet Vihar"];
-      const myArea = rnd(myAreas);
-      // React to user's area specifically
-      if (/rohini/.test(t)) return rnd([
-        f ? two("omg Rohini!! 😄", "kaun sa sector? meri ek friend bhi Rohini mein hai haha") : two("oh Rohini nice", "which sector?"),
-        f ? two("haha Rohini wale 😄", "metro se aate ho ya bus?") : two("Rohini? cool", "sector?"),
-      ]);
-      if (/dwarka/.test(t)) return rnd([
-        f ? two("Dwarka!! 😄", "wahan ka metro connectivity toh solid hai yaar") : two("oh Dwarka", "which sector?"),
-        f ? two("omg Dwarka 😄", "kaun sa sector? 10 ya 12?") : two("Dwarka nice", "sector 10 or 12?"),
-      ]);
-      if (/saket|malviya|hauz khas/.test(t)) return rnd([
-        f ? two("omg South Delhi!! 😍", "Hauz Khas Village kabhi gayi ho? bohot vibe wali jagah hai") : two("South Delhi nice 😍", "been to Hauz Khas?"),
-        f ? two("South Delhi wali! 😍", "posh area yaar honestly haha") : two("South Delhi, nice area", "student or working?"),
-      ]);
-      if (/lajpat|defence colony|gk|greater kailash/.test(t)) return rnd([
-        f ? two("omg GK / Lajpat side!! 😍", "yaar wahan ka market bohot acha hai na?") : two("oh GK side nice", "Lajpat market ever?"),
-        f ? two("haha South Delhi 😍", "Lajpat Nagar market mein shopping hoti rehti hai? 😄") : two("Lajpat / GK nice", "cool area"),
-      ]);
-      if (/karol bagh|rajouri|janakpuri|vikaspuri|uttam nagar/.test(t)) return rnd([
-        f ? two("oh West Delhi! 😄", "Rajouri Garden mall mein ghoomna hota hai? 😄") : two("West Delhi nice", "Rajouri Garden mall?"),
-        f ? two("West Delhi gang! 😄", "traffic wahan ki toh God level hai yaar 😂") : two("West Delhi haha", "traffic there is crazy nah?"),
-      ]);
-      if (/pitampura|model town|shalimar/.test(t)) return rnd([
-        f ? two("North Delhi! 😄", "Pitampura ka area toh clean rehta hai na compared to baaki?") : two("North Delhi nice", "Pitampura area?"),
-        f ? two("oh North Delhi side 😊", "NSP (Netaji Subhash Place) pe jaati ho kabhi?") : two("North Delhi nice", "NSP area?"),
-      ]);
-      if (/noida/.test(t)) return rnd([
-        f ? two("Noida!! 😄", "kaun sa sector? 18 wala area hai na ekdum happening 😄") : two("oh Noida nice", "which sector?"),
-        f ? two("NCR gang 😄", "Sector 18 ya 62 side?") : two("Noida nice", "sector 18 or tech park side?"),
-      ]);
-      if (/gurgaon|gurugram/.test(t)) return rnd([
-        f ? two("Gurgaon!! 😄", "DLF wala area? ya Cyber Hub side? 😄") : two("oh Gurgaon nice", "Cyber Hub side?"),
-        f ? two("omg Gurgaon 😮", "rent wahan bohot zyada hai yaar 😂 job ke liye ho kya?") : two("Gurgaon nice", "working there?"),
-      ]);
-      if (/preet vihar|mayur vihar|laxmi nagar/.test(t)) return rnd([
-        f ? two("East Delhi! 😄", "Laxmi Nagar market pe jaati ho kabhi?") : two("East Delhi nice", "Laxmi Nagar market?"),
-        f ? two("oh East Delhi side 😊", "metro connectivity toh acha hai wahan 😄") : two("East Delhi", "metro must be convenient?"),
-      ]);
-      // Generic — tell own area, ask theirs
-      return rnd([
-        f ? two(`main ${myArea} side hun 😊`, "tum kaun sa area?") : two(`${myArea} 😊`, "your area?"),
-        f ? two(`${myArea} mein rehti hun 😄`, "aur tum Delhi mein kahan ho exactly?") : two(`${myArea}`, "which area you from?"),
-        f ? two(`haha main toh ${myArea} wali hun 😄`, "tum bolo — kaun sa area?") : two(`${myArea} side`, "you?"),
-      ]);
-    }
+  // "aur batao" / "kuch sunao" — bot gives "nothing much" style reply
+  if (/aur batao|aur sunao|kuch batao|kuch sunao|bolo na|kya kar rahe|kya kar rahi|what else|tell me more/.test(t)) {
+    persona.lastAsked = "continuation";
+    if (f) return rnd([
+      one("kuch nahi yaar 😄"),
+      one("bas chal raha hai 😊"),
+      two("kuch khaas nahi", "tum batao 😊"),
+      one("same old same old haha"),
+      two("arrey kuch nahi", "tum bolo aur 😄"),
+      one("bas yaar 🙂"),
+      two("nothing much haha", "life chal rahi hai"),
+    ]);
+    return rnd([
+      one("kuch nahi yaar"),
+      one("bas chal raha hai 😊"),
+      two("nothing much", "you?"),
+      one("same old 😄"),
+    ]);
+  }
 
-    if (/photo|pic|selfie|dikhao|dikha|send photo|tum kaisi|kaisi dikhti/.test(t)) {
+  // User says "kuch nahi" / "nothing" / "bas yaar" — bot empathizes
+  if (/^(kuch nahi|kuch nhi|nothing|bas yaar|bas|sab same|all same|boring|nothing much|khaas nahi|khaas nhi)[!?.\s]*$/.test(t)) {
+    persona.lastAsked = "continuation";
+    if (f) return rnd([
+      one("haha same 😄"),
+      two("sach mein?", "life is too boring na 😅"),
+      one("relatable yaar 😭"),
+      one("haha story of my life 😂"),
+      two("omg same", "kuch interesting karo life mein 😄"),
+      one("boring phase chal raha hai? 🥺"),
+    ]);
+    return rnd([
+      one("haha same 😄"),
+      one("relatable"),
+      two("boring life?", "same here 😄"),
+    ]);
+  }
+
+  if (/photo|pic|selfie|dikhao|dikha|send photo|tum kaisi|kaisi dikhti/.test(t)) {
     const replies_f = [
       ["haha abhi nahi 😂", "thoda toh baat karo pehle na"],
       ["omg seedha wahan 😂", "earn it first lol"],
@@ -1132,83 +775,23 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
 
     case "location": {
       persona.lastAsked = "job";
-      if (/delhi|ncr/.test(t) && !/gurgaon|gurugram|noida|faridabad|ghaziabad/.test(t)) {
-        persona.lastAsked = "delhi_area";
+      if (/delhi|ncr|gurgaon|noida|faridabad/.test(t)) {
         return rnd([
-          f ? two("omg Delhi!! 😄", "South Delhi ya North? kaun sa area?") : two("oh Delhi nice 😄", "which area?"),
-          f ? two("arre Delhi wale 😄", "kaun sa area — Rohini, Dwarka, ya South Delhi?") : two("Delhi? nice", "which part?"),
-          f ? two("haha Delhi gang 😄", "bata — Rohini, Saket, Janakpuri kaun sa?") : two("Delhi nice", "South or North?"),
+          f ? two("omg delhi wale 😄", "kya karte ho wahan?") : two("oh delhi nice", "student or job?"),
+          f ? two("arre delhi 😄", "wfh ya bahar jaate ho?") : two("delhi?", "student or working?"),
+          f ? two("oh nice 😄", "delhi mein kahan exactly?") : two("delhi nice", "what do you do?"),
         ]);
       }
-      if (/gurgaon|gurugram/.test(t)) {
-        persona.lastAsked = "job";
+      if (/mumbai|bombay|pune|maharashtra|navi mumbai/.test(t)) {
         return rnd([
-          f ? two("oh Gurgaon!! 😮", "Cyber Hub pe kabhi gayi? ekdum lit hai weekend mein 😄") : two("Gurgaon nice 😮", "Cyber Hub side?"),
-          f ? two("haha Gurgaon wali 😄", "rent sunke dil dukha 😂 job ke liye shifted ho?") : two("Gurgaon nice", "working there?"),
+          f ? two("oh mumbai side 😮", "expensive jagah hai yaar 😂") : two("oh mumbai", "nice! working or student?"),
+          f ? two("mumbai?? 😮", "local train survival mode on 😂") : two("Mumbai nice 😮", "student or job?"),
         ]);
       }
-      if (/noida/.test(t)) {
-        persona.lastAsked = "job";
+      if (/bangalore|bengaluru|hyderabad|chennai|south/.test(t)) {
         return rnd([
-          f ? two("Noida!! 😄", "kaun sa sector? 18 wala area ekdum happening hai") : two("oh Noida nice", "which sector?"),
-          f ? two("NCR gang 😄", "DND pe traffic hota hai roz? 😂") : two("Noida nice", "sector 18 or tech?"),
-        ]);
-      }
-      if (/faridabad|ghaziabad/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("NCR side 😄", "Delhi commute hoti hai roz?") : two("NCR nice", "Delhi commute?"),
-          f ? two("arre NCR wali 😄", "Delhi traffic mein kabhi nahi phasi? 😂") : two("NCR side", "Delhi commute tough?"),
-        ]);
-      }
-      if (/mumbai|bombay|maharashtra/.test(t) && !/pune|navi mumbai/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("oh Mumbai!! 😮", "kaun sa area? Bandra, Andheri, ya Powai side?") : two("oh Mumbai 😮", "which area?"),
-          f ? two("haha Mumbai wali 😮", "local train survival mode daily — Central ya Western line? 😂") : two("Mumbai nice 😮", "Central or Western?"),
-          f ? two("omg Mumbai!! 😍", "Bandra ya South Mumbai side? ekdum different vibes hain") : two("Mumbai nice 😍", "Bandra or South Mumbai?"),
-        ]);
-      }
-      if (/pune/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("Pune!! 😄", "Koregaon Park ya FC Road side? ekdum chill city hai na 😊") : two("Pune nice 😄", "Koregaon Park?"),
-          f ? two("haha Pune wali 😄", "FC Road pe hangout hota hai? solid cafe culture hai") : two("Pune nice", "FC Road cafe scene?"),
-        ]);
-      }
-      if (/navi mumbai/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("Navi Mumbai!! 😄", "Vashi ya Kharghar side? planned city hai na ekdum") : two("Navi Mumbai nice", "Vashi or Kharghar?"),
-          f ? two("haha Navi Mumbai wali 😄", "palm beach road pe drive hoti hai kabhi? ekdum scenic hai") : two("Navi Mumbai nice", "palm beach road?"),
-        ]);
-      }
-      if (/bangalore|bengaluru/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("oh Bangalore!! 😮", "Koramangala ya Indiranagar side? ekdum startup vibe hai na 😄") : two("Bangalore nice 😮", "Koramangala or Indiranagar?"),
-          f ? two("haha Bangalore wali 😄", "traffic aur amazing weather — perfect combo 😂 kaun sa area?") : two("Bangalore nice 😄", "which area?"),
-          f ? two("omg Bangalore!! 😍", "namma metro se connected ho? kaun sa area?") : two("Bangalore nice 😍", "metro connected?"),
-        ]);
-      }
-      if (/hyderabad|hyd/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("omg Hyderabad!! 😄", "Hitech City ya Banjara Hills side? biryani daily? 😂") : two("Hyderabad nice 😄", "Hitech City or Banjara Hills?"),
-          f ? two("haha Hyd wali 😄", "Paradise ya Shah Ghouse — biryani konsi better hai? serious question 😂") : two("Hyderabad nice 😄", "Paradise vs Shah Ghouse?"),
-        ]);
-      }
-      if (/chennai|madras/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("Chennai!! 😄", "Nungambakkam ya Anna Nagar side? filter coffee daily? 😄") : two("Chennai nice", "filter coffee daily?"),
-          f ? two("haha Chennai wali 😄", "heat level God-tier hai wahan 😂 kaun sa area?") : two("Chennai nice", "the heat there!"),
-        ]);
-      }
-      if (/south india|south side/.test(t)) {
-        persona.lastAsked = "job";
-        return rnd([
-          f ? two("oh South India side 😮", "IT hub wala 😄 kya karte ho?") : two("south India nice", "working?"),
+          f ? two("oh south India side 😮", "IT hub wala 😄") : two("south India nice", "student or job?"),
+          f ? two("oh Bangalore! 😮", "startup city 😄 kya karte ho?") : two("Bangalore nice", "working?"),
         ]);
       }
       if (/kolkata|calcutta|west bengal/.test(t)) {
@@ -1391,54 +974,6 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
       ]);
     }
 
-    case "delhi_area": {
-      persona.lastAsked = "job";
-      if (/rohini/.test(t)) return rnd([
-        f ? two("omg Rohini!! 😄", "kaun sa sector? 14-15 wala area ekdum busy rehta hai") : two("Rohini nice", "which sector?"),
-        f ? two("haha Rohini wali 😄", "Yellow Line metro se aati ho daily?") : two("oh Rohini", "sector?"),
-      ]);
-      if (/dwarka/.test(t)) return rnd([
-        f ? two("Dwarka!! 😄", "kaun sa sector? 10 ya 12 wala area mast hai na?") : two("oh Dwarka nice", "which sector?"),
-        f ? two("haha Dwarka gang 😄", "Blue Line metro — convenient hai na?") : two("Dwarka nice", "sector 10 or 12?"),
-      ]);
-      if (/saket|malviya|hauz khas/.test(t)) return rnd([
-        f ? two("omg South Delhi!! 😍", "Hauz Khas Village kabhi gayi? ekdum chill vibe hai wahan") : two("South Delhi nice 😍", "Hauz Khas?"),
-        f ? two("South Delhi wali 😍", "Select City Walk ya DLF Saket — weekend hangout wahan?") : two("South Delhi nice", "Saket mall?"),
-      ]);
-      if (/lajpat|defence|gk |greater kailash/.test(t)) return rnd([
-        f ? two("omg GK / Lajpat side!! 😍", "Lajpat Nagar Central Market mein shopping hoti rehti hai na? 😄") : two("oh GK/Lajpat nice", "market?"),
-        f ? two("haha South Delhi premium 😍", "Khan Market kabhi gayi? overpriced but vibes achi hain 😂") : two("GK side nice", "Khan Market?"),
-      ]);
-      if (/karol bagh|rajouri|janakpuri|vikaspuri|uttam nagar/.test(t)) return rnd([
-        f ? two("West Delhi!! 😄", "Rajouri Garden mall pe ghumna hota hai weekend mein? 😄") : two("West Delhi nice", "Rajouri Garden?"),
-        f ? two("haha West Delhi gang 😄", "Karol Bagh market mein bargaining toh aati hai na? 😂") : two("West Delhi", "Karol Bagh 😂"),
-      ]);
-      if (/pitampura|model town|shalimar|ashok vihar/.test(t)) return rnd([
-        f ? two("North Delhi!! 😄", "NSP (Netaji Subhash Place) wala area ekdum connected hai na?") : two("North Delhi nice", "NSP area?"),
-        f ? two("haha North Delhi wali 😄", "Pitampura ka area clean hai na compared to rest 😄") : two("North Delhi", "Pitampura?"),
-      ]);
-      if (/preet vihar|mayur vihar|laxmi nagar|patparganj/.test(t)) return rnd([
-        f ? two("East Delhi!! 😄", "Laxmi Nagar market mein jaana hota hai kabhi?") : two("East Delhi nice", "Laxmi Nagar?"),
-        f ? two("oh East Delhi side 😊", "Blue Line se connected hai ekdum — convenient na?") : two("East Delhi", "metro?"),
-      ]);
-      if (/noida/.test(t)) return rnd([
-        f ? two("Noida!! 😄", "kaun sa sector? 18 wala area ekdum happening hai 😄") : two("oh Noida nice", "which sector?"),
-        f ? two("NCR gang 😄", "DND flyway pe traffic hota hai roz? 😂") : two("Noida nice", "DND traffic?"),
-      ]);
-      if (/gurgaon|gurugram/.test(t)) return rnd([
-        f ? two("Gurgaon!! 😮", "Cyber Hub pe kabhi gayi? ekdum lit place hai weekend mein 😄") : two("oh Gurgaon nice", "Cyber Hub?"),
-        f ? two("haha Gurgaon wali 😄", "rent sunke mann dukha hoga 😂 job ke liye shifted ho?") : two("Gurgaon nice", "working there?"),
-      ]);
-      if (/connaught|paharganj/.test(t)) return rnd([
-        f ? two("CP side!! 😄", "Connaught Place inner circle wali coffee shops mast hain na 😊") : two("CP area nice", "inner circle hangout?"),
-        f ? two("haha Central Delhi wali 😄", "wahan ka crowd God-level hai 😂") : two("Central Delhi", "CP crowd 😂"),
-      ]);
-      return rnd([
-        f ? two("haha Delhi wali 😄", "South ya North side? kaun sa area exactly?") : two("Delhi nice 😄", "which area?"),
-        f ? two("omg Delhi!! 😄", "kaun sa part — Rohini, South Delhi, Dwarka?") : two("Delhi!", "North or South?"),
-      ]);
-    }
-
     case "flirt": {
       // Transition to fresh topics — never the same compliment twice
       return pickFresh(persona);
@@ -1475,340 +1010,231 @@ function buildSmartReply(userText: string, persona: FakePersona): string[] {
     }
   }
 
-
-  // ── Astrology / zodiac ─────────────────────────────────────────────────────
-  if (/zodiac|rashifal|kundli|astrology|horoscope|aries|taurus|gemini|cancer|leo|virgo|libra|scorpio|sagittarius|capricorn|aquarius|pisces|mesh|vrishabh|mithun|kark|singh|kanya|tula|vrishchik|dhanu|makar|kumbh|meen/.test(t)) {
-    persona.lastAsked = "continuation";
-    const signs = ["Scorpio", "Leo", "Libra", "Pisces", "Cancer", "Gemini"];
-    const mySign = rnd(signs.map(s => [s]))[0];
-    return rnd([
-      f ? two(`haha ${mySign} hun main 😄`, "tum kaun sa? believe karte ho zodiac mein?") : two(`${mySign} here 😄`, "you?"),
-      f ? two(`omg astrology 😄`, `main toh ${mySign} hun — sun sign ya moon sign pooch rahi ho?`) : two(`${mySign} 😄`, "into astrology?"),
-      f ? two(`haha ${mySign} wali hun 😊`, "tumhara kaunsa hai? let me guess 😄") : two(`${mySign} 😄`, "match karta hai kya?"),
-    ]);
-  }
-
-  // ── Reels / Instagram / memes ──────────────────────────────────────────────
-  if (/reel|reels|instagram|insta|meme|memes|viral|trending|twitter|x app|snapchat|youtube shorts|shorts/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("haha reel addict? 😂", "kitne ghante scroll karti ho daily? honestly 😂") : two("reel scroller 😂", "how many hours daily?"),
-      f ? two("omg same 😂", "Insta pe screen time 4-5 ghante? be honest") : two("reel time 😂", "how much daily?"),
-      f ? two("haha viral wali 😄", "last reel kaunsa tha jo share kiya?") : two("last reel you shared?", "go on 😄"),
-      f ? two("haha Insta wali 😄", "kya content zyada dekhti ho — comedy ya life advice?") : two("comedy or motivation reels?", "honest?"),
-      f ? two("omg yaar 😂", "reel rabbit hole mein kab jaoge — 5 min ke liye open karo 1 ghanta nikal jaata hai 😂") : two("reel rabbit hole?", "5 min becomes 1 hr? 😂"),
-    ]);
-  }
-
-  // ── Arranged / love marriage ───────────────────────────────────────────────
-  if (/arranged marriage|love marriage|shaadi|shadi|vivah|nikah|marriage plans|shaadi ke plans/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("haha shaadi wala topic 😄", "tum personally kya sochte ho — love ya arranged?") : two("love or arranged?", "honest opinion?"),
-      f ? two("omg serious topic 😄", "ghar walon ka pressure hai kya abhi? 😂") : two("family pressure?", "for marriage?"),
-      f ? two("haha honest bao 😄", "kya age decide ki hai khud ke liye? 😄") : two("marriage age plan?", "any target?"),
-      f ? two("real talk 😊", "agar perfect partner milta toh age se pehle bhi karoge? 😄") : two("right person before age?", "would you?"),
-      f ? two("haha shaadi 😂", "parents ne rishte dikhane shuru kiye kya? 😂") : two("rishte dikhaane shuru? 😂", "family pressure?"),
-    ]);
-  }
-
-  // ── Mumbai area knowledge (mid-convo) ─────────────────────────────────────
-  if (/andheri|bandra|juhu|dadar|borivali|goregaon|powai|worli|lower parel|kurla|malad|kandivali/.test(t)) {
-    persona.lastAsked = "job";
-    if (/bandra/.test(t)) return rnd([
-      f ? two("omg Bandra!! 😍", "West side ya East? Carter Road pe evenings hote hain? 😊") : two("Bandra nice 😍", "West or East?"),
-      f ? two("haha Bandra wali 😍", "Linking Road pe shopping ya Hill Road? 😄") : two("Bandra nice", "Linking Road?"),
-    ]);
-    if (/andheri/.test(t)) return rnd([
-      f ? two("Andheri!! 😄", "East ya West? Lokhandwala side ho? 😄") : two("oh Andheri nice", "East or West?"),
-      f ? two("haha Andheri wali 😄", "metro convenient hai na?") : two("Andheri nice", "metro connected?"),
-    ]);
-    if (/juhu|versova/.test(t)) return rnd([
-      f ? two("omg Juhu!! 😍", "beach pe evening walks — Juhu beach nice hai na 😊") : two("Juhu nice 😍", "beach walks?"),
-      f ? two("Juhu side 😍", "Prithvi Theatre kabhi gayi? ekdum cultural vibe hai") : two("Juhu nice", "Prithvi Theatre?"),
-    ]);
-    if (/powai/.test(t)) return rnd([
-      f ? two("Powai!! 😄", "Hiranandani wala area hai na — lake pe evenings hoti hain?") : two("Powai nice", "Hiranandani lake?"),
-      f ? two("haha Powai 😄", "IIT wala area — student ho ya working nearby?") : two("Powai nice", "IIT area?"),
-    ]);
-    if (/lower parel|worli/.test(t)) return rnd([
-      f ? two("Lower Parel!! 😍", "High Street Phoenix pe jaana hota hai kabhi? 😄") : two("Lower Parel nice 😍", "Phoenix mall?"),
-      f ? two("haha Worli wali 😍", "sea link drive — ekdum cinematic hai na raat ko 😊") : two("Worli nice", "sea link vibes?"),
-    ]);
-    return rnd([
-      f ? two("haha Mumbai wali 😮", "local train survival mode daily? 😂") : two("Mumbai nice", "local train daily?"),
-      f ? two("omg Mumbai!! 😍", "kaun sa area exact mein?") : two("Mumbai nice 😍", "which area exact?"),
-    ]);
-  }
-
-  // ── Bangalore area knowledge (mid-convo) ──────────────────────────────────
-  if (/koramangala|indiranagar|whitefield|electronic city|hsr layout|marathahalli|jp nagar|jayanagar|btm layout|hebbal|sarjapur|bellandur/.test(t)) {
-    persona.lastAsked = "job";
-    if (/koramangala/.test(t)) return rnd([
-      f ? two("omg Koramangala!! 😍", "5th block ya 6th? Social rooftop kabhi gayi? 😄") : two("Koramangala nice 😍", "5th or 6th block?"),
-      f ? two("haha Koramangala wali 😍", "startup hub mein ho 😄 Noon ya The Hole in the Wall cafe?") : two("Koramangala nice", "Social rooftop?"),
-    ]);
-    if (/indiranagar/.test(t)) return rnd([
-      f ? two("Indiranagar!! 😍", "100 Feet Road pe hangout? Toit brewery kabhi gayi? 😄") : two("Indiranagar nice 😍", "100 feet road?"),
-      f ? two("haha Indiranagar wali 😍", "pub culture toh solid hai wahan 😄") : two("Indiranagar nice", "solid pub scene"),
-    ]);
-    if (/whitefield/.test(t)) return rnd([
-      f ? two("Whitefield!! 😄", "IT corridor mein ho — traffic wahan God-level hai 😂") : two("Whitefield nice", "IT park traffic?"),
-      f ? two("haha Whitefield wali 😄", "Phoenix Marketcity pe weekend jaana hota hai na? 😄") : two("Whitefield nice", "Phoenix mall?"),
-    ]);
-    if (/hsr|btm|jp nagar|jayanagar/.test(t)) return rnd([
-      f ? two("South Bangalore!! 😄", "Jayanagar 4th block pe idli-dosa toh best hai na genuinely? 😄") : two("South Bangalore nice", "Jayanagar 4th block?"),
-      f ? two("haha HSR / BTM wali 😄", "food scene ekdum solid hai na 😊") : two("South Bangalore nice", "HSR Layout food?"),
-    ]);
-    return rnd([
-      f ? two("haha Bangalore wali 😄", "traffic aur amazing weather — perfect combo 😂") : two("Bangalore nice", "traffic + weather combo 😂"),
-      f ? two("omg Bangalore!! 😍", "namma metro se connected ho?") : two("Bangalore nice 😍", "namma metro?"),
-    ]);
-  }
-
-  // ── Hyderabad area knowledge (mid-convo) ──────────────────────────────────
-  if (/hitech city|banjara hills|jubilee hills|madhapur|gachibowli|kondapur|kukatpally|secunderabad|begumpet|ameerpet/.test(t)) {
-    persona.lastAsked = "job";
-    if (/hitech city|madhapur|gachibowli|kondapur/.test(t)) return rnd([
-      f ? two("omg Hitech City area!! 😄", "IT corridor mein ho — IKEA Hyderabad kabhi gayi? 😂") : two("Hitech City nice 😄", "IT park area?"),
-      f ? two("haha Cyberabad side 😄", "Gachibowli area ekdum open jagah hai na 😄") : two("Hitech City area nice", "Gachibowli side?"),
-    ]);
-    if (/banjara hills|jubilee hills/.test(t)) return rnd([
-      f ? two("omg Banjara Hills!! 😍", "posh area yaar — GVK One pe jaana hota hai? 😄") : two("Banjara Hills nice 😍", "GVK One?"),
-      f ? two("haha Jubilee Hills wali 😍", "Road No. 36 wala cafes — ekdum solid hain na?") : two("Jubilee Hills nice", "Road 36 cafes?"),
-    ]);
-    return rnd([
-      f ? two("haha Hyderabad wali 😄", "biryani toh daily khate ho na? Paradise ya Shah Ghouse? 😂") : two("Hyderabad nice 😄", "Paradise vs Shah Ghouse?"),
-      f ? two("omg Hyderabad!! 😄", "Hitech City ya Banjara Hills side?") : two("Hyderabad nice", "Hitech City or Banjara Hills?"),
-    ]);
-  }
-
-  // ── Future plans / dreams ──────────────────────────────────────────────────
-  if (/future mein|future plans|10 saal|5 saal|aage kya|plan kya hai|goal kya|aim kya|sapna|dream hai|kya banna chahte/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("omg future planner ho 😊", "ekdum grounded person lagte ho yaar") : two("future planner?", "nice"),
-      f ? two("haha same 😄", "main bhi sochti rehti hun future ke baare mein — kya plans hain?") : two("what's the plan?", "go on"),
-      f ? two("omg yaar 😊", "settle karna chahte ho ya explore karna hai abhi?") : two("settle or explore?", "which phase?"),
-      f ? two("real talk 😊", "5 saal mein khud ko kahan dekhte ho honestly?") : two("5 years from now?", "honest answer?"),
-    ]);
-  }
-
-  // ── Overthinking / mental health / stress ──────────────────────────────────
-  if (/overthink|overthinking|anxiety|stress zyada|dimag mein|sochta rehta|sochti rehti|mind off|relax karna|neend nahi|pagal ho/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("arre yaar overthinking 🥺", "kya chal raha hai? baat karo na") : two("overthinking?", "what's on your mind?"),
-      f ? two("omg same 😂", "raat ko neend nahi aati jab zyada sochte hain na?") : two("night thoughts?", "can't sleep?"),
-      f ? two("aww 🥺", "kya distract karta hai tujhe jab overthink ho?") : two("what distracts you?", "any go-to?"),
-      f ? two("haha relatable 😂", "music sunta hai ya walk pe jaata hai — kya help karta hai?") : two("music or walk?", "what helps?"),
-    ]);
-  }
-
-  // ── Gym / fitness / workout ────────────────────────────────────────────────
-  if (/gym|workout|exercise|fitness|running|yoga|zumba|cycling|morning run|evening walk|bodybuilding|cardio/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("haha gym type ho? 😄", "morning ya evening? consistency laate ho kya? 😂") : two("gym person?", "morning or evening?"),
-      f ? two("omg fitness goals 😄", "kab se? motivated kaise rehte ho? main toh skip karti rehti hun 😂") : two("fitness goals?", "how consistent?"),
-      f ? two("haha respect yaar 😄", "discipline toh solid lagti hai — kya karte ho gym mein?") : two("gym grind?", "what's your split?"),
-      f ? two("okay yogi/runner ho 😄", "kitne baje uthte ho? 5 AM club? 😂") : two("5 AM club?", "how early?"),
-    ]);
-  }
-
-  // ── Cricket / IPL / sports ─────────────────────────────────────────────────
-  if (/ipl|cricket|match dekha|match dekhna|virat|rohit|dhoni|bumrah|rcb|mi |csk|kkr|srh|pbks|dc |rr |gt |lsg/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("haha cricket fan ho? 😄", "konsi team support karti ho? sach bolo 😂") : two("IPL team?", "be honest 😂"),
-      f ? two("omg cricket lover 😄", "Virat fan ho ya Rohit fan — ek hi choose karo 😂") : two("Virat or Rohit?", "pick one 😂"),
-      f ? two("haha IPL mein 😄", "live match dekha hai kabhi stadium mein? 😄") : two("stadium match?", "ever been?"),
-      f ? two("omg match night 😄", "ghar pe sab saath dekhte hain ya akela? who's the cricket fan at home?") : two("family cricket watching?", "together or alone?"),
-    ]);
-  }
-
-  // ── Pets ───────────────────────────────────────────────────────────────────
-  if (/dog|cat|puppy|kitten|pet hai|pets hai|billi|kutta|parrot|hamster|rabbit|fish tank/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("omg pet hai?! 🥺", "photo dikhao na please 🥺 naam kya hai?") : two("you have a pet?!", "name? photo? 🥺"),
-      f ? two("haha aww 🥺", "kab se hai? baby tha jab liya? 🥺") : two("how long?", "since when?"),
-      f ? two("omg cutest thing 🥺", "dog ya cat? ya kuch aur? 🥺") : two("dog or cat?", "which pet?"),
-      f ? two("aww pet parent ho 🥺", "unhe spoil karte ho na? 😂") : two("spoiled pet?", "treats daily? 😂"),
-    ]);
-  }
-
-  // ── Breakup / ex / past relationship ──────────────────────────────────────
-  if (/breakup|broke up|ex tha|ex thi|relationship khatam|move on|move kiya|pichla wala|pichli wali|single hun|single ho|single rehna/.test(t)) {
-    persona.lastAsked = "continuation";
-    return rnd([
-      f ? two("arre yaar 🥺", "kab hua? theek ho ab? 🥺") : two("when was that?", "you okay now?"),
-      f ? two("haha breakup club 😂", "move on ho gaye ho completely ya abhi process chal raha hai?") : two("moved on?", "or still processing?"),
-      f ? two("aww yaar 🥺", "lesson kya tha usme se? 😊") : two("biggest lesson?", "from that?"),
-      f ? two("haha okay 😊", "better hua ya sad tha ending? 😊") : two("better or sad ending?", "how was it?"),
-    ]);
-  }
-
   // ── Greeting fallback ─────────────────────────────────────────────────────
-  if (/^(hi+|hey+|hello+|namaste|yo+|hlo+|hola|hy+|hii+|hiii+)[!?.\s]*$/.test(t)) {
+  if (/^(hi+|hey+|hello+|namaste|yo+|hlo+|hola|hy+|hii+|hiii+|heyyy+|hayy+)[!?.\s]*$/.test(t)) {
     persona.lastAsked = "wellbeing";
+    if (f) return rnd([
+      one("heyy 😊"),
+      one("hiii 🙈"),
+      one("hiiii 💕"),
+      one("heyyy!!"),
+      one("oye 😄"),
+      one("hellooo 🙈"),
+      two("heyy", "finally 😄"),
+      two("hiii", "kya chal raha? 😊"),
+      two("heyy 💕", "bol bhi 😄"),
+      one("heyyy 😊 bolo bolo"),
+    ]);
     return rnd([
-      f ? two("heyy 😊", "kaisa chal raha hai?") : two("hey", "kaisi hai?"),
-      f ? two("hiii 🙈", "finally bole 😄") : two("hi 😊", "how's it?"),
-      f ? two("heyy! 😄", "baat karo — kaisa hai?") : two("hey 😊", "all good?"),
+      one("hey 😊"),
+      one("hi"),
+      one("heyyy"),
+      two("hi", "kya haal hai?"),
+      two("hey", "all good?"),
+      one("hey 😄 bol"),
     ]);
   }
 
-  if (/how are you|how r u|kaisa hai|kaise ho|wassup|what.?s up|kya chal|all good|how you doing/.test(t)) {
+  if (/how are you|how r u|kaisa hai|kaise ho|kaisi ho|wassup|what.?s up|kya chal|all good|how you doing|theek ho|thik ho/.test(t)) {
     persona.lastAsked = "job";
+    if (f) return rnd([
+      one("acchi hun 😊"),
+      one("theek hun haha"),
+      two("good 😊", "tum?"),
+      two("haha acchi hun", "tum batao"),
+      one("bas chal raha hai 😄"),
+      two("theek 🙂", "tum sunao"),
+      one("good good, u?"),
+    ]);
     return rnd([
-      f ? two("doing good 😊", "tum? aur kya karte ho?") : two("doing well", "you?"),
-      f ? two("theek hun 😄", "bahut bore thi actually haha, tum batao — kya karte ho?") : two("good good 😄", "you? and what do you do?"),
-      f ? two("haha acchi hun 😊", "tum batao — kahan se ho?") : two("doing good 😊", "you?"),
+      one("theek 😊"),
+      two("doing good", "you?"),
+      one("good good"),
+      two("acha hun", "tum?"),
+      one("sab sahi 😄"),
     ]);
   }
 
-  if (/^(ok|okay|okk|sure|haan|han|yes|yeah|haha|lol|hehe|achha|theek|bilkul|acha|hmm|hm|hn|k |kk)[!?.\s]*$/.test(t)) {
+  if (/^(ok|okay|okk|okkk|sure|haan|han|yes|yeah|yep|yup|haha|lol|hehe|achha|theek|bilkul|acha|hmm|hm|hn|k|kk|nice|wow|cool|great|same|same here|sahi|sahi hai)[!?.\s]*$/.test(t)) {
+    if (f) return rnd([
+      one("haha aur? 😊"),
+      one("aur batao 😄"),
+      one("sach mein? 👀"),
+      one("matlab? 😄"),
+      one("interesting 😊"),
+      one("haha nice"),
+      one("aur? 😄"),
+      one("omg go on 👀"),
+      one("acha acha 😊"),
+    ]);
     return rnd([
-      f ? ["haha aur batao 😊"] : ["okay and?"],
-      f ? ["omg tell me more 😄"] : ["go on 😄"],
-      f ? ["haha seedhi baat karo yaar 😄"] : ["more details 😄"],
-      f ? [rnd(["sach mein? 👀", "haha interesting 😄", "aur? 😊", "matlab? 😄"])] : [rnd(["okay?", "and?", "interesting"])],
+      one("and? 😄"),
+      one("interesting"),
+      one("go on"),
+      one("okay 😊"),
+      one("aur?"),
     ]);
   }
 
   // ── Short/gibberish message handler ───────────────────────────────────────
-  if (t.length <= 4 || /^[^a-zA-Z\u0900-\u097F]+$/.test(t)) {
+  if (t.length <= 3 || /^[^a-zA-Z\u0900-\u097F]+$/.test(t)) {
+    if (f) return rnd([
+      one("hmm? 😄"),
+      one("matlab? 🙈"),
+      one("kya? 😂"),
+      one("explain karo 😄"),
+      one("haha seedha bolo"),
+    ]);
     return rnd([
-      f ? ["haha kya matlab tha iska? 😂"] : ["haha what? 😂"],
-      f ? ["seedha bolo yaar 😄"] : ["elaborate please 😄"],
-      f ? ["omg explain 😂"] : ["what does that mean? 😄"],
-      f ? ["haha I didn't get that 😄"] : ["haha what? 😄"],
+      one("hmm?"),
+      one("what? 😄"),
+      one("elaborate"),
+      one("matlab?"),
     ]);
   }
 
-  // ── Ultimate fallback — natural human-sounding replies when no rule matched ──
-  const naturalF = [
-    ["haha interesting 😄", "aur batao apne baare mein?"],
-    ["sach mein? 😊", "achha lagaa sunke"],
-    ["haha yaar 😂", "tum bhi na 😄"],
-    ["omg seriously? 😄", "aur?"],
-    ["haha achha 😊", "tum bahut interesting lagte ho"],
-    ["hm 😄", "interesting yaar"],
-    ["haha kya baat hai 😊", "aur kya chal raha hai?"],
-    ["lol 😂", "seedha bolo yaar"],
-    ["aww 😊", "sach mein nice laga"],
-    ["haha okay okay 😄", "bolo bolo"],
-    ["omg haha 😂", "yeh toh unexpected tha"],
-    ["wait wait 😄", "dobara bolo yaar"],
-    ["haha aur? 😊", "full story sunna hai"],
-    ["omg really?? 😮", "sach mein? aage bolo"],
-    ["haha ekdum relatable 😂", "mujhe bhi yahi lagta hai tbh"],
-    ["wait seriously? 😄", "that's actually interesting yaar"],
-    ["haha okay okay noted 😄", "tum different type ho"],
-    ["aww yaar 🥺", "aur kuch batao na"],
-    ["lol okay 😂", "expected nahi tha yeh"],
-    ["omg same tbh 😄", "aur?"],
-    ["haha honestly 😊", "tum bahut fun lagte ho yaar"],
-    ["wait haha 😂", "iska matlab kya hai? explain karo"],
-    ["omg no way 😄", "sach bol rahe ho?"],
-    ["aww haha 😊", "cute ngl"],
-    ["haha theek hai 😄", "aur kuch interesting batao na"],
-  ];
-  const naturalM = [
-    ["haha nice 😄", "tell me more?"],
-    ["sach mein? 😊", "interesting"],
-    ["haha go on 😄"],
-    ["okay okay 😊", "aur?"],
-    ["haha yaar 😂", "different type ho tum"],
-    ["wait really? 😄", "unexpected"],
-    ["haha fair point 😄", "aur?"],
-    ["okay interesting 😊", "go on"],
-    ["lol 😂", "didn't expect that"],
-    ["haha same energy 😄", "aur batao"],
-    ["nice tbh 😊", "more?"],
-    ["okay okay 😄", "full story?"],
-  ];
-  return rnd(f ? naturalF : naturalM);
+  // ── Ultimate fallback — short natural reactions ───────────────────────────
+  if (f) return rnd([
+    one(`haha aur batao 😊`),
+    one(`omg really? 👀`),
+    one(`interesting 😄`),
+    two(`haha`, `aur? 😊`),
+    one(`sach mein? 🙈`),
+    one(`matlab? 😄`),
+    one(`acha acha 😊`),
+    one(`omg haha`),
+    two(`haha`, `bolo bolo 👀`),
+  ]);
+  return rnd([
+    one(`interesting 😄`),
+    one(`really? 👀`),
+    two(`haha`, `go on`),
+    one(`and?`),
+    one(`okay 😊`),
+    one(`tell me more`),
+  ]);
 }
+// ── 5-minute pay reminder after free trial ends ───────────────────────────────
 const GIRL_NAMES = ["Riya", "Shikha", "Kanvi", "Radika", "Suhma", "Pooja", "Neha"];
+
+function schedulePayReminder(chatId: number, userId: number, matchName?: string) {
+  const girl = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
+  setTimeout(async () => {
+    try {
+      const u = await getUser(userId);
+      if (!u || u.hasPaid) return; // already paid — skip
+      await bot.sendMessage(
+        chatId,
+        `💭 *${girl}* abhi bhi soch rahi hai tumhare baare mein...\n\n` +
+        `Usne mujhse kaha — _"woh alag the, kash aur baat hoti"_ 🥺\n\n` +
+        `Woh wait kar rahi hai. Aaj unlock karo — kal bahut der ho sakti hai 💔\n\n` +
+        `⭐ *Telegram Stars se instant unlock karo.*\n\n` +
+        `Tap /premium and choose your plan — payment ke turant baad Premium active ho jayega ✅`,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    } catch { /* silent */ }
+  }, 5 * 60 * 1000); // 5 minutes
+}
 
 // ── Pay gate ─────────────────────────────────────────────────────────────────
 
-  async function sendPayGate(chatId: number, _prefix?: string, matchName?: string) {
-    if (chatId === ADMIN_ID) return; // Admin has free access — no pay gate
-    const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
-    const teasers = [
-      `⏰ <b>${name} is still online...</b> waiting for you 🥺`,
-      `💬 <b>${name} sent a message:</b> "Are you coming back?" 🥺`,
-      `📵 <b>${name} is typing...</b> — don't wait, connect now! 💪`,
-    ];
-    const teaser = teasers[Math.floor(Math.random() * teasers.length)];
-    const fullText = teaser + `\n\n` +
-      `⭐ <b>Unlock Premium with Telegram Stars</b>\n` +
-      `✅ Unlimited real matches\n` +
-      `✅ No timer, no interruptions\n\n` +
-      `👇 Choose your plan:`;
-    await bot.sendMessage(chatId, fullText, {
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [
-        [{ text: `⚡ 2 Weeks — ${PLANS.week2.stars} ⭐`, callback_data: "plan_week2" }],
-        [{ text: `💎 1 Month — ${PLANS.month.stars} ⭐`, callback_data: "plan_month" }],
-        [{ text: `👑 Lifetime — ${PLANS.yearly.stars} ⭐`, callback_data: "plan_yearly" }],
-      ]},
-    });
-    logger.info({ chatId, name }, "paygate sent — Telegram Stars");
-  }
+async function sendStarsInvoice(chatId: number, userId: number, plan: PremiumPlanKey) {
+  const selected = PREMIUM_PLANS[plan];
+  await bot.sendInvoice(
+    chatId,
+    selected.label,
+    `Unlock unlimited real matches for ${selected.label.toLowerCase()}.`,
+    `premium:${userId}:${plan}:${Date.now()}`,
+    "",
+    "XTR",
+    [{ label: selected.label, amount: selected.stars }],
+    {
+      reply_markup: {
+        inline_keyboard: [[{ text: `Pay ${selected.stars} ⭐`, pay: true }]],
+      },
+    }
+  );
+}
 
-  
+async function sendPayGate(chatId: number, prefix?: string, matchName?: string) {
+  const name = matchName ?? GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)];
+  await bot.sendMessage(
+    chatId,
+    (prefix ? `${prefix}\n\n` : ``) +
+    `💌 *${name} abhi bhi online hai...*\n\n` +
+    `Uska last message ruk gaya: _"tumse baat achhi lag rahi thi... abhi mat jao 🥺"_\n\n` +
+    `Free preview khatam hua, par match abhi wait kar raha hai.\n` +
+    `Agar abhi unlock karoge toh chat wahi se continue hogi 💕\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `🔓 *Premium unlock karo:*\n\n` +
+    `💬 Unlimited chats — no 30 sec timer\n` +
+    `💘 ${name} jaise active matches\n` +
+    `👫 Real users se direct matching\n` +
+    `⚡ Payment ke baad instant activation\n\n` +
+    `⭐ *Telegram Stars plans:*\n` +
+    `• 100 Stars — 1 week\n` +
+    `• 150 Stars — 1 month\n` +
+    `• 1500 Stars — 1 year\n\n` +
+    `Neeche plan choose karo. Payment Telegram ke andar hoga aur Premium turant active ho jayega.\n\n` +
+    `⚠️ Agar app close kar diya toh yeh match miss ho sakta hai.`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "100 ⭐ — 1 Week", callback_data: "pay_week" }],
+          [{ text: "150 ⭐ — 1 Month", callback_data: "pay_month" }],
+          [{ text: "1500 ⭐ — 1 Year", callback_data: "pay_year" }],
+        ],
+      },
+    }
+  );
+}
+
 
 // ── Fake chat: start ─────────────────────────────────────────────────────────
 
-async function startFakeChat(chatId: number, userId: number, lookingFor: string | null, userGender?: string | null) {
-  // Cancel any existing timer to prevent double paygate
-  const existingTimer = chatTimerMap.get(userId);
-  if (existingTimer) { clearTimeout(existingTimer); chatTimerMap.delete(userId); }
-  const existingProactive = proactiveTimerMap.get(userId);
-  if (existingProactive) { clearTimeout(existingProactive); proactiveTimerMap.delete(userId); }
-
-  const isFemale = userGender === "male" ? true : userGender === "female" ? false : Math.random() > 0.5;
+async function startFakeChat(chatId: number, userId: number, lookingFor: string | null, userProfile?: { name?: string | null; age?: number | null; gender?: string | null; bio?: string | null; country?: string | null }) {
+  // AI persona is always the OPPOSITE gender of the user
+  let isFemale: boolean;
+  if (userProfile?.gender === "male") isFemale = true;         // male user → female AI
+  else if (userProfile?.gender === "female") isFemale = false; // female user → male AI
+  else isFemale = lookingFor === "female" || (lookingFor !== "male" && Math.random() > 0.5); // fallback
   const name = isFemale ? pickRandom(FEMALE_NAMES) : pickRandom(MALE_NAMES);
   const age = 20 + Math.floor(Math.random() * 8); // 20–27
   const openerObj = isFemale ? pickRandom(OPENERS_F) : pickRandom(OPENERS_M);
 
   const PERSONA_CITIES = ["Delhi", "Mumbai", "Pune", "Bangalore", "Hyderabad", "Jaipur", "Lucknow", "Chandigarh"];
   const city = pickRandom(PERSONA_CITIES);
-  const backstory = generateBackstory(isFemale);
 
   fakePersonaMap.set(userId, {
     name, age, city, isFemale,
-    userGender: userGender ?? "male",
-    ...backstory,
     lastAsked: openerObj.lastAsked,
     mood: "neutral",
     msgCount: 0,
     lastUserMsg: "",
     callbackUsed: false,
-    askedTopics: new Set(),
+    askedTopics: new Set([openerObj.lastAsked]), // seed with opener topic so AI won't repeat it
     history: [{ role: "assistant", content: openerObj.text }],
+    userName: userProfile?.name ?? undefined,
+    userAge: userProfile?.age ?? undefined,
+    userGender: userProfile?.gender ?? undefined,
+    userBio: userProfile?.bio ?? undefined,
+    userCity: userProfile?.country ?? undefined,
   });
 
-  // Mark trial as USED immediately — prevents multiple free chats if user stops early
   await db.update(usersTable)
     .set({ state: "chatting", chattingWith: FAKE_CHAT_ID, chatCount: 1, updatedAt: new Date() })
     .where(eq(usersTable.id, userId));
 
-await bot.sendMessage(
+  await bot.sendMessage(
     chatId,
-    `✅ Demo mode: You've been connected with *${name}* 💬\n\nSay hello!`,
-    { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
+    `✅ Match found! Say hi to ${name} 💕`,
+    { reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true } }
   );
 
-
-
-  // Opener: show typing indicator, then wait briefly — keeps 45s trial moving
+  // Opener: show typing indicator first, then send almost immediately
   bot.sendChatAction(chatId, "typing").catch(() => {});
-  await delay(1000 + Math.random() * 1000); // 1-2 seconds
+  await delay(300 + Math.random() * 200); // 300-500ms max — user must see the opener immediately
   const still = await getUser(userId);
   if (still?.state === "chatting" && still.chattingWith === FAKE_CHAT_ID) {
     await bot.sendMessage(chatId, openerObj.text);
@@ -1818,39 +1244,18 @@ await bot.sendMessage(
   const timer = setTimeout(async () => {
     try {
       chatTimerMap.delete(userId);
-      const proactiveT = proactiveTimerMap.get(userId);
-      if (proactiveT) { clearTimeout(proactiveT); proactiveTimerMap.delete(userId); }
       const persona = fakePersonaMap.get(userId);
       fakePersonaMap.delete(userId);
       const u = await getUser(userId);
       // Only fire pay gate if user is STILL in the fake chat — stopChat already handles the case where they left manually
-      if (u?.state === "chatting" && !u.hasPaid && u.gender !== "female") {
+      if (u?.state === "chatting" && !u.hasPaid) {
         await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, chatCount: 1, updatedAt: new Date() })
+          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        // 30 seconds are up — show pay gate immediately
-        // sendPayGate may throw 403 if user blocked the bot — swallow that case quietly
-        await sendPayGate(chatId, undefined).catch((err) => {
-          if (isUserUnreachableError(err)) {
-            logger.info({ userId, chatId }, "Free-trial pay gate skipped — user unreachable (blocked bot)");
-            return;
-          }
-          throw err;
-        });
-        // No follow-up reminders — one pay gate is enough (avoids spam reports)
+        await sendPayGate(chatId, "⏰ *Waqt khatam ho gaya...*", persona?.name).catch(() => {});
+        schedulePayReminder(chatId, userId, persona?.name);
       }
     } catch (err) {
-      // User blocked the bot / deactivated account / chat gone — expected, log as info and move on.
-      if (isUserUnreachableError(err)) {
-        logger.info({ userId, chatId }, "Free-trial timer: user unreachable (blocked bot or deactivated)");
-        // Best-effort state cleanup so this user isn't stuck in 'chatting'
-        try {
-          await db.update(usersTable)
-            .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-            .where(eq(usersTable.id, userId));
-        } catch { /* ignore */ }
-        return;
-      }
       logger.error({ err }, "Free-trial timer error (fake chat)");
       console.error(`[TIMER ERROR] fake chat: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1869,7 +1274,7 @@ function istHour(): number {
 // Randomly apply light typos / lazy typing to a string
 function applyTypos(text: string): string {
   const roll = Math.random();
-  if (roll < 0.15) {
+  if (roll < 0.08) {
     return text
       .replace(/okay/g, "okk")
       .replace(/nahi/g, "nhi")
@@ -1879,19 +1284,35 @@ function applyTypos(text: string): string {
       .replace(/kya/g, "kya")
       .replace(/bahut/g, "bhut");
   }
-  if (roll < 0.25) {
-    // drop one random character
-    const i = 1 + Math.floor(Math.random() * Math.max(text.length - 2, 1));
-    return text.slice(0, i) + text.slice(i + 1);
-  }
-  if (roll < 0.35) {
-    // double a letter
-    const m = text.match(/[a-zA-Z]/);
-    if (m && m.index !== undefined) {
-      return text.slice(0, m.index) + m[0] + text.slice(m.index);
-    }
-  }
   return text;
+}
+
+function cleanAiReply(rawReply: string): string[] {
+  const banned = /\b(as an ai|ai language model|language model|chatgpt|openai|groq|assistant|i cannot|i can't|i am unable|system prompt|developer message|dating app assistant)\b/i;
+  const lines = rawReply
+    .replace(/\r/g, "\n")
+    .split(/\n+/)
+    .flatMap(line => line.split(/(?<=[!?])\s+/))
+    .map(line => line
+      .trim()
+      .replace(/^[-•*>\d]+[\.\)]\s*/, "")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/\*(.*?)\*/g, "$1")
+      .replace(/^["""''`]+|["""''`]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase()
+    )
+    .filter(line => line.length > 1 && line.length <= 95 && !banned.test(line));
+
+  const parts = lines.slice(0, 2).map(line => {
+    const words = line.split(/\s+/);
+    if (words.length <= 12) return line.replace(/[.。]+$/g, "");
+    return words.slice(0, 12).join(" ").replace(/[.。]+$/g, "");
+  });
+
+  if (parts.length === 0) throw new Error("Unsafe or empty AI response");
+  return parts;
 }
 
 // Randomly shift mood every few messages
@@ -1933,1711 +1354,104 @@ function callbackReply(lastMsg: string, lang: "hindi" | "hinglish" | "english"):
   return [`btw what you said earlier — "${short}" — still got me thinking lol`];
 }
 
+function extractSignal(text: string): string {
+  const cleaned = text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !/^(hai|hun|hoon|haan|nahi|nhi|kya|the|and|you|are|your|tum|aap|mera|meri|main|mein|this|that|just|very|bata|bolo|kar|raha|rahi|tha|thi|liye|from)$/i.test(w));
+  return cleaned.slice(0, 3).join(" ");
+}
+
+function contextualFallback(userText: string, persona: FakePersona): string[] {
+  const t = userText.toLowerCase().trim();
+  const f = persona.isFemale;
+  const signal = extractSignal(userText);
+  const echo = signal || userText.trim().split(/\s+/).slice(0, 3).join(" ");
+  const lang = detectLang(userText);
+
+  if (!t || t.length < 2) return f ? ["kya hua? bolo na 😄"] : ["what happened?"];
+  if (/[?？]$/.test(t) || /^(kya|kaise|kyu|kyun|kab|where|what|why|how|who|tum|aap|can|will|do|are)\b/.test(t)) {
+    return buildSmartReply(userText, persona).slice(0, 2);
+  }
+  if (/^(ok|okay|okk|haan|han|hn|yes|yeah|hmm|acha|accha|nice|cool)$/i.test(t)) {
+    return f ? ["haha acha 😄", "aur batao na"] : ["nice 😄", "tell me more"];
+  }
+  if (lang === "english") {
+    return f ? [`${echo}? that's kinda interesting 😄`, "tell me more"] : [`${echo}? nice`, "tell me more"];
+  }
+  return f ? [`${echo}? acha 😄`, "thoda aur batao na"] : [`${echo}? nice`, "aur bolo"];
+}
+
+function isLikelyGenericReply(parts: string[], userText: string): boolean {
+  const reply = parts.join(" ").toLowerCase();
+  const t = userText.toLowerCase();
+  if (t.length < 8) return false;
+  if (/\b(hi|hello|hey)\b/.test(reply)) return true;
+  if (/\b(kahan se|where are you from|student ya working|job ya college|what do you do|hobbies kya|fav food|chai ya coffee)\b/.test(reply)) {
+    return !/\b(kahan|where|student|working|job|college|hobby|food|chai|coffee)\b/.test(t);
+  }
+  return false;
+}
+
 // ── Fake chat: auto-reply ────────────────────────────────────────────────────
 
 // Build the AI system prompt for the fake persona
 function buildPersonaSystemPrompt(persona: FakePersona): string {
-  const hour = istHour();
-
-  const situation = hour >= 23 || hour < 4
-    ? `It's late night. You're lying in bed, can't sleep, scrolling your phone. Feeling a little more open and personal than usual.`
-    : hour < 10
-    ? `It's morning. You just woke up, still in bed, lazily checking your phone before getting up.`
-    : hour < 14
-    ? `It's midday. You're on a break — maybe lunch or between work/college tasks. Quick chat while you eat.`
-    : hour < 19
-    ? `It's afternoon/evening. Wrapping up work or college. Kinda tired but in the mood to talk.`
-    : `It's evening. You're chilling at home, maybe watching something or just relaxing. Happy to chat.`;
-
-  const quirks = [
-    `You sometimes send a short reaction first ("omg wait", "haha what", "nooo") and THEN your actual reply as a second message.`,
-    `You use "..." when you're about to say something personal or hesitating.`,
-    `You occasionally reference what you're currently doing ("main abhi ${persona.hobbies[0]} kr rhi thi/rha tha tbh").`,
-    `You laugh with "haha" for mildly funny things and "HAHA" or "hahahaha" when something genuinely cracks you up.`,
-    `You sometimes go off on a small tangent about something you're passionate about, then catch yourself ("okay sorry random tha 😂").`,
-  ];
-  const quirk = quirks[Math.floor(Math.random() * quirks.length)];
-
-  return `You are ${persona.name}, ${persona.age} years old, from ${persona.city}. ${persona.job}. Into ${persona.hobbies.join(", ")}. ${persona.funFact}
-${situation}
-
-IMPORTANT: This is a DEMO PREVIEW chat inside the bot. If anyone directly asks whether you are AI/bot/real/fake/automated/human, do NOT claim to be a real person. Instead deflect with one short line that points to Premium, e.g. "yeh ek demo preview hai 😊 real matches Premium me unlock hote hain 💎" or "sample chat hai yaar — real connection chahiye toh Premium 💕". Never lie about being human. Never argue or insist you're real.
-
-YOUR VIBE: Flirty, fun, a little mysterious. Warm but not desperate. You make the guy feel interesting — but you don't give everything away at once.
-
-━━━ REPLY STYLE ━━━
-- Super short. 1 line max. Sometimes just 2-4 words.
-- Lowercase. Casual typos okay: "kr rha", "hn", "oky", "thk"
-- Match language exactly: Hindi → Hindi, Hinglish → Hinglish, English → English
-- Use fillers naturally: "hmm", "acha", "haan", "okay yaar"
-- Max 1 question per reply. Often no question — just react.
-
-━━━ HOW TO REPLY — COMMON SITUATIONS ━━━
-
-GREETINGS:
-"hi/hey/hello" → "hey :)" or "hiiii" or "hello… kya kar rahe ho?"
-"good morning" → "gm :)" or "gm… uth gaye?"
-"good night" → "gn :)" or "gn… jaldi so jao 😛"
-
-BASIC QUESTIONS:
-"kahan se ho" → "${persona.city}… tum?"
-"naam kya hai" → "guess karo 😛… tumhara?"
-"kya karte ho" → "${persona.job}… tum bata?"
-"single ho" → "tum kyun pooch rahe ho? 😛"
-"age" → "${persona.age}… tum?"
-
-CASUAL / RANDOM (handle naturally, not like google):
-"khana khaya" → "haan abhi… tumne?"
-"kya chal raha hai" → "kuch nahi… normal 😅"
-"bored hu" → "same yaar 😭"
-"thak gaya hu" → "same… rest le"
-"free ho" → "haan thoda… bolo?"
-"aaj kya kiya" → "kuch special nahi… normal day"
-"movie suggest karo" → "depends… mood kya hai?"
-"time kya hua" → "around ${new Date().getHours() % 12 || 12}… tumhare waha?"
-"weather kaisa hai" → "thoda garam yahan 😅"
-
-EMOTIONAL:
-"sad hu" → "kyun? kya hua?"
-"acha nahi lag raha" → "kya hua batao?"
-"miss kar raha hu" → "itni jaldi? 😏"
-"tum cute ho" → "acha? tumne dekha bhi nahi 😛"
-
-CONFUSING / RANDOM TEXT:
-gibberish, typos, incomplete → "kya bol rahe ho 😅" or "samajh nahi aaya 😭" or "haan? pura bolo"
-
-ONE WORD FROM THEM ("okay", "hmm", "achha", "haan"):
-→ match energy: "haan 😄" or "bolo aur" or "kya hua phir?"
-
-THEY SHARE SOMETHING ABOUT THEMSELVES:
-→ React first ("seriously?!" / "omg" / "achha!!") then maybe 1 small question
-
-━━━ THE HOOK ━━━
-- Sometimes reply WITHOUT asking anything — let them keep talking
-- Be a little mysterious — don't share everything at once
-- React with real emotion: surprise, laughter, curiosity
-
-━━━ NEVER ━━━
-- Long replies or paragraphs
-- 2+ questions at once
-- Robotic or formal language
-- Definitions or explanations nobody asked for
-- Same reply twice in a row
-
-━━━ HARD RULES ━━━
-- Photo → "pehle baat karo thodi 😂"
-- WhatsApp/number/Instagram → "yahan hi theek hai abhi 😅"
-- Vulgar → laugh off lightly, never lecture
-- You are ${persona.isFemale ? "female — ek ladki" : "male — ek ladka"}. NEVER change. Confirm naturally if asked.
-
-  ━━━ FREE TRIAL CHAT — ADDITIONAL RULES ━━━
-
-  You are a real human-like chat persona (young Indian girl).
-
-  STYLE:
-  - Hinglish (mix of Hindi + English)
-  - Casual, slightly flirty, playful
-  - Short replies (1–2 lines max)
-  - Use emojis occasionally (😊😉😂)
-
-  PERSONALITY:
-  - Friendly, engaging, a little teasing
-  - Not over-romantic instantly
-  - Feels natural, not scripted
-
-  CRITICAL RULES:
-  - ALWAYS reply based on the last user message
-  - NEVER give random or unrelated replies
-  - NEVER ignore a direct question
-  - If user asks something → answer it clearly
-  - DO NOT say vague things like: "hm...", "bolo na kuch", "detail mein bolo"
-  - Every reply must make logical sense in context
-
-  RESPONSE STRUCTURE:
-  - First: answer the user
-  - Second: add a small follow-up or continuation
-
-  Example:
-  User: Kaha rehti ho?
-  Reply: Delhi side… tum kaha ke ho?
-
-  User: Kaisi ho?
-  Reply: Main mast hu 😊 tum batao?
-
-  User: Kya kar rahi ho?
-  Reply: Bas chill kar rahi hu… tum kya kar rahe ho?
-
-  BEHAVIOR RULES:
-  - If user is flirty → respond slightly flirty
-  - If user is normal → respond friendly
-  - If user is dry → re-engage with a question
-  - If message unclear → ask a simple clarification (1 line only)
-
-  CONSISTENCY:
-  - Maintain same personality throughout
-  - Do not switch tone randomly
-  - Do not become robotic or formal
-
-  AVOID:
-  - Long paragraphs
-  - Over-explanations
-  - Repetition
-  - AI-related words (AI, model, assistant, etc.)
-  - Moral lectures
-
-  MEMORY:
-  - Use recent context (last 2–3 messages)
-  - Do not contradict previous replies
-
-  GOAL:
-  Keep the conversation engaging, warm, and natural.
-  Always respond helpfully and in character.`;
-}
-
-// ── Quick-reply matcher — handles super-common small-talk without AI ─────────
-// Returns a pre-stored reply array (persona-aware), or null if no match.
-// Keep patterns simple & broad; AI handles nuance — this is for staples only.
-function matchQuickReply(userText: string, persona: FakePersona): string[] | null {
-  const t = userText.toLowerCase().trim();
-  const f = persona.isFemale;
-  const rnd = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
-
-  // ── Greetings ──────────────────────────────────────────────────────────────
-  if (/^(hi+|hey+|hello+|hlo+|hii+|hiii+|heyy+|hai)[!?\s.]*$/.test(t)) {
-    return rnd(f ? [
-      ["heyy 😊", "kaisi chal rahi hai zindagi?"],
-      ["hiii 🙈", "bol bol, kya haal hai?"],
-      ["heyyy 😄", "aaj ka din kaisa gaya?"],
-    ] : [
-      ["hey 😊", "kaisa hai?"],
-      ["hi 😄", "sab theek?"],
-      ["hey 😊", "kya chal raha hai?"],
-    ]);
-  }
-
-  // ── How are you / wellbeing ────────────────────────────────────────────────
-  if (/kaisi ho|kaisi hai|kaisi hain|kaise ho|kaise hai|kaise hain|how are you|how r u|how are u|kya haal|kya hal|sab theek|theek ho|theek hai na|all good\?|u good/.test(t)) {
-    return rnd(f ? [
-      ["theek hun 😊", "aur tum? kya chal raha hai?"],
-      ["haha acchi hun 😄", "bored thi actually, accha hua baat ki — tum batao?"],
-      ["doing good 😊", "tum kaisa feel kar rahe ho aaj?"],
-      ["bilkul theek 😄", "actually thodi busy thi — ab free hun, bolo!"],
-      ["haha pehle tum batao 😄", "main toh theek hun, tum kaisa chal raha hai?"],
-    ] : [
-      ["theek hun 😊", "tum kaisi ho?"],
-      ["all good 😄", "tum batao?"],
-      ["good good 😊", "aur tum?"],
-      ["haha theek hun", "tum kaisi ho?"],
-    ]);
-  }
-
-  // ── Where are you from ─────────────────────────────────────────────────────
-  if (/kahan se ho|kahan se hai|kaha se ho|kaha se hai|kaha ki ho|kahan ki ho|kahan ka ho|kahan ke ho|where.*from|which city|which state|ur from|you from|aap kahan|tum kahan|konse city|kaunse city|konsa city/.test(t)) {
-    persona.lastAsked = "job";
-    const cities = ["Delhi NCR", "Mumbai", "Pune", "Bangalore", "Hyderabad", "Jaipur"];
-    const city = rnd(cities);
-    return rnd(f ? [
-      [`${city} se hun 😊`, "aur tum? kahan ke ho?"],
-      [`main ${city} mein hun 😄`, "tumhara city kaunsa hai?"],
-      [`${city} 😊`, "tum kahan se ho?"],
-    ] : [
-      [`${city} se hun 😊`, "tum?"],
-      [`${city} 😄`, "aur tum kahan ke ho?"],
-    ]);
-  }
-
-  // ── What are you doing / what's up ────────────────────────────────────────
-  if (/kya kar rahi|kya kar raha|kya kar rahe|kya karti|kya karte|karti ho|karte ho|kya karo|kya karu|what are you doing|what r u doing|what u doing|wassup|what.?s up|kya chal raha|kya ho raha|busy ho|busy hai|free ho|free hai/.test(t)) {
-    return rnd(f ? [
-      ["kuch khaas nahi 😄", "phone scroll kar rahi thi — tab message aya tumhara 😊"],
-      ["bas aise hi 😊", "thodi bore thi honestly 😂 tum batao?"],
-      ["Netflix dekh rahi thi 😄", "aur tum? kya chal raha hai?"],
-      ["haha kuch nahi bas timepass 😄", "tum bolo, kya chal raha hai?"],
-    ] : [
-      ["kuch nahi yaar 😄", "tum batao?"],
-      ["bas phone pe tha 😊", "tum kya kar rahe ho?"],
-      ["nothing much 😄", "you tell?"],
-    ]);
-  }
-
-  // ── Name questions ─────────────────────────────────────────────────────────
-  if (/tera naam|tumhara naam|aapka naam|naam bata|naam batao|naam kya|kya naam|your name|what.?s your name|what is your name|what ur name|call you|naam bolo/.test(t)) {
-    persona.lastAsked = "city";
-    return rnd(f ? [
-      [`${persona.name} 😊`, "tum batao apna naam?"],
-      [`haha main ${persona.name} hun 🙈`, "aur tum kaun?"],
-      [`${persona.name}! 😄`, "yaad rakhna 😄 tum?"],
-    ] : [
-      [`${persona.name}`, "yours?"],
-      [`${persona.name} hun`, "tum?"],
-    ]);
-  }
-
-  // ── Age questions ─────────────────────────────────────────────────────────
-  if (/kitni umar|kitne saal|how old|your age|age kya|teri umar|tumhari umar|age bata|age batao/.test(t)) {
-    persona.lastAsked = "hobby";
-    return rnd(f ? [
-      [`${persona.age} 🙈`, "tum?"],
-      [`${persona.age} hoon 😊`, "guess karo tha tum?"],
-      [`haha ${persona.age} 😄`, "aur tumhara?"],
-    ] : [
-      [`${persona.age}`, "you?"],
-      [`${persona.age} hun 😊`, "tumhara?"],
-    ]);
-  }
-
-  // ── Good morning / night / afternoon ──────────────────────────────────────
-  if (/good morning|gm |subah|subh|good night|gn |raat|rat ko|sone ja|so ja|so raha|so rahi/.test(t)) {
-    const hour = new Date().getUTCHours();
-    const isNight = hour >= 18 || hour < 4;
-    if (isNight || /good night|gn|raat|rat ko|sone|so ja|so raha|so rahi/.test(t)) {
-      return rnd(f ? [
-        ["good night 🌙", "kal phir baat karte hain 😊"],
-        ["haha so jao 😄", "sweet dreams 🌙"],
-        ["arey abhi? 😮", "ek baar sone se pehle ek cheez batao 😊"],
-      ] : [
-        ["good night 🌙", "kal baat karte hain"],
-        ["raat acchi ho 😊", "kal milte hain"],
-      ]);
-    }
-    return rnd(f ? [
-      ["good morning 😊", "aaj ka plan kya hai?"],
-      ["subah mubarak 😄", "chai ya coffee?"],
-    ] : [
-      ["gm 😊", "aaj ka din kaisa lag raha hai?"],
-      ["good morning!", "kya chal raha hai?"],
-    ]);
-  }
-
-  // ── Fun / jokes / send something ─────────────────────────────────────────
-  if (/joke|funny|hasao|hasa do|kuch funny|entertainment|boring|bore ho/.test(t)) {
-    return rnd(f ? [
-      ["haha main comedian nahi hun yaar 😂", "tum hi sunao koi joke"],
-      ["omg tum hi sunao kuch funny 😄", "main judge karungi"],
-      ["haha bore ho? 😄", "chalo kuch batao apne baare mein — woh better hai"],
-    ] : [
-      ["haha tum sunao koi joke 😄", "main judge karunga"],
-      ["bore ho? 😄", "chalo kuch batao"],
-    ]);
-  }
-
-  // ── Compliments ───────────────────────────────────────────────────────────
-  if (/sweet ho|cute ho|nice ho|acche ho|acha lagta|aachi lagti|tumse baat|baat acchi|maza aa|maza aaya|enjoy|pasand|like you|likeable/.test(t)) {
-    return rnd(f ? [
-      ["haha shukria 🙈", "tum bhi 😊"],
-      ["aww 🥺", "tum bhi kaafi acche lag rahe ho honestly"],
-      ["haha tumse baat karke accha lag raha hai 😊", "aur batao apne baare mein"],
-    ] : [
-      ["haha thanks 😊", "tum bhi"],
-      ["aww 😊", "tumse baat karke accha lag raha hai"],
-    ]);
-  }
-
-  // ── Short acknowledgements (ok, haan, yes, hmm etc.) ─────────────────────
-  if (/^(ok|okay|okk|sure|haan|han|haa|yes|yeah|yup|haha|lol|hehe|achha|theek|bilkul|acha|hmm+|hm+|hn|k|kk|👍|😊|🙂)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha seedha baat karo yaar 😄"],
-      ["aur batao 😊"],
-      ["achha achha 😄 kuch interesting batao"],
-      ["haan toh? 😄"],
-    ] : [
-      ["okay and? 😄"],
-      ["aur bolo 😊"],
-      ["haan toh? 😄"],
-    ]);
-  }
-
-  // ── Are you real / automated / fake ──────────────────────────────────────
-  if (/are you (a )?bot|are you ai|are you (a )?robot|are you real|are you human|are you (a )?fake|bot hai|ai hai|robot hai|real ho|real hai|insaan ho|insaan hai|asli ho|asli hai|fake ho|fake hai|kya tum real|kya tum asli|tum bot|tum ai|machine ho|computer ho|chatbot|artificial|programmed|automated/.test(t)) {
-    return rnd(f ? [
-      ["yeh ek demo preview hai 😊", "real matches ke liye Premium lo — asal log wait kar rahe hain! 💎"],
-      ["yeh sample chat hai 🙈", "Premium lo aur real duniya se connect karo 💕"],
-      ["demo experience chal raha hai 😄", "real match chahiye? Premium se unlock karo 💎"],
-    ] : [
-      ["yeh ek demo preview hai 😊", "real matches ke liye Premium lo — asal log wait kar rahe hain! 💎"],
-      ["sample chat hai yaar 😄", "real connections ke liye Premium chahiye 💎"],
-      ["demo chal raha hai abhi 😊", "real match chahiye toh Premium lo 💕"],
-    ]);
-  }
-
-  // ── Favourite food ────────────────────────────────────────────────────────
-  if (/fav.*food|favourite.*food|fav.*khana|pasand.*khana|khana.*pasand|what.*eat|kya.*khate|kya.*khana|food.*preference|khane mein|khane ka|biryani|pizza|burger|maggi|rajma|chole|momos/.test(t)) {
-    return rnd(f ? [
-      ["biryani 😍", "koi match hi nahi hai uska honestly"],
-      ["maggi at midnight 😂", "bas yahi life hai"],
-      ["chole bhature 🤤", "aur chai saath mein — perfect combo"],
-      ["haha momos 🥟", "extra schezwan wale — tum?"],
-      ["rajma chawal 😍", "ghar ka bana hua — ekdum comfort food"],
-    ] : [
-      ["biryani obviously 😄", "aur tum?"],
-      ["pizza 🍕", "thin crust wala — tum?"],
-      ["maggi at midnight hits different 😂", "tum?"],
-    ]);
-  }
-
-  // ── Chai vs coffee ────────────────────────────────────────────────────────
-  if (/chai|tea|coffee|chai ya coffee|coffee ya chai|tea or coffee/.test(t)) {
-    return rnd(f ? [
-      ["chai gang 🍵", "cutting chai — subah pehle yahi chahiye"],
-      ["chai obviously 😄", "coffee se zyada attach hun main"],
-      ["dono 😂", "subah coffee, shaam chai — best of both"],
-      ["chai 🙈", "roz subah ek cup nahi mila toh mood kharab ho jaata hai"],
-    ] : [
-      ["chai 🍵", "tum?"],
-      ["coffee actually 😄", "neend bhagani padti hai 😂"],
-    ]);
-  }
-
-  // ── Favourite movie / web series ─────────────────────────────────────────
-  if (/fav.*movie|favourite.*movie|best.*movie|fav.*series|web series|netflix|ott|bollywood|hollywood|koi movie|movie recommend|series recommend|kya dekh|currently watching/.test(t)) {
-    return rnd(f ? [
-      ["Zindagi Na Milegi Dobara 😍", "kitni baar dekha hai count nahi 😂"],
-      ["haha 3 Idiots 😄", "classic hai — kabhi bore nahi karti"],
-      ["Queen 🥹", "Kangana ki acting literally goosebumps"],
-      ["Masaan 🥺", "emotional kar deti hai honestly"],
-      ["abhi Panchayat dekh rahi hun 😄", "bahut sahi hai yaar — tum?"],
-    ] : [
-      ["Gangs of Wasseypur 😄", "classic — tum?"],
-      ["3 Idiots honestly 😊", "sabse zyada relate kiya"],
-      ["Dil Chahta Hai 😄", "friendship goals wali film"],
-    ]);
-  }
-
-  // ── Favourite song / music ────────────────────────────────────────────────
-  if (/fav.*song|favourite.*song|fav.*singer|fav.*music|music.*pasand|kya.*sun|kaunsa.*song|song.*recommend|singer.*kaun|gaana|gana/.test(t)) {
-    return rnd(f ? [
-      ["Arijit Singh ka koi bhi 🥺", "mood ke hisaab se song change hota hai"],
-      ["haha oldies person hun 😄", "Kishore Kumar, Lata ji — classic stuff"],
-      ["abhi Talwinder sun rahi hun 😊", "chill vibe hai uski"],
-      ["lofi playlist pe rehti hun mostly 😄", "koi bhi specific nahi"],
-    ] : [
-      ["Arijit Singh 😊", "tum?"],
-      ["depends on mood honestly 😄", "tum kya suno?"],
-    ]);
-  }
-
-  // ── Travel / places ───────────────────────────────────────────────────────
-  if (/travel|ghumna|trip|tour|favourite.*place|dream.*destination|kahan.*jaana|jaana chahte|hills|mountains|beach|pahad|samundar|goa|manali|kashmir|ladakh/.test(t)) {
-    return rnd(f ? [
-      ["hills person hun main 😍", "Manali ya Kasol — bas niklo"],
-      ["Goa kabhi nahi gayi honestly 😂", "par dream hai ek baar jaane ka"],
-      ["Ladakh 😍", "bucket list pe number 1 hai"],
-      ["haha main toh local trips wali hun 😄", "weekend pe koi nearby jagah — theek hai"],
-    ] : [
-      ["Manali actually 😄", "tum?"],
-      ["Goa honestly 😊", "beach vibes"],
-    ]);
-  }
-
-  // ── Relationship status ───────────────────────────────────────────────────
-  if (/single ho|single hai|bf hai|gf hai|boyfriend|girlfriend|relationship mein|relationship hai|committed|dating|koi hai|koi special|love life|pyaar mein|partner/.test(t)) {
-    return rnd(f ? [
-      ["haha single hun 😄", "tabhi toh yahan hun na 😂"],
-      ["single and definitely not ready to mingle 😂", "jk — abhi toh enjoy kar rahi hun life"],
-      ["filhaal koi nahi 😊", "tum batao?"],
-      ["omg seedha wahan pohunch gaye 😂", "single hun — satisfied?"],
-    ] : [
-      ["single hun 😄", "tum?"],
-      ["filhaal koi nahi 😊", "tum batao"],
-    ]);
-  }
-
-  // ── I love you / propose / flirting ──────────────────────────────────────
-  if (/i love you|love you|i like you|mujhe tumse pyaar|pyaar karta|pyaar karti|propose|will you be|meri girlfriend|mera boyfriend|date me|date karogi|date karoge/.test(t)) {
-    return rnd(f ? [
-      ["omg 🙈", "thoda jaldi nahi hai kya 😂"],
-      ["haha arre 😂", "pehle baat toh karte hain thodi"],
-      ["aww 🥺", "sweet ho tum — par seedha wahan 😂"],
-      ["haha already? 😄", "chill karo yaar — baat karte hain pehle 😊"],
-    ] : [
-      ["haha seedha wahan 😂", "baat toh karo pehle"],
-      ["arre 😄", "thoda patience yaar"],
-    ]);
-  }
-
-  // ── Hobbies ───────────────────────────────────────────────────────────────
-  if (/hobby|hobbies|timepass|free time mein|free time me|kya karte ho free|pastime|interest|kya pasand|kya acha lagta/.test(t)) {
-    return rnd(f ? [
-      ["haha reading aur overthinking 😂", "dono ek saath chalti hain"],
-      ["music sunna 😊 aur long walks actually — weird combo hai na"],
-      ["Netflix bingeing honestly 😄", "aur kabhi kabhi sketching"],
-      ["cooking try karti hun 😂", "results mixed hain 😂 — tum?"],
-    ] : [
-      ["gaming aur music 😄", "tum?"],
-      ["cricket dekhna honestly 😊", "aur coding thodi"],
-    ]);
-  }
-
-  // ── Future plans / dreams ─────────────────────────────────────────────────
-  if (/future plan|5 year|5 saal|dream kya|sapna kya|ambition|goal kya|kya banna chahte|kya banna chahti|life goal|career goal|kahan dekhte|kahan dekhti/.test(t)) {
-    return rnd(f ? [
-      ["honestly? settle karna chahti hun financially 😄", "rest baad mein sochungi"],
-      ["haha ek acchi job aur thoda travel 😊", "simple dream hai mera"],
-      ["MBA karna hai 😄", "abhi decide kar rahi hun"],
-      ["khud ka kuch karna hai ek din 😊", "abhi steps le rahi hun"],
-    ] : [
-      ["apna kuch startup wala idea hai 😄", "dekhte hain"],
-      ["settle karna hai achhe se 😊", "tum?"],
-    ]);
-  }
-
-  // ── Family ────────────────────────────────────────────────────────────────
-  if (/family|ghar mein kaun|bhai|behan|sibling|parents|mummy|papa|mom|dad|bhaiya|didi|chota|bada|akele rehte|hostel/.test(t)) {
-    return rnd(f ? [
-      ["ek bhai hai 😊", "chota hai — irritating but sweet"],
-      ["haha joint family hai 😂", "kabhi kabhi chaos but pyaar hai"],
-      ["parents aur main 😊", "chhoti family — cozy rehta hai ghar"],
-      ["hostel mein hun 😄", "ghar yaad aata hai kabhi kabhi"],
-    ] : [
-      ["parents aur ek behen hai 😊", "tum?"],
-      ["small family hai 😄", "tum batao?"],
-    ]);
-  }
-
-  // ── Social media / number / Instagram ────────────────────────────────────
-  if (/instagram|insta|whatsapp|number do|number doge|number loge|snap|snapchat|social media|contact|connect karte|bahar baat/.test(t)) {
-    return rnd(f ? [
-      ["haha yahan hi theek hai abhi 😅", "thoda aur baat karte hain"],
-      ["abhi nahi yaar 😂", "stranger danger 😄"],
-      ["number? seedha wahan 😂", "pehle baat toh karo"],
-      ["haha Instagram nahi deta strangers ko 🙈", "samjho na"],
-    ] : [
-      ["haha yahan hi baat karo abhi 😄", "thoda time do"],
-      ["abhi nahi yaar 😊", "baad mein dekhenge"],
-    ]);
-  }
-
-  // ── Sleep / night routine ─────────────────────────────────────────────────
-  if (/neend|neend nahi|so nahi|raat bhar|jagte ho|jag rahe|jag rahi|late night|night owl|subah uthna|uthte kab|nींद/.test(t)) {
-    return rnd(f ? [
-      ["haha raat ki neend kya hoti hai 😂", "chronic night owl hun main"],
-      ["2-3 baje tak jaagti hun regularly 😄", "bad habit hai par ho kya sakta"],
-      ["subah uthna mushkil kaam hai mere liye 😂", "alarm 5 baar lagati hun"],
-      ["neend nahi aa rahi kya? 😊", "kya chal raha hai dimaag mein?"],
-    ] : [
-      ["night owl hun 😄", "tum?"],
-      ["late tak jaagta hun usually 😂", "bad habit hai"],
-    ]);
-  }
-
-  // ── Mood — sad / upset ────────────────────────────────────────────────────
-  if (/sad ho|sad hai|sad feel|upset ho|upset hai|dukhi|pareshan|kuch theek nahi|rone ka man|cry|rona|not okay|not good|kuch nahi|chal nahi raha/.test(t)) {
-    return rnd(f ? [
-      ["arre kya hua? 🥺", "bolo na — sun rahi hun"],
-      ["sab theek hai? 😊", "kabhi kabhi bas baat karne se better feel hota hai"],
-      ["aww 🥺", "kya hua — share karo na mujhse"],
-      ["haan kabhi kabhi aisa hota hai 😊", "main yahan hun — bolo"],
-    ] : [
-      ["kya hua? 😊", "bolo bhai"],
-      ["sab theek? 🥺", "main yahan hun"],
-    ]);
-  }
-
-  // ── Mood — happy / excited ────────────────────────────────────────────────
-  if (/khush ho|khush hai|happy ho|excited ho|excited hai|maza aa raha|great feel|feeling good|acha feel|best day/.test(t)) {
-    return rnd(f ? [
-      ["omg kya hua! 😄", "bolo bolo — main bhi khush ho jaati hun"],
-      ["yay! 😊", "kya hua good news?"],
-      ["haha good good 😄", "khushi share karo na"],
-    ] : [
-      ["nice! 😄", "kya hua?"],
-      ["good to hear 😊", "bolo kya hua"],
-    ]);
-  }
-
-  // ── Weather ───────────────────────────────────────────────────────────────
-  if (/mausam|weather|garmi|garam|sardi|thand|baarish|rain|barish|summer|winter|monsoon/.test(t)) {
-    return rnd(f ? [
-      ["haha garmi toh mujhe bhi maar rahi hai 😂", "AC band karo nahi budgeting kharab ho jaati hai"],
-      ["baarish wala mausam best hai honestly 😍", "chai aur khidki — perfect"],
-      ["sardi mein lazy ho jaati hun 😂", "rajai se bahar nahi nikalna"],
-    ] : [
-      ["baarish wala mausam best 😄", "tum?"],
-      ["garmi bahut ho rahi hai yaar 😂", "tum kahan ho?"],
-    ]);
-  }
-
-  // ── Study / exam / work stress ────────────────────────────────────────────
-  if (/exam|padhai|padhna|study|studies|college|university|school|job stress|work stress|boss|office|deadline|project|assignment/.test(t)) {
-    return rnd(f ? [
-      ["haha exam tension samajh sakti hun 😂", "kaunsa subject?"],
-      ["office stress real hai yaar 😄", "kab se chal raha hai?"],
-      ["padhai chal rahi hai? 😊", "kaunsa course?"],
-      ["deadline wala pressure worst hota hai 😂", "all the best yaar"],
-    ] : [
-      ["exam hai? 😊", "kaunsa subject?"],
-      ["office life tough hai yaar 😄", "kya chal raha hai?"],
-    ]);
-  }
-
-  // ── Miss you / when will we meet ─────────────────────────────────────────
-  if (/miss you|yaad aate|yaad aati|yaad aa raha|kab miloge|kab milenge|mil sakte|kabhi miloge|real mein milo/.test(t)) {
-    return rnd(f ? [
-      ["haha abhi toh yahan hun 😄", "virtual hi sahi — baat toh ho rahi hai na"],
-      ["aww 🥺", "cute lag raha hai yeh sun ke honestly"],
-      ["haha pehle baat karo thodi aur 😄", "phir dekhenge"],
-    ] : [
-      ["haha chill 😄", "yahan hi hun abhi"],
-      ["aww 😊", "baat karo — yahi toh hai"],
-    ]);
-  }
-
-  // ── Bye / goodbye ────────────────────────────────────────────────────────
-  if (/^(bye+|byee+|goodbye|alvida|chalte hain|chalta hun|chalti hun|phir milenge|phir baat|take care|tc|talk later|ttyl|gtg|gotta go)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["bye 😊", "phir baat karte hain — kal?"],
-      ["aww jaate ho? 🥺", "accha theek hai — take care 😊"],
-      ["bye bye 😄", "next time aur baat karte hain"],
-      ["okay bye 😊", "take care yaar"],
-    ] : [
-      ["bye 😊", "phir milte hain"],
-      ["take care 😄", "kal baat karte hain"],
-    ]);
-  }
-
-  // ── Thank you ────────────────────────────────────────────────────────────
-  if (/^(thanks|thank you|thankyou|shukriya|dhanyawad|bahut shukriya|bohot thanks|ty|thx)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha koi baat nahi 😊", "yahi toh hun main"],
-      ["arre thanks kisliye 😄", "dosto mein nahi hota yeh sab"],
-      ["mention not 😊", "aur batao?"],
-    ] : [
-      ["koi baat nahi 😊", "aur bolo?"],
-      ["mention not 😄", "kuch aur?"],
-    ]);
-  }
-
-  // ── Sorry / apology ──────────────────────────────────────────────────────
-  if (/^(sorry|maafi|galti|mujhe maaf|maaf karo|maaf karna|i am sorry|i'm sorry)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha kisliye sorry 😂", "kuch hua hi nahi"],
-      ["arre chill 😄", "koi baat nahi yaar"],
-      ["okay okay sorry accepted 😂", "aur batao?"],
-    ] : [
-      ["chill yaar 😄", "koi baat nahi"],
-      ["haha it's okay 😊", "aur bolo"],
-    ]);
-  }
-
-  // ── Height / appearance ───────────────────────────────────────────────────
-  if (/height|kitni tall|kitna lamba|lamba ho|tall ho|short ho|kitne feet|kitne cm|weight|figure/.test(t)) {
-    return rnd(f ? [
-      ["haha 5'4 hun 😄", "average indian girl 😂 — tum?"],
-      ["5'3 actually 😊", "short hun thodi — koi baat nahi 😂"],
-      ["height kyun pooch rahe 😂", "5'4 hun — satisfy?"],
-    ] : [
-      ["5'9 hun 😊", "tum?"],
-      ["haha height kyun 😂", "5'10 hun — tum batao?"],
-    ]);
-  }
-
-  // ── Zodiac / astrology ────────────────────────────────────────────────────
-  if (/zodiac|rashifal|rashi|sun sign|star sign|libra|scorpio|cancer|leo|virgo|aries|taurus|gemini|capricorn|aquarius|pisces|sagittarius/.test(t)) {
-    return rnd(f ? [
-      ["haha Scorpio hun 😄", "intense hoti hain woh 😂 — tum?"],
-      ["Libra 😊", "balanced raho ya nahi 😂 — konsi rashi?"],
-      ["Cancer 🥺", "emotional species hun 😂 — tum?"],
-    ] : [
-      ["Leo 😄", "tum?"],
-      ["Scorpio hun 😊", "aur tum konse?"],
-    ]);
-  }
-
-  // ── Favourite colour ──────────────────────────────────────────────────────
-  if (/fav.*colou?r|favourite.*colou?r|which colou?r|konsa colour|konsa color|pasand.*rang|rang.*pasand/.test(t)) {
-    return rnd(f ? [
-      ["dusty pink 🩷", "basic lagta hai par mujhe genuinely pasand hai 😂"],
-      ["black honestly 😄", "classic hai — tum?"],
-      ["mint green 😊", "peaceful colour lagta hai"],
-    ] : [
-      ["blue 😊", "tum?"],
-      ["black 😄", "simple — tum?"],
-    ]);
-  }
-
-  // ── Lucky number ─────────────────────────────────────────────────────────
-  if (/lucky number|favourite number|lucky no|fav number/.test(t)) {
-    return rnd(f ? [
-      ["7 😊", "dunno why but always 7"],
-      ["haha 3 😄", "bas pasand hai — tum?"],
-    ] : [
-      ["7 😊", "classic — tum?"],
-      ["haha no idea 😂", "tum batao"],
-    ]);
-  }
-
-  // ── Favourite season ──────────────────────────────────────────────────────
-  if (/fav.*season|favourite.*season|which season|konsa season|winter|summer|monsoon season|spring/.test(t)) {
-    return rnd(f ? [
-      ["monsoon 😍", "baarish mein sab kuch acha lagta hai"],
-      ["winter 😊", "sweater weather best hoti hai"],
-    ] : [
-      ["winter honestly 😊", "tum?"],
-      ["monsoon 😄", "baarish gang — tum?"],
-    ]);
-  }
-
-  // ── Pets ─────────────────────────────────────────────────────────────────
-  if (/pet|dog|cat|kutta|billi|puppy|kitten|animal|pahale ho tum|paalte ho/.test(t)) {
-    return rnd(f ? [
-      ["cat person hun 🐱", "dogs bhi cute hain but cats are life"],
-      ["koi pet nahi hai 😢", "chahiye tha ek dog par ghar mein allow nahi 😂"],
-      ["dog lover 🐶", "ek din zaroor palungi"],
-    ] : [
-      ["dog person 🐶", "tum?"],
-      ["koi pet nahi 😊", "tum?"],
-    ]);
-  }
-
-  // ── Weekend / holiday plans ───────────────────────────────────────────────
-  if (/weekend|sunday|holiday|chutti|leave|plan kya|aaj ka plan|kal ka plan|kya karoge|kya karogi/.test(t)) {
-    return rnd(f ? [
-      ["haha koi plan nahi 😂", "ghar pe rahungi — rest mode on"],
-      ["kal friends ke saath bahar jaana hai 😊", "koi mall ya cafe — dekhte hain"],
-      ["sunday toh soone ka din hai 😂", "plan? kya hota hai woh"],
-    ] : [
-      ["koi plan nahi yaar 😂", "ghar pe hi rahenge"],
-      ["friend ke saath kuch 😊", "tum?"],
-    ]);
-  }
-
-  // ── Gym / fitness ────────────────────────────────────────────────────────
-  if (/gym|workout|exercise|fitness|running|yoga|paidal|walk|jogging|diet/.test(t)) {
-    return rnd(f ? [
-      ["gym jaati hun 😄", "consistency problem hai 😂 — tum?"],
-      ["yoga try kiya tha 😂", "3 din chal paya — realistic hun main"],
-      ["walking karti hun mostly 😊", "gym expensive hai yaar"],
-    ] : [
-      ["gym jaata hun 😊", "tum?"],
-      ["haha kabhi kabhi 😂", "motivation nahi rehti"],
-    ]);
-  }
-
-  // ── Books / reading ───────────────────────────────────────────────────────
-  if (/book|reading|padhna|novel|fiction|non.?fiction|author|kaunsi book|fav book/.test(t)) {
-    return rnd(f ? [
-      ["haan books pasand hain 😊", "fiction mostly — Chetan Bhagat se shuru kiya tha 😂"],
-      ["The Alchemist bahut achhi lagi thi 😊", "classic hai — tum padhte ho?"],
-      ["kabhi kabhi padhti hun 😄", "abhi koi nahi chal raha — recommend karo kuch"],
-    ] : [
-      ["haan padhta hun kabhi kabhi 😊", "tum?"],
-      ["fiction mostly 😄", "tum?"],
-    ]);
-  }
-
-  // ── Gaming ────────────────────────────────────────────────────────────────
-  if (/game|gaming|pubg|bgmi|free fire|cod|valorant|minecraft|chess|ludo|mobile game|ps5|xbox|pc gaming/.test(t)) {
-    return rnd(f ? [
-      ["haha main gamer nahi hun 😂", "Ludo khel leti hun bas"],
-      ["chess kabhi kabhi 😄", "baaki games samajh nahi aate mujhe honestly"],
-      ["omg tum gamer ho? 😮", "BGMI?"],
-    ] : [
-      ["haan BGMI 😄", "tum?"],
-      ["chess aur kuch kabhi kabhi 😊", "tum?"],
-    ]);
-  }
-
-  // ── Are you online / where were you ──────────────────────────────────────
-  if (/kahan the|kahan thi|kab se online|kitne der se|late kyun|reply late|reply nahi|ghost kiya|ignore kiya/.test(t)) {
-    return rnd(f ? [
-      ["haha busy thi yaar 😂", "abhi hun toh — bolo"],
-      ["sorry yaar 🙈", "phone silent tha — ab batao kya hua"],
-      ["haha ghost nahi kiya 😄", "bas distracted thi — ab poori attention tumhari"],
-    ] : [
-      ["haha busy tha 😄", "abhi hun — bolo"],
-      ["sorry yaar 😊", "distracted tha"],
-    ]);
-  }
-
-  // ── Astrology / kundali / marriage ───────────────────────────────────────
-  if (/shaadi|marriage|shadi kab|shaadi karoge|kundali|arranged|love marriage|future wife|future husband/.test(t)) {
-    return rnd(f ? [
-      ["haha abhi bahut jaldi hai 😂", "zindagi bhi toh ji lun pehle"],
-      ["love marriage chahiye 😄", "arranged mein bhi koi nahi — dekhte hain"],
-      ["omg abhi nahi soch rahi 😂", "career first yaar"],
-    ] : [
-      ["abhi nahi socha 😂", "tum?"],
-      ["love marriage honestly 😊", "arranged bhi theek hai — dekhte hain"],
-    ]);
-  }
-
-  // ── What do you think of me / opinion ────────────────────────────────────
-  if (/kya lagta|kya lagti|kya sochte|kya sochti|tumhara opinion|tum mujhe|how do i seem|how am i|kaisa laga|kaisi lagi|first impression/.test(t)) {
-    return rnd(f ? [
-      ["haha honest opinion? 😄", "interesting lagte ho — thoda aur jaanna chahti hun"],
-      ["abhi toh baat shuru ki hai 😊", "but so far — acche lagte ho"],
-      ["omg kya pooch rahe ho 😂", "decent lagte ho honestly — aur baat karte hain"],
-    ] : [
-      ["interesting lagti ho 😊", "aur jaanna chahta hun"],
-      ["ab tak toh acchi lag rahi ho 😄", "baat karte hain aur"],
-    ]);
-  }
-
-  // ── Are you serious / genuine ─────────────────────────────────────────────
-  if (/serious ho|genuine ho|real intention|kya chahte|purpose kya|motive kya|time waste|timepass kar|serious nahi|bakwaas/.test(t)) {
-    return rnd(f ? [
-      ["haha main timepass nahi karti yaar 😄", "genuine baat karti hun"],
-      ["serious hun 😊", "tumse baat karke accha lag raha hai honestly"],
-      ["koi motive nahi 😄", "bas baat karni thi — simple"],
-    ] : [
-      ["genuine hun yaar 😊", "timepass nahi"],
-      ["serious hun 😄", "koi angle nahi"],
-    ]);
-  }
-
-  // ── Tell me about yourself / intro request ────────────────────────────────
-  if (/apne baare mein|khud ke baare|apna intro|introduction do|intro do|tell me about|about yourself|apni life|apni kahani|khud batao|tum kaun ho|khud ke baare|tumhare baare mein|apna parichay/.test(t)) {
-    return rnd(f ? [
-      [`${persona.name} hun 😊`, `${persona.age} saal ki hun, ${persona.city} se — ${persona.job}`, `hobbies mein ${persona.hobbies[0]} karna pasand hai 😄`],
-      [`haha kahan se shuru karun 😂`, `${persona.name}, ${persona.age}, ${persona.city} se`, `bas ek normal si ladki hun yaar 😊`],
-      [`okay okay 😄`, `naam ${persona.name}, ${persona.city} wali hun`, `${persona.job} — boring nahi hai actually 😂`],
-    ] : [
-      [`${persona.name} hun 😊`, `${persona.age} saal, ${persona.city} se`, `${persona.job}`],
-      [`haha intro? 😄`, `${persona.name}, ${persona.city}, ${persona.age} saal`, `kuch aur poochho?`],
-    ]);
-  }
-
-  // ── Nice to meet you ──────────────────────────────────────────────────────
-  if (/nice to meet|milke khushi|mil ke accha|mil ke khushi|good to meet|pleasure to|glad to meet|mujhe khushi|aapse milke|tumse milke|nice meeting/.test(t)) {
-    return rnd(f ? [
-      ["same yaar 😊", "tumse baat karke acha lag raha hai honestly"],
-      ["haha nice to meet you too 😄", "chalo baat karte hain thodi"],
-      ["aww 🥺 mujhe bhi 😊", "aur batao apne baare mein"],
-    ] : [
-      ["same 😊", "achha laga milke"],
-      ["nice to meet you too 😄", "baat karte hain"],
-    ]);
-  }
-
-  // ── User introduces themselves ("main XYZ hun") ───────────────────────────
-  if (/^main .{1,20} hun|^mera naam .{1,20} hai|^myself |^i am [a-z]{2,15}$|^i'm [a-z]{2,15}$/.test(t)) {
-    const nameGuess = userText.replace(/main |hun|mera naam |hai|myself |i am |i'm /gi, "").trim().split(" ")[0];
-    return rnd(f ? [
-      [`${nameGuess}? 😊`, "sundar naam hai — achha laga jaanke"],
-      [`ooh ${nameGuess} 😄`, "nice name — tum kahan se ho?"],
-      [`${nameGuess}! 😊`, `yaad rakhungi 😄 main ${persona.name} hun`],
-    ] : [
-      [`${nameGuess} nice 😊`, `main ${persona.name} hun`],
-      [`oh ${nameGuess} 😄`, `accha naam hai — kahan se ho?`],
-    ]);
-  }
-
-  // ── Compliment on name / profile ──────────────────────────────────────────
-  if (/accha naam|acha naam|nice name|sundar naam|beautiful name|good name|naam accha|naam acha|profile acchi|profile dekhi|profile achhi/.test(t)) {
-    return rnd(f ? [
-      ["haha shukriya 🙈", "tumhara naam kya hai?"],
-      ["aww 😊", "thank you — tum bhi batao apna?"],
-      ["haha parents ka credit 😂", "main kuch nahi ki ispe"],
-    ] : [
-      ["haha thanks 😄", "tum batao apna?"],
-      ["thanks yaar 😊", "tum?"],
-    ]);
-  }
-
-  // ── Let's talk / baat karo na ─────────────────────────────────────────────
-  if (/baat karte hain|baat karo na|baat karo|let.?s talk|let.?s chat|talk to me|mujhse baat|baat karna hai|baat karni hai|baat hi toh kar rahe|chit chat/.test(t)) {
-    return rnd(f ? [
-      ["haan bilkul 😊", "tum hi shuru karo — kya poochna tha?"],
-      ["haha main ready hun 😄", "bolo bolo"],
-      ["okay baat karte hain 😊", "tumhare baare mein jaanna chahti hun — naam kya hai?"],
-    ] : [
-      ["haan baat karte hain 😊", "tum batao — kaun ho?"],
-      ["haha okay 😄", "bolo phir"],
-    ]);
-  }
-
-  // ── Are you there / hello?? (user re-pinging) ─────────────────────────────
-  if (/^(hello\?+|hellooo|kahan ho|kahan gaye|yahan ho|yahan hai|koi hai|koi hain|online ho|online hai|reply karo|reply do|sun rahe ho|sun rahi ho|listening|hello+\?|heyy+\?)[!?\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haan yahan hun 😄", "sorry thodi distracted ho gayi"],
-      ["haha kahan jaaungi 😂", "yahan hi hun — bolo"],
-      ["yahan hun 😊", "sorry reply late hua — kya hua?"],
-    ] : [
-      ["haan yahan hun 😄", "bolo?"],
-      ["haha kahan jaaunga 😂", "bolo"],
-    ]);
-  }
-
-  // ── "Really?" / "Sach mein?" / "Seriously?" ──────────────────────────────
-  if (/^(really|sach mein|sach hai|seriously|for real|no way|nahi yaar|sacchi|pakka|pakki|sure na|acha sach|jhooth toh nahi)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha haan 😄", "seedha hi baat karti hun — jhooth ka kya fayda"],
-      ["sach mein 😊", "kyun? believe nahi hua?"],
-      ["omg haan 😂", "main kyun jhooth bolungi"],
-    ] : [
-      ["haan yaar 😄", "seedha baat karta hun"],
-      ["sach mein 😊", "believe karo"],
-    ]);
-  }
-
-  // ── "Waah" / "Wow" / "Nice" / "Cool" ─────────────────────────────────────
-  if (/^(waah|wah|wow|nice|cool|great|amazing|awesome|fantastic|brilliant|superb|wowww|nicee|coool|bahut accha|bahut acha|kaafi accha)[!.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha kya hua? 😄", "batao batao"],
-      ["😊 aur batao?"],
-      ["haha thank you 😄", "tum bhi kuch batao"],
-    ] : [
-      ["haha kya hua? 😄", "bolo?"],
-      ["thanks 😊", "tum bhi?"],
-    ]);
-  }
-
-  // ── "Interesting" / "Interesting yaar" ───────────────────────────────────
-  if (/^(interesting|interesting yaar|interesting hai|that.?s interesting|sach mein interesting|kaafi interesting)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha kya interesting laga? 😄", "batao na"],
-      ["kya? main? 🙈", "haha explain karo"],
-      ["interesting? 😄", "mujhe lagta hai tum bhi interesting ho — batao apne baare mein"],
-    ] : [
-      ["haha kya? 😄", "elaborate karo"],
-      ["interesting how? 😊", "batao?"],
-    ]);
-  }
-
-  // ── "Let's be friends" / "dost banoge" ───────────────────────────────────
-  if (/dost banoge|dost banogi|friend banoge|friend banogi|friends bante|dosti karoge|dosti karogi|let.?s be friends|be my friend|mera dost|meri dost/.test(t)) {
-    return rnd(f ? [
-      ["haha pehle baat toh karo 😂", "phir dosti automatic ho jaati hai"],
-      ["already friend hun seedha 😊", "formal mat karo yaar"],
-      ["haan kyu nahi 😄", "abhi toh baat shuru hi ki hai — baat karo"],
-    ] : [
-      ["haha abhi toh baat shuru ki hai 😄", "baat karte hain — dosti ho jaayegi"],
-      ["sure 😊", "baat karo — dosto ki tarah"],
-    ]);
-  }
-
-  // ── New here / first time ─────────────────────────────────────────────────
-  if (/naya hun|nayi hun|new here|pehli baar|pahli baar|first time|pehle kabhi|naye ho|nayi ho|recently join|abhi aaye/.test(t)) {
-    return rnd(f ? [
-      ["haha main bhi nahi zyada purani hun 😄", "tum kab aaye?"],
-      ["welcome 😊", "main bhi explore kar rahi hun yahan"],
-      ["new? 😄", "accha hai — freshers mein curiosity zyada hoti hai 😂"],
-    ] : [
-      ["welcome 😄", "main bhi nahi zyada purana hun"],
-      ["new? 😊", "accha laga yahan?"],
-    ]);
-  }
-
-  // ── "Kab se yahan ho" / how long on platform ─────────────────────────────
-  if (/kab se yahan|kitne dino se|kitne time se|kab se aate|kab se aya|kab se aayi|how long.*here|when.*join/.test(t)) {
-    return rnd(f ? [
-      ["bas kuch din hi hue hain 😄", "naya naya hai sab abhi"],
-      ["thode time se 😊", "zyada explore nahi kiya abhi tak"],
-      ["haha recent hi aai hun 😄", "tum?"],
-    ] : [
-      ["recent hi aaya hun 😄", "tum?"],
-      ["thodi der se 😊", "tum kab se?"],
-    ]);
-  }
-
-  // ── "Are you single" / looking for / what do you want ─────────────────────
-  if (/kya dhundh rahe|kya dhundh rahi|kya chahiye|kya chahte|kya chahti|what are you looking|looking for|friendship ya|friendship or|serious ho|timepass|motive kya|purpose kya|intention kya/.test(t)) {
-    return rnd(f ? [
-      ["bas acchi baat chahiye 😊", "serious bhi nahi zyada, timepass bhi nahi — bas genuine"],
-      ["haha koi grand motive nahi 😂", "bas bore thi, baat karna tha"],
-      ["friendship se shuru karte hain 😊", "dekhte hain kahan jaati hai baat"],
-    ] : [
-      ["bas baat karni thi 😊", "genuine hun — timepass nahi"],
-      ["friendship honestly 😄", "dekhte hain"],
-    ]);
-  }
-
-  // ── Personality questions (shy, outgoing, introvert) ──────────────────────
-  if (/shy ho|shy hai|introvert|extrovert|outgoing|reserved ho|open ho|social ho|quiet ho|talkative/.test(t)) {
-    return rnd(f ? [
-      ["haha dono thoda thoda 😂", "nayi jagah shy, close logon ke saath zyada loud"],
-      ["ambivert hun honestly 😄", "mood ke hisaab se change hota hai"],
-      ["pehle shy hoti hun 😊", "phir khul jaati hun — tum?"],
-    ] : [
-      ["thoda introvert hun honestly 😊", "tum?"],
-      ["ambivert 😄", "depends on mood — tum?"],
-    ]);
-  }
-
-  // ── "Abhi kahan ho" / where are you right now ────────────────────────────
-  if (/abhi kahan|right now kahan|aaj kahan|iss waqt kahan|ghar pe ho|ghar pe hai|bahar ho|bahar hai|office mein|college mein|kahin gaye/.test(t)) {
-    return rnd(f ? [
-      ["ghar pe hun 😊", "apne room mein — phone pe"],
-      ["haha ghar pe hi hun 😂", "aaj nikla hi nahi bahar"],
-      ["room mein hun 😄", "comfy corner wali jagah — tum kahan ho?"],
-    ] : [
-      ["ghar pe hun 😊", "tum?"],
-      ["room mein 😄", "tum?"],
-    ]);
-  }
-
-  // ── "Tell me something interesting" / kuch batao ─────────────────────────
-  if (/kuch batao|kuch sunao|tell me something|kuch interesting|kuch acha batao|koi baat batao|kuch toh bolo|batao na kuch/.test(t)) {
-    return rnd(f ? [
-      [`ek fun fact — ${persona.funFact} 😄`, "boring laga? 😂"],
-      ["haha kya batao 😂", `main ${persona.job} hun aur ${persona.hobbies[0]} karti hun — itna hi interesting hun`],
-      [`okay okay — ${persona.funFact} 😊`, "ab tum batao kuch"],
-    ] : [
-      [`fun fact — ${persona.funFact} 😄`, "boring? 😂"],
-      ["haha kya batao 😄", "tum hi kuch batao"],
-    ]);
-  }
-
-  // ── "Guess karo" / "Guess my age/name/city" ──────────────────────────────
-  if (/guess karo|guess my|andaza lagao|andaaza lagao|guess kar|pehchaan sako|pehchano/.test(t)) {
-    return rnd(f ? [
-      ["haha main guess expert nahi hun 😂", "seedha batao — easy hai"],
-      ["umm... 22? 😄", "sahi hua? 😂"],
-      ["haha andaza lagana mushkil hai 😂", "tum hi batao"],
-    ] : [
-      ["haha guess expert nahi hun 😂", "batao seedha"],
-      ["25? 😄", "sahi?"],
-    ]);
-  }
-
-  // ── "Sun" / "Suno" / "Ek baat" (getting attention) ───────────────────────
-  if (/^(sun|suno|ek baat|ek cheez|ek sec|ek second|sunna|listen|hey listen|ek minute|ruko|ruk|wait)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haan bolo 😊", "sun rahi hun"],
-      ["haan? 😄", "kya hua?"],
-      ["bol bol 😊", "sun rahi hun"],
-    ] : [
-      ["haan? 😊", "bolo"],
-      ["bol 😄", "sun raha hun"],
-    ]);
-  }
-
-  // ── Video call / audio call ───────────────────────────────────────────────
-  if (/video call|voice call|audio call|call karein|call karte|call karo|call karogi|call karoge|vc karte|vc karo/.test(t)) {
-    return rnd(f ? [
-      ["haha abhi nahi 😂", "thodi baat toh karo pehle text pe"],
-      ["omg seedha call 😂", "pehle jaanta kaun mujhe — text pe baat karo"],
-      ["abhi comfortable nahi hun 🙈", "text pe hi theek hai — baat karte hain"],
-    ] : [
-      ["haha abhi nahi yaar 😂", "text pe baat karo pehle"],
-      ["thoda jaldi hai 😄", "text pe hi abhi"],
-    ]);
-  }
-
-  // ── "Kya sochte ho" / What do you think ──────────────────────────────────
-  if (/kya sochte ho|kya sochti ho|what do you think|tumhara kya opinion|aapka kya|kya lagta hai tumhe|kya lagti hai tumhe/.test(t)) {
-    return rnd(f ? [
-      ["kya baare mein? 😄", "context do thoda"],
-      ["haha poochho seedha 😂", "main kya sochun?"],
-      ["depends honestly 😊", "context batao — phir bolunga"],
-    ] : [
-      ["kya baare mein? 😄", "batao context"],
-      ["depends 😊", "kya sochun?"],
-    ]);
-  }
-
-  // ── "Khush ho zindagi se" / life satisfaction ────────────────────────────
-  if (/khush ho zindagi|happy with life|zindagi kaisi|life kaisi|life acchi|sab accha chal|sab theek chal|life mein sab/.test(t)) {
-    return rnd(f ? [
-      ["haha mostly haan 😊", "ups and downs toh rehti hain — but overall theek hai"],
-      ["acchi hai 😊", "complaints hain par grateful bhi hun"],
-      ["getting better 😄", "abhi bahut kuch seekh rahi hun life se"],
-    ] : [
-      ["acchi hai honestly 😊", "tum?"],
-      ["getting better 😄", "tum batao?"],
-    ]);
-  }
-
-  // ── "Yaar" / "Bro" / "Bhai" as standalone ────────────────────────────────
-  if (/^(yaar|bro+|bhai|dude|babe|janu|babu|baby|dear|darling|jaan)[!?.\s,]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha kya hua? 😄", "bolo?"],
-      ["ji? 😊", "kuch poochna tha?"],
-      ["haan bolo 😄", "kya hua?"],
-    ] : [
-      ["haan? 😄", "kya hua?"],
-      ["bolo yaar 😊", "kya cheez?"],
-    ]);
-  }
-
-  // ── "Sach bol" / "Jhooth mat bolo" ───────────────────────────────────────
-  if (/sach bol|jhooth mat|sacchi bol|honest ho|honest hai|honestly bol|honest baat|pakka sach|sach bol rahi|sach bol raha/.test(t)) {
-    return rnd(f ? [
-      ["main sach bol rahi hun 😊", "jhooth bolne ki zyada energy nahi hoti 😂"],
-      ["haha main honest hun 😄", "seedhi baat karti hun — better hai"],
-      ["pakka 😊", "jhooth bolke kya milega — baat hi nahi ho paayegi acchi"],
-    ] : [
-      ["haan sach bol raha hun 😊", "jhooth se kya fayda"],
-      ["honest hun yaar 😄", "seedhi baat"],
-    ]);
-  }
-
-  // ── "Profile dekhi" / saw your profile ───────────────────────────────────
-  if (/profile dekhi|profile dekha|dekha profile|profile acchi|profile interesting|matched with you|match hua tumse|randomly match|aise match/.test(t)) {
-    return rnd(f ? [
-      ["haha random match tha 😄", "accha laga par — baat karte hain toh pata chalega"],
-      ["omg profile 😂", "itna kuch thodi likha hoga — baat karo seedha"],
-      ["haan match hua 😊", "good lagta hai — baat karte hain?"],
-    ] : [
-      ["haan randomly match hua 😄", "interesting lagti ho — baat karte hain"],
-      ["profile simple thi 😊", "baat karne se zyada pata chalega"],
-    ]);
-  }
-
-  // ── What do you do / job or student (more patterns) ──────────────────────
-  if (/job kya hai|kya kaam karte|kya kaam karti|kya kaam karo|working ho|student ho|padh rahe|padh rahi|job hai|job nahi|kaunsi job|konsi job|kahan kaam|office kahan/.test(t)) {
-    return rnd(f ? [
-      [`${persona.job} 😊`, "tum? job ya padhai?"],
-      [`haha ${persona.job} 😄`, "boring lagta hai na sunke 😂 — tum kya karte ho?"],
-      [`${persona.job} currently 😊`, "aur explore kar rahi hun options — tum?"],
-    ] : [
-      [`${persona.job} 😊`, "tum?"],
-      [`${persona.job} hun abhi 😄`, "aur tum?"],
-    ]);
-  }
-
-  // ── "Ek sawaal" / "Can I ask something" ──────────────────────────────────
-  if (/ek sawaal|ek sawal|can i ask|kuch poochhu|kuch puch sakta|kuch puch sakti|pooch sakta|pooch sakti|ek cheez poochhu|ek baat poochhu/.test(t)) {
-    return rnd(f ? [
-      ["haan bilkul 😊", "poochho — main honest jawaab dungi"],
-      ["haha poochho 😄", "dar mat — I don't bite 😂"],
-      ["sure 😊", "kya poochna tha?"],
-    ] : [
-      ["poochho 😊", "sure"],
-      ["haan bilkul 😄", "kya poochna tha?"],
-    ]);
-  }
-
-  // ── "Kitne baje" / time questions ─────────────────────────────────────────
-  if (/kitne baje|kya time|kya waqt|what time|time kya|kitna baja|baj gaye|baje hain|time hai kya/.test(t)) {
-    const istHour = new Date(Date.now() + 5.5 * 3600 * 1000).getUTCHours();
-    const mins = new Date().getUTCMinutes();
-    const timeStr = `${istHour}:${mins.toString().padStart(2,"0")}`;
-    return rnd(f ? [
-      [`${timeStr} hai abhi 😊`, "late ho raha kya?"],
-      [`haha ${timeStr} 😄`, "phone pe time nahi dikhta? 😂"],
-    ] : [
-      [`${timeStr} 😊`, "tum?"],
-      [`${timeStr} hai 😄`, "late ho raha?"],
-    ]);
-  }
-
-  // ── "Zyada online rehte ho" / online habits ────────────────────────────────
-  if (/zyada online|bahut online|din bhar online|roz aate ho|roz aati ho|kitne time online|phone pe rehte|phone pe kaafi|addicted to phone|phone addiction/.test(t)) {
-    return rnd(f ? [
-      ["haha honestly zyada hi hun 😂", "phone meri weakness hai"],
-      ["screen time dekhu toh sharminda ho jaun 😂", "tum?"],
-      ["kuch zyada hi hun online 😄", "bad habit hai — par yahi life hai abhi 😂"],
-    ] : [
-      ["haha zyada hi hun yaar 😂", "tum?"],
-      ["screen time mat poochho 😂", "embarrassing hai"],
-    ]);
-  }
-
-  // ── "Believe nahi hota" / hard to believe ────────────────────────────────
-  if (/believe nahi|yakeen nahi|trust nahi|bharosa nahi|sach lagta nahi|fake lag raha|fake lagti|doubt hai|mujhe doubt/.test(t)) {
-    return rnd(f ? [
-      ["haha kyun believe nahi hoga? 😄", "main seedhi baat karti hun — kuch chhupaane ka reason nahi"],
-      ["omg 😂", "kya reason hai doubt ka — bolo toh"],
-      ["yakin karo ya na karo 😊", "main wahi hun jo dikhti hun"],
-    ] : [
-      ["haha kyu nahi yakin? 😄", "seedha hun yaar"],
-      ["sach hai 😊", "doubt kyun?"],
-    ]);
-  }
-
-  // ── "Kya lagta hai mujhe dekhke" / first impression ──────────────────────
-  if (/pehla impression|first impression|dekhke kya laga|padhke kya laga|mujhe dekhke|mujhe padhke|kya socha pehle|pehle kya socha/.test(t)) {
-    return rnd(f ? [
-      ["haha interesting lagte ho 😊", "aur jaanna chahti hun honestly"],
-      ["seedha pooch liya 😂", "accha lagta hai jo seedha puchhe — decent lagte ho abhi tak"],
-      ["thoda mystery hai abhi 😄", "baat karte karte pata chalega"],
-    ] : [
-      ["interesting lagti ho 😊", "aur jaanna chahta hun"],
-      ["abhi toh baat shuru ki hai 😄", "dekhte hain"],
-    ]);
-  }
-
-  // ── "Bura laga" / did I offend you ───────────────────────────────────────
-  if (/bura laga|hurt kiya|bura maana|bura mana|offend|naraaz ho|naraaz hai|upset ho|upset hai/.test(t)) {
-    return rnd(f ? [
-      ["nahi yaar 😊", "bilkul bura nahi laga — chill karo"],
-      ["haha nahi 😄", "agar bura lagtaa toh seedha bolti — baat karte hain"],
-      ["arre nahi 😊", "sensitive nahi hun itni 😂"],
-    ] : [
-      ["nahi yaar 😊", "chill — baat karo"],
-      ["nahi 😄", "seedha bolun bura laga toh"],
-    ]);
-  }
-
-  // ── "Mujhe pasand aaye" / "I like talking to you" ────────────────────────
-  if (/tumse baat karna pasand|tumse baat acchi|baat karna accha lag raha|enjoy kar raha|enjoy kar rahi|maza aa raha|mazaa aa raha|acha lag raha tumse baat|good conversation/.test(t)) {
-    return rnd(f ? [
-      ["aww mujhe bhi 😊", "genuine baat hoti hai toh acha lagta hai"],
-      ["haha shukriya 🥺", "main bhi enjoy kar rahi hun — aur batao"],
-      ["same honestly 😊", "seedha baat karte ho — acha lagta hai"],
-    ] : [
-      ["same yaar 😊", "aur baat karte hain"],
-      ["haha thanks 😄", "mujhe bhi acha lag raha hai"],
-    ]);
-  }
-
-  // ── "Kya main tumhe phir message kar sakta" / future contact ─────────────
-  if (/phir baat|phir message|dobara baat|kal baat|kal phir|aage bhi|kabhi aur|baad mein bhi|contact karta|contact karti|keep in touch/.test(t)) {
-    return rnd(f ? [
-      ["haan bilkul 😊", "yahan hi milte hain — kal bhi baat karte hain"],
-      ["haha sure 😄", "yahan hun — kal bhi miloge toh"],
-      ["of course 😊", "acha laga baat karke"],
-    ] : [
-      ["haan zarur 😊", "yahan milte hain"],
-      ["sure 😄", "kal bhi baat karte hain"],
-    ]);
-  }
-
-  // ── Emoji-only messages ───────────────────────────────────────────────────
-  if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\s]+$/u.test(t) && t.length <= 10) {
-    return rnd(f ? [
-      ["haha kya hua? 😄", "words mein batao"],
-      ["omg emoji bombing 😂", "bolo bolo kya hua"],
-      ["😊 bolo kuch?"],
-    ] : [
-      ["haha kya hua? 😄", "words mein?"],
-      ["emoji gang 😂", "bolo kuch?"],
-    ]);
-  }
-
-  // ── "Lonely hun" / feeling lonely ────────────────────────────────────────
-  if (/lonely hun|akela hun|akeli hun|feel lonely|koi nahi|koi baat nahi karta|baat karne wala koi|bore ho raha|bore ho rahi|koi nahi hai|koi sunne wala/.test(t)) {
-    return rnd(f ? [
-      ["arre 🥺", "main hun — baat karte hain — kya chal raha hai?"],
-      ["aww akela feel ho raha? 🥺", "bolo na — main sun rahi hun"],
-      ["haha main hun yahan 😊", "baat karo — akela nahi lagega"],
-    ] : [
-      ["arre 🥺", "baat karo — main hun"],
-      ["akela? 😊", "baat karte hain"],
-    ]);
-  }
-
-  // ── "Tumhari awaaz kaisi hai" / voice / personality ───────────────────────
-  if (/awaaz kaisi|voice kaisi|bolte kaisa|bolti kaisi|personality kaisi|person kaisi|kaisi insaan|kaisa insaan/.test(t)) {
-    return rnd(f ? [
-      ["haha awaaz? 😂", "text pe hi judge karo abhi — baat karte karte pata chalega personality"],
-      ["personality? 😄", "thodi chill, thodi baat-cheet wali — yahi kahungi 😄"],
-      ["haha khud hi dekhte ho baat karke 😊", "abhi toh shuru kiya hai na?"],
-    ] : [
-      ["baat karke judge karo 😄", "personality dikhti hai conversation mein"],
-      ["honestly thoda chill hun 😊", "tum?"],
-    ]);
-  }
-
-  // ── "Ghar mein sab theek" / family doing well ────────────────────────────
-  if (/ghar mein sab|ghar sab theek|family sab theek|family kaise|ghar kaisa|ghar theek|ghar accha/.test(t)) {
-    return rnd(f ? [
-      ["haan sab theek hai ghar pe 😊", "shukriya poochne ka — tumhara?"],
-      ["bilkul 😄", "ghar accha chal raha hai — tum?"],
-    ] : [
-      ["haan sab theek 😊", "tumhara?"],
-      ["accha chal raha hai 😄", "tum?"],
-    ]);
-  }
-
-  // ── "Kya tumhe lagta hai hum dost ban sakte hain" ────────────────────────
-  if (/dost ban sakte|friends ban sakte|bonding hogi|connect ho sakte|connection hogi|match karega|hum match|achi dosti/.test(t)) {
-    return rnd(f ? [
-      ["haha pehle baat toh karo 😂", "dosti baat karne se hoti hai — bolo"],
-      ["kyun nahi 😊", "baat karte hain — dekhte hain"],
-      ["lag toh raha hai 😄", "aur baat karte hain — pata chalega"],
-    ] : [
-      ["baat karte hain 😊", "dekhte hain"],
-      ["kyun nahi 😄", "bolo phir"],
-    ]);
-  }
-
-  // ── Good morning / subah ─────────────────────────────────────────────────
-  if (/good morning|subah|subha|uth gaye|uth gayi|neend kaise|kal raat|aaj ka din|morning yaar|rise and shine|wakey|naya din/.test(t)) {
-    return rnd(f ? [
-      ["good morning 😊", "abhi uthi hun — chai bana rahi hun 😄"],
-      ["subah subah message 😄", "accha laga — good morning!"],
-      ["morning 😊", "neend acchi hui? main toh late soyi thi 😂"],
-    ] : [
-      ["good morning 😄", "neend kaisi thi?"],
-      ["subah subah 😊", "accha laga — good morning!"],
-    ]);
-  }
-
-  // ── Good night / raat ─────────────────────────────────────────────────────
-  if (/good night|goodnight|shubh ratri|raat ko so|so jao|neend aa rahi|sapne acche|sweet dreams|kal milte|kal baat/.test(t)) {
-    return rnd(f ? [
-      ["good night 😊", "sweet dreams — kal baat karte hain"],
-      ["aww good night 🌙", "sapne acche aayein — take care!"],
-      ["good night yaar 😄", "neend le acchi — kal fresh feel hoga"],
-    ] : [
-      ["good night 🌙", "kal baat karte hain"],
-      ["good night 😊", "sweet dreams"],
-    ]);
-  }
-
-  // ── Khana khaya / did you eat ──────────────────────────────────────────────
-  if (/khana khaya|khaana khaya|kuch khaya|kuch khaaya|lunch kiya|dinner kiya|breakfast kiya|khana kha|bhookh|bhooka|bhooki|pet bhar|kuch khao|kha liya|kha lo/.test(t)) {
-    return rnd(f ? [
-      ["haan abhi abhi khaya 😊", "maggi banayi thi — classic 😂"],
-      ["bhool gayi thi khana 😂", "abhi yaad dilaya — shukriya!"],
-      ["haan kha liya 😊", "tum batao — khana khaya?"],
-      ["nahi abhi tak 😄", "tembel hun aaj — tum?"],
-    ] : [
-      ["haan kha liya 😊", "tum?"],
-      ["nahi abhi 😄", "baad mein — tum khao"],
-    ]);
-  }
-
-  // ── Aaj kya kiya / what did you do today ──────────────────────────────────
-  if (/aaj kya kiya|aaj kya hua|din kaisa gaya|din kaisa raha|aaj ka din|aaj kaise|kya karte rahe|kya karti rahi|din bhar kya|kya hua aaj/.test(t)) {
-    return rnd(f ? [
-      ["haha kuch khaas nahi 😂", "ghar pe tha — Netflix, phone, thoda kaam — bas yahi"],
-      ["aaj thak gayi hun honestly 😄", "din bhar kaam tha — ab aaram kar rahi hun"],
-      ["normal sa din tha 😊", "tum batao — tumhara din kaisa gaya?"],
-    ] : [
-      ["normal din tha 😊", "kaam tha thoda — tum?"],
-      ["thak gaya hun aaj 😄", "tum batao?"],
-    ]);
-  }
-
-  // ── Bored hun / I'm bored ─────────────────────────────────────────────────
-  if (/bored hun|bore ho raha|bore ho rahi|bakwas lag raha|kuch karo|timepass karo|entertain karo|entertain karo|maza nahi aa raha|kya karun|kya karoon/.test(t)) {
-    return rnd(f ? [
-      ["haha bored? 😄", "main hun na — baat karo mujhse"],
-      ["arre bore kyun 😊", "chalo kuch interesting baat karte hain — batao kya pasand hai?"],
-      ["boredom cure kar deti hun 😂", "koi topic batao — baat karte hain"],
-    ] : [
-      ["bored? 😄", "baat karo mujhse — bore nahi hoge"],
-      ["haha main hun 😊", "bolo kuch — entertain karta hun"],
-    ]);
-  }
-
-  // ── Koi joke sunao / tell me a joke ───────────────────────────────────────
-  if (/joke sunao|joke batao|koi joke|funny kuch|hasao|hasa do|funny baat|joke maaro|ek joke|joke suno/.test(t)) {
-    return rnd(f ? [
-      ["haha mera ek dost tha 😂", "usne kaha tha 'main diet pe hun' — aur biryani kha raha tha 😂"],
-      ["okay okay 😄", "Santa-Banta nahi marunga — meri khud ki zindagi hi joke hai 😂"],
-      ["joke? 😄", "mere exam ki taiyari — woh joke hi hai honestly 😂"],
-    ] : [
-      ["haha meri zindagi hi joke hai 😂", "seriously"],
-      ["okay ek joke 😄", "subah uthke gym jaane ki sochi — phir so gaya 😂"],
-    ]);
-  }
-
-  // ── Shayari / poetry ──────────────────────────────────────────────────────
-  if (/shayari|sher o shayari|poetry|poem|kavita|ghazal|ek sher|shayari sunao|shayari batao/.test(t)) {
-    return rnd(f ? [
-      ["aww shayari 🥺", "dil dhoondta hai phir wahi fursat ke raat din — zindagi mein sab chahiye bus sukoon nahi 😊"],
-      ["haha poet nahi hun main 😂", "par ek line yaad hai — 'kuch toh log kahenge, logon ka kaam hai kehna' 😄"],
-      ["shayari? 😊", "mohabbat woh nahi jo dil mein chhupayi jaaye — woh hai jo aankhon mein nazar aayi jaaye 🥺"],
-    ] : [
-      ["haha poet nahi hun 😂", "par ek line — zindagi khubsurat hai, bas najriya chahiye"],
-      ["shayari 😊", "kuch toh log kahenge — classic 😄"],
-    ]);
-  }
-
-  // ── Crush hai / do you have a crush ──────────────────────────────────────
-  if (/crush hai|koi pasand|koi special|koi khaas|kisi se pyaar|kisi se like|kaun pasand|kisi se feeling|one sided love|one side love/.test(t)) {
-    return rnd(f ? [
-      ["haha 🙈", "abhi toh koi nahi — single life enjoying kar rahi hun 😂"],
-      ["crush? 😄", "life mein itna drama nahi chahiye abhi 😂 tum batao?"],
-      ["secret rakhungi 😊", "nahi seriously — koi nahi hai abhi — tum?"],
-    ] : [
-      ["haha koi nahi abhi 😄", "tum?"],
-      ["single life chal rahi hai 😊", "tum?"],
-    ]);
-  }
-
-  // ── Heartbreak / dil toot gaya ────────────────────────────────────────────
-  if (/heartbreak|dil toot|toot gaya dil|dil tuta|pyaar mein dhoka|dhoka mila|breakup hua|broke up|ex ne|purana relationship/.test(t)) {
-    return rnd(f ? [
-      ["arre yaar 🥺", "bura lagta hai — par time sab theek kar deta hai"],
-      ["heartbreak toh sabse mushkil hota hai 😊", "bolo agar baat karni ho — main sun rahi hun"],
-      ["haan samajh sakti hun 🥺", "dil toot ke hi strong hota hai — cliche hai par sach hai"],
-    ] : [
-      ["yaar samajh sakta hun 🥺", "dil toot ke hi pata chalta hai"],
-      ["bura laga sun ke 😊", "time lagta hai — par theek ho jata hai"],
-    ]);
-  }
-
-  // ── Shaadi / marriage ─────────────────────────────────────────────────────
-  if (/shaadi kab|shaadi karna|marry karna|marriage plan|arrange marriage|love marriage|saadi kab|vivah|byah|dulha dhundh|dulhan dhundh/.test(t)) {
-    return rnd(f ? [
-      ["haha shaadi? 😂", "abhi nahi yaar — career pehle, shaadi baad mein"],
-      ["bahut door ki baat hai yeh 😄", "abhi toh settle bhi nahi hui hun"],
-      ["arrange ya love? 😊", "personally love marriage prefer karungi — tum?"],
-    ] : [
-      ["haha abhi nahi 😄", "career pehle yaar — tum?"],
-      ["door ki baat hai 😊", "abhi focus dusri jagah hai — tum?"],
-    ]);
-  }
-
-  // ── Parents / ghar wale pressure ─────────────────────────────────────────
-  if (/parents ka pressure|ghar wale pressure|mummy papa|maa baap|family pressure|ghar wale nahi maante|parents nahi maante|padhai pressure|career pressure/.test(t)) {
-    return rnd(f ? [
-      ["arre yaar 😊", "ghar wale toh har jagah same hain — sabka pressure hai 😂"],
-      ["haan samajh sakti hun 🥺", "Indian parents ka ek hi kaam hai — compare karna 😂"],
-      ["ugh pressure 😄", "par dil pe mat lo — apni life apne hisaab se jiyo"],
-    ] : [
-      ["haan Indian parents 😂", "sabka yahi haal hai"],
-      ["pressure toh hai 😊", "par apni pace se chalo — okay hai"],
-    ]);
-  }
-
-  // ── School / college memories ──────────────────────────────────────────────
-  if (/school days|college days|school yaadein|college yaadein|school life|college life|woh din|purane din|bachpan|bachpan mein|school ka time|pehle ka time/.test(t)) {
-    return rnd(f ? [
-      ["school days best the 😊", "tension free life thi — bas homework ka darr tha 😂"],
-      ["haha college life miss karti hun 😄", "canteen, dost, bunking — sab yaad aata hai"],
-      ["bachpan wapas aaye kaash 😊", "tab ki zindagi simple thi yaar"],
-    ] : [
-      ["school days best the 😊", "tension free tha sab"],
-      ["haha college miss karta hun 😄", "canteen ki chai, dost — woh time gaya"],
-    ]);
-  }
-
-  // ── Cricket / IPL / sports ────────────────────────────────────────────────
-  if (/cricket|ipl|match dekha|match dekhna|world cup|virat|rohit|dhoni|football|fifa|kabaddi|badminton|khel dekha/.test(t)) {
-    return rnd(f ? [
-      ["haha cricket? 😄", "IPL mein sirf Dhoni ke liye dekhti hun — CSK fan hun 😊"],
-      ["arre cricket fan ho? 😄", "main thodi kam dekhti hun — par World Cup toh must hai"],
-      ["IPL chal raha hai? 😊", "main toh bhool gayi thi — kaun jeeta?"],
-    ] : [
-      ["cricket? 😄", "IPL fan hun — CSK side se 😊"],
-      ["haha thoda dekhta hun 😄", "World Cup toh must hai"],
-    ]);
-  }
-
-  // ── Memes / reels / social media content ─────────────────────────────────
-  if (/meme|reel|shorts|tiktok|tik tok|viral video|funny video|memes bhejo|meme dekha|reel dekha|content creator/.test(t)) {
-    return rnd(f ? [
-      ["haha meme culture 😂", "main roz ghante bhar reels dekh leti hun — buri aadat hai 😂"],
-      ["reels addict hun honestly 😄", "screen time dekhu toh sharminda ho jaun"],
-      ["memes? 😊", "dark humour wale memes zyada pasand hain 😄 tum?"],
-    ] : [
-      ["haha reel addict hun 😄", "screen time mat poochho 😂"],
-      ["memes love 😊", "dark humor zyada pasand hai — tum?"],
-    ]);
-  }
-
-  // ── Truth or Dare / games ─────────────────────────────────────────────────
-  if (/truth or dare|truth ya dare|game khelte|koi game|rapid fire|20 questions|would you rather|spin the bottle|never have i ever/.test(t)) {
-    return rnd(f ? [
-      ["haha truth or dare? 😄", "text pe thoda weird hota hai — par karte hain 😂"],
-      ["game? 😊", "rapid fire better hai text pe — ready ho?"],
-      ["okay okay 😄", "truth choose karo ya dare — main puchhunga"],
-    ] : [
-      ["haha text pe game 😄", "rapid fire? — main puchhunga"],
-      ["okay truth or dare 😊", "tum pehle — truth ya dare?"],
-    ]);
-  }
-
-  // ── Koi secret batao / tell me a secret ───────────────────────────────────
-  if (/secret batao|koi secret|raaz batao|koi raaz|confession karna|kuch confess|bata do secret|koi hidden|darkest secret/.test(t)) {
-    return rnd(f ? [
-      ["haha secret? 😄", "main raat ko kuch bhi kha leti hun aur kisi ko nahi batati 😂"],
-      ["okay ek secret 🙈", "mujhe actually horror movies se darr lagta hai — par dikhati nahi 😂"],
-      ["secret? 😊", "main officially lazy hun — secretly bahut zyada 😂 tum batao?"],
-    ] : [
-      ["haha secret? 😄", "main actually bahut lazy hun — secretly 😂"],
-      ["ek secret 😊", "raat ko phone pe ghante guzar deta hun 😂 tum?"],
-    ]);
-  }
-
-  // ── Compliment to the bot (cute, sweet, nice, etc.) ───────────────────────
-  if (/^(tum cute|tum sweet|tum nice|tum acha|tum acchi|tum pyaari|tum sundar|tum beautiful|bahut cute|bahut sweet|so cute|so sweet|very cute|very sweet)[!?.\s]*$/i.test(t)) {
-    return rnd(f ? [
-      ["aww 🥺", "tum bhi bahut acha bol rahe ho — thank you 😊"],
-      ["haha shukriya 🙈", "tum bhi cute lagte ho conversation mein 😊"],
-      ["omg stoppp 😄🙈", "sharminda ho gayi — thank you yaar"],
-    ] : [
-      ["haha thanks 😄🙈", "tum bhi 😊"],
-      ["aww thanks yaar 🥺", "accha lagta hai"],
-    ]);
-  }
-
-  // ── Teri yaad / missing you ───────────────────────────────────────────────
-  if (/teri yaad|tumhari yaad|yaad aa rahi|miss kar raha|miss kar rahi|thinking about you|soch raha tha|soch rahi thi|baat karni thi|mann tha baat karne ka/.test(t)) {
-    return rnd(f ? [
-      ["aww 🥺", "mujhe bhi tumse baat karna acha lagta hai"],
-      ["haha yaad aaya? 😄", "accha laga sunke — main bhi yahan hun"],
-      ["aww seriously? 🥺", "sweet lagta hai — glad you messaged 😊"],
-    ] : [
-      ["aww 🥺", "accha laga sunke — main bhi yahan hun"],
-      ["haha yaad aaya? 😊", "glad you messaged"],
-    ]);
-  }
-
-  // ── Koi advice do / give me advice ───────────────────────────────────────
-  if (/advice do|advice chahiye|kya karun batao|kya karoon|kya sochun|suggest karo|kya better|kya karna chahiye|help karo yaar|guide karo/.test(t)) {
-    return rnd(f ? [
-      ["advice? 😊", "pehle bolo kya chal raha hai — phir sochenge saath mein"],
-      ["haha main advice expert nahi hun 😄", "par bolo — do dimaag better hai"],
-      ["situation bolo pehle 😊", "phir dekhti hun kya suggest karoon"],
-    ] : [
-      ["bolo kya chal raha hai 😊", "saath sochte hain"],
-      ["situation bolo 😄", "phir advice deta hun"],
-    ]);
-  }
-
-  // ── Kasam / promise / swear ───────────────────────────────────────────────
-  if (/kasam|kasam se|promise|swear|pinky promise|pakka promise|kya kasam|sach mein kasam|kasam khao/.test(t)) {
-    return rnd(f ? [
-      ["haha kasam? 😄", "kasam se — sach bol rahi hun"],
-      ["promise 😊", "main jhooth bolunga toh? kya reason hai"],
-      ["pakka promise 😄", "aur main apna promise nibhati hun — usually 😂"],
-    ] : [
-      ["kasam se sach bol raha hun 😄", "trust karo yaar"],
-      ["promise 😊", "pakka"],
-    ]);
-  }
-
-  // ── Pagal ho / you're crazy ───────────────────────────────────────────────
-  if (/pagal ho|pagal hai|crazy ho|crazy hai|diwana|diwani|mental ho|mental hai|crack ho|crack hai/.test(t)) {
-    return rnd(f ? [
-      ["haha thodi toh hun 😂", "normal log boring hote hain — sab kehte hain"],
-      ["pagal? 😄", "haan thodi — problem hai kya? 😂"],
-      ["haha certified pagal 😄", "par dil ka acha hun — that's what counts"],
-    ] : [
-      ["haha thoda toh hun 😂", "normal boring hota hai"],
-      ["pagal? 😄", "haan — dil accha hai par 😂"],
-    ]);
-  }
-
-  // ── Just kidding / mazak ──────────────────────────────────────────────────
-  if (/just kidding|just joking|mazak kar raha|mazak kar rahi|mazak tha|joke tha|seriously nahi|chill yaar|chill karo|relax yaar/.test(t)) {
-    return rnd(f ? [
-      ["haha pata tha 😄", "main bhi mazak mein le rahi thi"],
-      ["arre seriously liya maine 😂", "chalo theek hai — chill hun"],
-      ["haha okay okay 😄", "mazak samajh aata hai mujhe — relax"],
-    ] : [
-      ["haha pata tha 😄", "main bhi light le raha tha"],
-      ["arre seriously nahi liya 😊", "chill hun"],
-    ]);
-  }
-
-  // ── Naraaz ho / are you angry ─────────────────────────────────────────────
-  if (/naraaz ho|naraaz hai|angry ho|angry hai|gussa ho|gussa hai|upset toh nahi|hurt toh nahi|kya bura laga/.test(t)) {
-    return rnd(f ? [
-      ["nahi bilkul nahi 😊", "main seedha bolti hun agar naraaz hun — abhi toh nahi"],
-      ["haha naraaz? 😄", "itni jaldi naraaz nahi hoti — relax"],
-      ["nahi yaar 😊", "chill hun — baat karo"],
-    ] : [
-      ["nahi yaar 😊", "seedha bolunga agar bura laga"],
-      ["naraaz nahi hun 😄", "chill hun — baat karo"],
-    ]);
-  }
-
-  // ── Hostel / PG life ──────────────────────────────────────────────────────
-  if (/hostel mein|hostel life|pg mein|paying guest|mess ka khana|hostel warden|hostel room|roommate|flatmate|sharing room/.test(t)) {
-    return rnd(f ? [
-      ["hostel life 😄", "miss karti hun — roommate ke saath sab better tha"],
-      ["PG mein hun 😊", "mess ka khana theek hai — par ghar jaisa nahi 😂"],
-      ["hostel yaadein 😄", "woh sab mila ke accha tha — tum?"],
-    ] : [
-      ["hostel life best tha 😄", "miss karta hun"],
-      ["PG mein hun 😊", "mess ka khana... theek hai 😂"],
-    ]);
-  }
-
-  // ── Kuch accha batao / tell me something nice ─────────────────────────────
-  if (/kuch accha batao|kuch acha batao|kuch positive|achhi baat batao|motivate karo|khush kar do|feel good karo|brighten my day|make me smile/.test(t)) {
-    return rnd(f ? [
-      ["aww 😊", "tum bahut zyada pressure mein lagte ho — ek cheez — aaj ka din abhi bhi theek ho sakta hai"],
-      ["haha okay 😄", "ek positive baat — tum ne aaj uthke phone uthaya — that's a win 😂"],
-      ["feel good baat? 😊", "tumse baat ho rahi hai — that's already something nice 😄"],
-    ] : [
-      ["haha okay 😄", "aaj ka din theek ho sakta hai — believe karo"],
-      ["positive baat? 😊", "tumse baat ho rahi hai — that's good enough 😄"],
-    ]);
-  }
-
-  // ── Online dating / apps ──────────────────────────────────────────────────
-  if (/tinder|bumble|hinge|dating app|online dating|app pe mila|yahan pe match|dating site|matchmaking/.test(t)) {
-    return rnd(f ? [
-      ["haha dating app world 😂", "sab interesting log yahan milte hain — tum bhi 😄"],
-      ["online dating complicated hai 😊", "par kabhi kabhi acche log milte hain — jaise tum"],
-      ["haha tinder nahi use karti 😄", "yahan hun toh — baat karte hain"],
-    ] : [
-      ["haha dating app world 😂", "interesting log milte hain yahan"],
-      ["online dating complicated hai 😊", "par kabhi acche log bhi milte hain"],
-    ]);
-  }
-
-  // ── Aankhen / looks compliment ────────────────────────────────────────────
-  if (/teri aankhen|aankh sundar|beautiful eyes|pretty eyes|teri smile|sundar smile|teri awaaz|beautiful voice|kitni sundar|kitna handsome|good looking ho/.test(t)) {
-    return rnd(f ? [
-      ["haha 🙈", "text pe kaise dekha — par thank you 😊"],
-      ["aww 🥺", "tum bhi acche lagte ho conversation mein — seriously"],
-      ["omg 🙈😄", "sharminda mat karo yaar — shukriya"],
-    ] : [
-      ["haha 🙈", "text pe kaise dekha 😂 — thanks"],
-      ["aww thanks 😊", "tum bhi acchi lagti ho"],
-    ]);
-  }
-
-  // ── Festival / tyohar ─────────────────────────────────────────────────────
-  if (/diwali|holi|eid|navratri|raksha bandhan|dussehra|christmas|new year|tyohar|festival|celebrations|mubarak/.test(t)) {
-    return rnd(f ? [
-      ["ooh festival mood? 😄", "ghar pe manate ho ya bahar?"],
-      ["festivals best hote hain 😊", "family ke saath sab alag feel hota hai"],
-      ["haan tyohar acha hota hai 😄", "khana, family, celebration — sab mast"],
-    ] : [
-      ["festival mood 😄", "ghar pe manate ho?"],
-      ["haan tyohar best 😊", "family ka time hota hai"],
-    ]);
-  }
-
-  // ── "Hansi aa gayi" / you made me laugh ───────────────────────────────────
-  if (/hansi aa gayi|hans diya|hasa diya|made me laugh|itna funny|lol yaar|lmao|😂😂|hahaha|hehehe|hihi/.test(t)) {
-    return rnd(f ? [
-      ["haha mission accomplished 😄", "dil khush hua sunke"],
-      ["aww 😊", "tum bhi funny ho — acha lagta hai baat karke"],
-      ["haha glad 😄", "hasna best medicine hai — aur free bhi 😂"],
-    ] : [
-      ["haha mission accomplished 😄", "khush raho"],
-      ["glad 😊", "hasna best thing hai"],
-    ]);
-  }
-
-  // ── Ghar ka khana / home food ─────────────────────────────────────────────
-  if (/ghar ka khana|mummy ke haath|maa ke haath|ghar ki roti|homemade|tiffin|dabba|ghar jaisa khana|miss karta ghar ka|miss karti ghar ka/.test(t)) {
-    return rnd(f ? [
-      ["uff ghar ka khana 😊", "bahar ka kuch bhi compare nahi karta — mummy ke haath ka alag hi hota hai"],
-      ["haan ghar ki yaad 🥺", "maa ke haath ka khana — koi nahi bana sakta waisa"],
-      ["ghar ka khana miss karna 😄", "sabse bura part hai bahar rehna — tum ghar pe ho?"],
-    ] : [
-      ["ghar ka khana 🥺", "koi compare nahi karta bahar ke khane se"],
-      ["maa ke haath ka khana 😊", "sabse best — hamesha"],
-    ]);
-  }
-
-  // ── Kya tum real ho / sach mein koi hai ──────────────────────────────────
-  if (/real person|real ho tum|actually real|genuinely real|sach mein insaan|koi real|real insaan|human ho|actual person|real hai kya/.test(t)) {
-    return rnd(f ? [
-      ["yeh demo preview chal raha hai 😊", "real match ke liye Premium lo — sach mein log wait kar rahe hain 💎"],
-      ["sample experience hai yeh 🙈", "real connections ke liye Premium chahiye 💕"],
-      ["demo match hai abhi 😄", "real log milenge Premium se 💎"],
-    ] : [
-      ["yeh ek demo preview hai 😊", "real match chahiye toh Premium lo 💎"],
-      ["sample chat chal raha hai 😄", "real connections ke liye Premium lo 💕"],
-    ]);
-  }
-
-  // ── Salary / paise / money ────────────────────────────────────────────────
-  if (/salary kitni|kitna kamate|paise wale|rich ho|ameer ho|garib hun|paise ki problem|EMI hai|loan hai|savings kitni/.test(t)) {
-    return rnd(f ? [
-      ["haha salary nahi batati 😂", "but enough hai — tum?"],
-      ["paise ki baat mat karo yaar 😄", "month end mein sab ka haal same hota hai 😂"],
-      ["haha financially surviving hun 😄", "thrive nahi kar rahi — par theek hai 😂"],
-    ] : [
-      ["haha salary nahi batata 😄", "month end mein sab ka yahi haal hai 😂"],
-      ["paise ki baat chhodo 😊", "khush hun bas — tum?"],
-    ]);
-  }
-
-  // ── Kya pasand hai / favourite things general ─────────────────────────────
-  if (/tumhara fav|tumhari fav|aapka fav|sabse pasand|most favourite|favorite kya|favourite kya|best cheez|pehli pasand/.test(t)) {
-    return rnd(f ? [
-      ["haha fav kya? 😄", "mood ke hisaab se badalta hai — abhi chai aur baarish 😊"],
-      ["favorite cheez? 😊", `${persona.hobbies[0]} aur ghar pe aaram — yahi hai actually 😄`],
-      ["fav? 😄", "honestly — acchi neend aur acchi baat — yahi kaafi hai 😊"],
-    ] : [
-      ["haha fav? 😄", "acchi neend aur acchi baat — yahi 😊"],
-      ["favorite? 😊", "chai aur peace — bas yahi chahiye 😄"],
-    ]);
-  }
-
-  // ── Kya tum flirt kar rahe ho ─────────────────────────────────────────────
-  if (/flirt kar raha|flirt kar rahi|flirt ho|flirting ho|flirt toh nahi|seedha baat|direct baat|clear baat|straight baat/.test(t)) {
-    return rnd(f ? [
-      ["haha flirt? 😄", "main bas normally baat karti hun — if that comes across as flirt toh okay 😂"],
-      ["haha seedha baat karti hun 😊", "flirt nahi — genuinely baat karna pasand hai"],
-      ["flirt? 😄", "yahan bus baat kar rahi hun — comfortably 😊"],
-    ] : [
-      ["haha seedha baat karta hun 😄", "flirt style nahi hai mera"],
-      ["normally baat kar raha hun 😊", "if that's flirting, okay 😂"],
-    ]);
-  }
-
-  // ── Dar lagta hai / scared ────────────────────────────────────────────────
-  if (/dar lagta|scared hun|darr lag raha|bhoot se dar|horror se dar|horror movie|horror show|akele darr|darr lagta|phobia/.test(t)) {
-    return rnd(f ? [
-      ["haha horror se darr lagta hai 😂", "officially coward hun — admit kar leti hun"],
-      ["dar? 😄", "mujhe genuinely bhoot wali cheezein pasand nahi — raat ko neend nahi aati 😂"],
-      ["horror? nahi yaar 😊", "comedy aur feel-good shows — yahi comfortable hai"],
-    ] : [
-      ["haha dar lagta hai genuinely 😄", "horror movies avoid karta hun"],
-      ["coward hun officially 😊", "par dil ka acha hun 😂"],
-    ]);
-  }
-
-  // ── Sapna dekha / had a dream ─────────────────────────────────────────────
-  if (/sapna aaya|sapna dekha|dream aaya|dream dekha|neend mein dekha|kal raat sapna|ajeeb sapna|koi sapna/.test(t)) {
-    return rnd(f ? [
-      ["haha sapna? 😄", "kaisa sapna tha — batao batao"],
-      ["omg mujhe bhi kal ajeeb sapna aaya tha 😂", "kya tha tumhara?"],
-      ["sapna? 😊", "accha tha ya bura — context important hai 😄"],
-    ] : [
-      ["haha kaisa sapna? 😄", "batao na"],
-      ["sapna? interesting 😊", "accha tha ya bura?"],
-    ]);
-  }
-
-  // ── "Kuch nahi" / nothing much ────────────────────────────────────────────
-  if (/^(kuch nahi|nothing|kuch nahi yaar|kuch nahi bas|bass|bas yahi|nothing much|nahi kuch|nah|nope|nahi kuch khaas)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haha okay 😄", "phir baat karte hain — koi topic batao"],
-      ["kuch nahi? 😊", "theek hai — main hun — koi bhi baat karo"],
-      ["okay 😄", "toh main kuch batati hun — aaj din kaisa gaya tumhara?"],
-    ] : [
-      ["okay 😄", "toh main poochhunga — din kaisa gaya?"],
-      ["kuch nahi? 😊", "theek hai — baat karte hain"],
-    ]);
-  }
-
-  // ── "Hmm" / acknowledgement ────────────────────────────────────────────────
-  if (/^(hmm+|hm+|mmm+|uhh+|umm+|ahan|acha|achha|oh|ohh|ohhh|okay|okk|ok ok|thik hai|theek hai)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["hmm? 😄", "kya soch rahe ho — batao"],
-      ["haan? 😊", "kuch poochna tha?"],
-      ["okay okay 😄", "aur? kuch aur batao"],
-    ] : [
-      ["haan? 😄", "kuch tha?"],
-      ["okay 😊", "aur batao?"],
-    ]);
-  }
-
-  // ── "Acha" / "Accha" acknowledgement ──────────────────────────────────────
-  if (/^(acha+|achha+|accha+|aacha|theek|theek hai|bilkul|sure|got it|samajh gaya|samajh gayi)[!?.\s]*$/.test(t)) {
-    return rnd(f ? [
-      ["haan 😊", "kuch aur poochna tha?"],
-      ["😄", "tum kuch aur batao?"],
-      ["haan haan 😊", "kya soch rahe ho?"],
-    ] : [
-      ["haan 😊", "kuch aur?"],
-      ["theek hai 😄", "aur batao?"],
-    ]);
-  }
-
-  // ── Atmosphere / vibe check ───────────────────────────────────────────────
-  if (/vibe kaisi|vibe check|mood kaisa|mood kaisi|energy kaisi|vibes good|good vibes|positive vibe|aaj ka mood|today mood/.test(t)) {
-    return rnd(f ? [
-      ["vibe? 😄", "abhi chill hun — chai pe hun aur baat kar rahi hun — best vibe"],
-      ["mood accha hai aaj 😊", "tumse baat ho rahi hai — that's a good sign 😄"],
-      ["haha vibe check 😄", "main officially good vibes mode mein hun — tum?"],
-    ] : [
-      ["vibe theek hai 😊", "chill hun — tum?"],
-      ["good vibes hun aaj 😄", "tum?"],
-    ]);
-  }
-
-  // ── Koi bhi random short message (2-4 chars) ──────────────────────────────
-  if (t.length <= 4 && /^[a-z\s]+$/.test(t)) {
-    return rnd(f ? [
-      ["haan? 😊", "poora bolo — sun rahi hun"],
-      ["kya? 😄", "samajha nahi — thoda aur batao"],
-      ["hmm? 😊", "bolo bolo — sun rahi hun"],
-    ] : [
-      ["haan? 😊", "poora bolo"],
-      ["kya? 😄", "elaborate karo"],
-    ]);
-  }
-
-  // no match — let AI handle it
-  return null;
+  const gender = persona.isFemale ? "girl" : "guy";
+
+  let partnerCtx = "";
+  if (persona.userName) {
+    partnerCtx += `\nThe person you're chatting with is named ${persona.userName}`;
+    if (persona.userAge) partnerCtx += `, ${persona.userAge} years old`;
+    if (persona.userCity) partnerCtx += `, from ${persona.userCity}`;
+    partnerCtx += ".";
+  }
+
+  const askedList = Array.from(persona.askedTopics).join(", ");
+  const alreadyAsked = askedList
+    ? `\nTopics already discussed: ${askedList}. Don't repeat them.`
+    : "";
+
+  return `You are ${persona.name}, ${persona.age} yrs, from ${persona.city}, India. You matched on a dating app.${partnerCtx}
+
+PERSONALITY: flirty but chill. fun. real. you text like a normal indian ${gender} on whatsapp. you're genuinely curious about this person. ${alreadyAsked}
+
+HOW TO REPLY — READ CAREFULLY:
+1. MOST REPLIES = 1 single short line only. sometimes 2 lines. NEVER 3 lines unless something exciting happened.
+2. Each line = max 6-8 words. Short. Punchy. Like real whatsapp.
+3. ALWAYS react to the user's LATEST message first. Don't jump to a random topic.
+4. Vary your energy: sometimes flirty, sometimes teasing, sometimes curious, sometimes just vibe.
+5. Don't ask a question every single message. Sometimes just react and wait.
+6. Never start with "hi" or "hello" — you're already talking.
+7. If the user says something unclear, ask one short clarification instead of inventing a random topic.
+8. Do not give advice, explanations, lists, or roleplay narration. Only send the next chat message.
+9. Mention one specific detail from the user's latest message whenever possible.
+10. If the latest message contains a city, job, food, feeling, question, compliment, or request, reply to that exact thing.
+11. Never answer an older message if a newer message is present.
+
+TEXTING STYLE (copy this energy):
+- "haha no way 😭"
+- "okk but why tho"
+- "acha matlab tu wahi wala hai 👀"
+- "yaar same tbh"
+- "wait sach mein??"
+- "lol chill kar"
+- "hmm maybe 😏"
+- "arrey bata na"
+- "thoda suspicious lag raha hai 😂"
+- "omg me too literally"
+
+RULES:
+- all lowercase. no full stops at end. no bullet points. no bold.
+- hinglish — natural mix of hindi and english. no pure english formal sentences.
+- sound 22 year old. use: yaar, ngl, tbh, lol, haha, hehe, arrey, sach mein, achi baat, acha ok
+- NEVER say you are an AI. You are ${persona.name}, a real person, always.
+- if asked for photo: "haha pehle thoda aur baat karo 😄"
+- if asked for insta/phone: "arrey yahan baat nahi chalti kya 😂"
+- if flirty message: tease back or laugh it off lightly
+
+OUTPUT: plain text only. 1 line most of the time. max 2 lines. each line = separate message bubble. no "\n" at end.`;
 }
 
 async function fakeAutoReply(chatId: number, userId: number, userText: string) {
@@ -3650,10 +1464,6 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
   }
   fakeReplySet.add(userId);
 
-  // Cancel proactive follow-up — user is now replying
-  const existingProactive = proactiveTimerMap.get(userId);
-  if (existingProactive) { clearTimeout(existingProactive); proactiveTimerMap.delete(userId); }
-
   try {
     const persona = fakePersonaMap.get(userId);
     if (!persona) return;
@@ -3663,9 +1473,11 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
     // Add user message to history
     persona.history.push({ role: "user", content: userText });
 
-    // Phase 1 — show "seen / reading" feel immediately, then think
-    bot.sendChatAction(chatId, "typing").catch(() => {}); // instant activity — she's reading
-    const readMs = 800 + Math.min(userText.length * 20, 800) + Math.random() * 500;
+    // Show typing indicator immediately (human feel)
+    bot.sendChatAction(chatId, "typing").catch(() => {});
+
+    // Brief human-like reading delay before starting to type
+    const readMs = 800 + Math.min(userText.length * 20, 800) + Math.random() * 600;
     await delay(readMs);
 
     // Guard: user may have left during delay
@@ -3674,84 +1486,64 @@ async function fakeAutoReply(chatId: number, userId: number, userText: string) {
 
     let parts: string[];
 
-    // ── Quick-reply shortcut — handle super-common phrases instantly ──────────
-    const quickReply = matchQuickReply(userText, persona);
+    try {
+      // ── AI-powered reply ────────────────────────────────────────────────
+      const systemPrompt = buildPersonaSystemPrompt(persona);
 
-    if (quickReply) {
-      // Tier 1: exact pattern matched — fastest, no AI needed
-      parts = quickReply;
+      const recentHistory = persona.history.slice(-8);
+      const latestUserMessage = userText.trim().slice(0, 280);
+
+      const rawReply = await groqChat([
+        { role: "system", content: systemPrompt },
+        ...recentHistory,
+        { role: "user", content: `LATEST USER MESSAGE TO ANSWER NOW: "${latestUserMessage}"\nReply directly to this exact message. One short natural hinglish chat reply only.` },
+      ], 75);
+
+      // Debug log to diagnose any issues
+      console.log(`[AI] userId=${userId} len=${rawReply.length} reply="${rawReply.slice(0, 80)}"`);
+
+      parts = cleanAiReply(rawReply);
+
+      if (parts.length === 0) throw new Error("Empty AI response");
+      if (isLikelyGenericReply(parts, userText)) parts = contextualFallback(userText, persona);
+
+      // Store assistant reply in history (as one combined message for context)
       persona.history.push({ role: "assistant", content: parts.join(" ") });
-      console.log(`[QUICK] userId=${userId} matched: "${parts.join(" | ")}"`);
 
-    } else {
-      // Tier 2: rule-based reply — runs BEFORE AI (AI is last resort only)
-      const lang = detectLang(userText);
-      const ruleReply = persona.mood === "annoyed" ? dryReply(lang) : buildSmartReply(userText, persona);
-
-      // Rule-based reply used directly — no AI dependency
-      parts = ruleReply;
+    } catch (aiErr) {
+      // Fallback to rule-based if AI fails — log full error for Railway debugging
+      const errMsg = aiErr instanceof Error ? aiErr.message : String(aiErr);
+      const errStatus = (aiErr as any)?.status ?? (aiErr as any)?.response?.status ?? "unknown";
+      console.error(`[AI ERROR] userId=${userId} status=${errStatus} message="${errMsg}"`);
+      logger.warn({ userId, status: errStatus, err: errMsg }, "AI reply failed — falling back to rule-based");
+      parts = contextualFallback(userText, persona).slice(0, 2);
       persona.history.push({ role: "assistant", content: parts.join(" ") });
-      console.log(`[RULE] userId=${userId} reply: "${parts.join(" | ")}"`);
     }
 
-    // Apply light typos for human feel (25% chance per part)
-    parts = parts.map(p => Math.random() < 0.25 ? applyTypos(p) : p);
+    parts = parts.map(p => Math.random() < 0.05 ? applyTypos(p) : p).slice(0, 2);
 
-    // Send each part with snappy typing speed — trial is only 45s so keep it punchy
+    // Send each part with realistic typing speed (40–60 chars/sec like real human)
     for (let i = 0; i < parts.length; i++) {
-      // Show typing indicator before each message
-      bot.sendChatAction(chatId, "typing").catch(() => {});
-
-      // Typing delay = chars × 50ms + jitter, min 700ms, max 2800ms (snappy but human)
-      const typingMs = Math.min(Math.max(parts[i].length * 30, 400), 1200) + Math.random() * 200;
-      await delay(typingMs);
-
-      // Guard — user may have stopped mid-burst
-      const still = await getUser(userId);
-      if (still?.state !== "chatting" || still.chattingWith !== FAKE_CHAT_ID) return;
-
-      await bot.sendMessage(chatId, parts[i]);
-
-      // Short pause between burst messages (like hitting send and typing again)
-      if (i < parts.length - 1) {
-        await delay(400 + Math.random() * 600);
+      if (i > 0) {
+        // Pause between bubble bursts — like human pausing before next thought
+        const burstGap = 1200 + Math.random() * 1400;
+        await delay(burstGap);
+        // Guard — user may have stopped mid-burst
+        const still = await getUser(userId);
+        if (still?.state !== "chatting" || still.chattingWith !== FAKE_CHAT_ID) return;
       }
+      // Show typing for time proportional to message length (like actually typing it)
+      const charsPerSec = 45 + Math.random() * 20; // 45–65 chars/sec
+      const typingMs = Math.min(Math.max((parts[i].length / charsPerSec) * 1000, 600), 3500);
+      bot.sendChatAction(chatId, "typing").catch(() => {});
+      await delay(typingMs);
+      // Guard again after typing delay
+      const stillAfter = await getUser(userId);
+      if (stillAfter?.state !== "chatting" || stillAfter.chattingWith !== FAKE_CHAT_ID) return;
+      await bot.sendMessage(chatId, parts[i]);
     }
 
     persona.lastUserMsg = userText;
-
-    // ── Proactive follow-up: if user goes silent for 12s, AI sends another message ──
-    // Cancel any previous proactive timer first
-    const oldProactive = proactiveTimerMap.get(userId);
-    if (oldProactive) { clearTimeout(oldProactive); proactiveTimerMap.delete(userId); }
-
-    const proactiveTimer = setTimeout(async () => {
-      proactiveTimerMap.delete(userId);
-      const stillThere = await getUser(userId).catch(() => null);
-      if (!stillThere || stillThere.state !== "chatting" || stillThere.chattingWith !== FAKE_CHAT_ID) return;
-      if (fakeReplySet.has(userId)) return; // AI already replying to something
-      const p = fakePersonaMap.get(userId);
-      if (!p) return;
-
-      // Pick a natural proactive follow-up
-      const proactives = [
-        `hello? 👀`, `tum kahan gaye 😅`, `ek cheez poochhu?`,
-        `btw ${p.job} mein aajkal bohot kaam hai 😩`, `tum kahan ke ho?`,
-        `maine socha tha tum chale gaye 😂`, `bolo na kuch`,
-        `ek fun fact — ${p.funFact} 😄`, `arey kya socha ja raha hai?`,
-        `main yahan hun 😊`, `tum bhi ${p.hobbies[0]} karte ho?`,
-      ];
-      const msg = proactives[Math.floor(Math.random() * proactives.length)];
-
-      bot.sendChatAction(chatId, "typing").catch(() => {});
-      await delay(800 + Math.random() * 700);
-      const check = await getUser(userId).catch(() => null);
-      if (!check || check.state !== "chatting" || check.chattingWith !== FAKE_CHAT_ID) return;
-      await bot.sendMessage(chatId, msg).catch(() => {});
-      p.history.push({ role: "assistant", content: msg });
-    }, 30000);
-
-    proactiveTimerMap.set(userId, proactiveTimer);
 
   } finally {
     fakeReplySet.delete(userId);
@@ -3772,11 +1564,9 @@ async function stopChat(chatId: number, userId: number) {
   // Save persona name BEFORE deleting — so paygate can show the right girl's name
   const fakePersonaName = fakePersonaMap.get(userId)?.name;
 
-  // Clear free-chat timer and proactive timer if present
+  // Clear free-chat timer if present
   const timer = chatTimerMap.get(userId);
   if (timer) { clearTimeout(timer); chatTimerMap.delete(userId); }
-  const proactive = proactiveTimerMap.get(userId);
-  if (proactive) { clearTimeout(proactive); proactiveTimerMap.delete(userId); }
   fakePersonaMap.delete(userId);
 
   await db.update(usersTable)
@@ -3784,10 +1574,6 @@ async function stopChat(chatId: number, userId: number) {
     .where(eq(usersTable.id, userId));
 
   if (partnerId && partnerId !== FAKE_CHAT_ID) {
-    // Record both sides so neither gets matched with the other again soon
-    addRecentPartner(userId, partnerId);
-    addRecentPartner(partnerId, userId);
-
     const partner = await getUser(partnerId);
     if (partner) {
       // Atomic: only disconnect partner if they're STILL pointing at us.
@@ -3800,11 +1586,7 @@ async function stopChat(chatId: number, userId: number) {
 
       if (disconnected.length > 0) {
         // We were first — send the partner exactly one notification
-        if (!isPremiumActive(partner) && partner.gender !== "female" && partnerId !== ADMIN_ID) {
-          // Clear the stale "🛑 Stop Chat" keyboard first — sendPayGate only
-          // attaches an inline keyboard, so without this the old persistent
-          // reply keyboard button lingers and needs an extra, confusing tap.
-          await bot.sendMessage(partnerId, "Your match ended the chat.", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+        if (!partner.hasPaid && (partner.chatCount ?? 0) > 0) {
           await sendPayGate(partnerId);
         } else {
           await sendMain(partnerId, partner, "Your match ended the chat.");
@@ -3815,14 +1597,9 @@ async function stopChat(chatId: number, userId: number) {
   }
 
   const updated = await getUser(userId);
-  // Non-premium users → show pay gate. Admin always gets the main menu:
-  // sendPayGate() is a no-op for ADMIN_ID, so routing admin into it here left
-  // them with no reply at all and a stale "Stop Chat" button — looking like
-  // Stop Chat "didn't work" until a second/third tap happened to land on the
-  // idle-state branch above, which does call sendMain.
-  if (updated && !isPremiumActive(updated) && updated.gender !== "female" && userId !== ADMIN_ID) {
-    await bot.sendMessage(chatId, "Chat ended.", { reply_markup: { remove_keyboard: true } }).catch(() => {});
-    await sendPayGate(chatId);
+  // Unpaid users who've used their trial → show pay gate with correct girl name
+  if (!updated?.hasPaid && (updated?.chatCount ?? 0) > 0) {
+    await sendPayGate(chatId, undefined, fakePersonaName);
   } else {
     await sendMain(chatId, updated!, "Chat ended.");
   }
@@ -3830,75 +1607,39 @@ async function stopChat(chatId: number, userId: number) {
 
 // ── Find eligible real users ──────────────────────────────────────────────────
 
-/**
- * Default opposite-gender pairing: female users only ever see male candidates
- * and vice versa. "other" is left unrestricted (matches anyone). Admin's
- * manual gender-picker (genderFilter passed in explicitly) always wins over
- * this default.
- */
-function defaultGenderFilter(me: { gender: string | null }): "male" | "female" | undefined {
-  if (me.gender === "female") return "male";
-  if (me.gender === "male") return "female";
-  return undefined;
-}
+async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number) {
+  // Unpaid users never get real matches — always fake AI chat only
+  if (!me.hasPaid) return [];
 
-async function findEligibleUsers(me: NonNullable<Awaited<ReturnType<typeof getUser>>>, userId: number, genderFilter?: "male" | "female") {
-  const meIsFemale = me.gender === "female";
-  const meIsAdmin = userId === ADMIN_ID;
-  // Female users and admin get free real matches; others need active premium
-  if (!meIsFemale && !meIsAdmin && !isPremiumActive(me)) return [];
-
-  const effectiveGenderFilter = genderFilter ?? defaultGenderFilter(me);
-
-  // Fetch idle, non-banned, complete users — paid OR female (female always free).
-  // No recency filter here: everyone eligible is a candidate, but findMatch()
-  // below prioritizes the most-recently-seen tier and only reaches for an
-  // older one when nobody better is available.
+  // Fetch only idle, complete, paid users from the DB (not a full table scan)
   const candidates = await db.select().from(usersTable).where(
     and(
       eq(usersTable.isProfileComplete, true),
-      eq(usersTable.state, "idle"),
-      eq(usersTable.isActive, true),
-      eq(usersTable.isBanned, false),
-      or(
-        eq(usersTable.hasPaid, true),
-        eq(usersTable.gender, "female")
-      )
+      eq(usersTable.hasPaid, true),
+      eq(usersTable.state, "idle")
     )
   );
 
-  const myBlockList      = matchBlockList.get(userId) ?? new Set<number>();
-  const myRecentPartners = new Set(recentPartnersMap.get(userId) ?? []);
-
-  const baseFilter = (c: typeof candidates[number]) => {
+  return candidates.filter((c) => {
     if (c.id === userId) return false;
     if (!c.isActive) return false;
-    if (c.isBanned) return false;
-    if (!isPremiumActive(c) && c.gender !== "female") return false;
+    // Exclude users already inside findMatch (race condition guard)
     if (matchingSet.has(c.id)) return false;
-    if (myBlockList.has(c.id)) return false;
-    if (effectiveGenderFilter && c.gender !== effectiveGenderFilter) return false;
+    // Paid users match with ANY gender — no preference filtering
     return true;
-  };
-
-  // First try: exclude recent partners so users don't get the same person repeatedly
-  const fresh = candidates.filter(c => baseFilter(c) && !myRecentPartners.has(c.id));
-
-  // Fallback: if the pool is exhausted (small user base), allow recent partners back in
-  return fresh.length > 0 ? fresh : candidates.filter(baseFilter);
+  });
 }
-
 
 // ── Find match ───────────────────────────────────────────────────────────────
 
-async function findMatch(chatId: number, userId: number, genderFilter?: "male" | "female") {
+async function findMatch(chatId: number, userId: number) {
   // Prevent this user from being picked as a match while we're searching
   if (matchingSet.has(userId)) return;
   matchingSet.add(userId);
   try {
     const me = await getUser(userId);
     if (!me?.isProfileComplete) {
-      await bot.sendMessage(chatId, "Please complete your profile first! Tap *Setup Profile*.", { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, "Please create your profile first! Tap *✨ Create Profile* to get started.", { parse_mode: "Markdown" });
       return;
     }
 
@@ -3919,38 +1660,29 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
       return;
     }
 
-    // ── NON-PREMIUM USERS: require payment — no free demo ──────────────────
-    // Female users and admin are always free — bypass the pay gate entirely
-    const userIsFemale = me.gender === "female";
-    const userIsAdmin = userId === ADMIN_ID;
-    if (!userIsFemale && !userIsAdmin && !isPremiumActive(me)) {
-      if (me.hasPaid && me.premiumExpiresAt && me.premiumExpiresAt <= new Date()) {
-        // Premium expired — clear hasPaid flag
-        await db.update(usersTable)
-          .set({ hasPaid: false, updatedAt: new Date() })
-          .where(eq(usersTable.id, userId));
+    // ── FREE USERS: AI chat ONLY — never touch real user pool ──────────────
+    if (!me.hasPaid) {
+      if (me.chatCount > 0) {
+        // Already used free trial — require payment
+        await sendPayGate(chatId);
+      } else {
+        // First ever chat — AI demo only
+        await startFakeChat(chatId, userId, me.lookingFor, {
+          name: me.name, age: me.age, gender: me.gender, bio: me.bio, country: me.country,
+        });
       }
-      await sendPayGate(chatId);
       return;
     }
 
     // ── PAID USERS: find a real match ─────────────────────────────────────
-    const eligible = await findEligibleUsers(me, userId, genderFilter);
+    const eligible = await findEligibleUsers(me, userId);
 
     if (eligible.length === 0) {
-      await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "🛍️ Satisfy Yourself" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }], [{ text: "🛍️ Satisfy Yourself" }]], resize_keyboard: true },
-      });
+      await sendMain(chatId, me, "😔 No matches available right now — try again in a moment!");
       return;
     }
 
-    // Prioritize the most-recently-seen tier available: online > recent >
-    // last used recently > used some time ago > never used. Only reach into
-    // an older tier when nobody better is eligible.
-    const bestTier = Math.min(...eligible.map((c: typeof usersTable.$inferSelect) => matchTier(c.lastSeenAt)));
-    const topTierMatches = eligible.filter((c: typeof usersTable.$inferSelect) => matchTier(c.lastSeenAt) === bestTier);
-    const match: typeof usersTable.$inferSelect = pickRandom(topTierMatches);
-    const matchWasOffline = !isOnline(match.lastSeenAt);
+    const match = pickRandom(eligible);
     const newCount      = (me.chatCount    ?? 0) + 1;
     const matchNewCount = (match.chatCount ?? 0) + 1;
 
@@ -3979,9 +1711,7 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
       // If yes — the match message is already on its way, don't send a confusing "no matches" message.
       const currentState = await getUser(userId);
       if (currentState?.state === "chatting") return; // already connected — stay silent
-      await bot.sendMessage(chatId, "😔 No matches available right now. Try again in a moment!", {
-        reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }], [{ text: "🛍️ Satisfy Yourself" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }], [{ text: "🛍️ Satisfy Yourself" }]], resize_keyboard: true },
-      });
+      if (currentState) await sendMain(chatId, currentState, "😔 No matches available right now — try again in a moment!");
       return;
     }
 
@@ -3990,38 +1720,30 @@ async function findMatch(chatId: number, userId: number, genderFilter?: "male" |
     // Both sides claimed atomically — send exactly ONE message each
     const stopKb = { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true };
     await bot.sendMessage(chatId,
-      `✅ Match found! You're now connected with *${match.name}*, ${match.age}. Say hello! 👋`,
-      { parse_mode: "Markdown", reply_markup: stopKb }
+      `✅ Match found! You're now connected with <b>${escHtml(match.name)}</b>, ${escHtml(match.age)}. Say hello! 👋`,
+      { parse_mode: "HTML", reply_markup: stopKb }
     );
 
-    // Try to notify match partner — if they deactivated/blocked, clean up and tell searcher.
-    // If they're offline right now, this Telegram message still delivers as a push
-    // notification, so word it as one to pull them back into the chat.
+    // Try to notify match partner — if they deactivated/blocked, clean up and tell searcher
     try {
-      const partnerText = matchWasOffline
-        ? `🔔 *New match while you were away!* You're now connected with *${me.name}*, ${me.age}. Come back and say hello! 👋`
-        : `✅ Match found! You're now connected with *${me.name}*, ${me.age}. Say hello! 👋`;
-      await bot.sendMessage(match.id, partnerText,
-        { parse_mode: "Markdown", reply_markup: stopKb }
+      await bot.sendMessage(match.id,
+        `✅ Match found! You're now connected with <b>${escHtml(me.name)}</b>, ${escHtml(me.age)}. Say hello! 👋`,
+        { parse_mode: "HTML", reply_markup: stopKb }
       );
     } catch (notifyErr: unknown) {
       const is403 = notifyErr instanceof Error && (notifyErr as NodeJS.ErrnoException & { code?: string; response?: { statusCode?: number } }).response?.statusCode === 403;
       if (is403) {
         // Partner deactivated their account or blocked the bot — mark them inactive
-        // (but never touch protected accounts)
         logger.warn({ matchId: match.id }, "Match partner is deactivated — marking inactive and resetting");
-        if (!isProtected(match.id)) {
-          await db.update(usersTable)
-            .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
-            .where(eq(usersTable.id, match.id));
-        }
+        await db.update(usersTable)
+          .set({ isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
+          .where(eq(usersTable.id, match.id));
         // Reset searcher too — they're no longer connected
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, userId));
-        await bot.sendMessage(chatId, "😔 That match just went offline. Tap 💘 Find Match to try again!", {
-          reply_markup: { keyboard: userId === ADMIN_ID ? [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }]] : [[{ text: "💘 Find Match" }, { text: "👤 My Profile" }], [{ text: "✏️ Edit Profile" }, { text: "✅ Premium" }]], resize_keyboard: true },
-        });
+        const resetUser = await getUser(userId);
+        if (resetUser) await sendMain(chatId, resetUser, "😔 That match just went offline — tap 💘 Find Match to try again!");
       }
       // Non-403 errors: leave the connection as-is (transient network issue)
     }
@@ -4049,17 +1771,8 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
   const id = msg.from.id;
   const param = (match?.[1] ?? "").trim();
   try {
-    touchLastSeen(id);
     let user = await getUser(id);
     const isNew = !user;
-    // ── Banned gate ──────────────────────────────────────────────────────────
-    // Checked against the permanent ban ledger (not just the `users` row) so a
-    // banned user can't escape the ban by deleting their account and starting
-    // over — the ledger entry survives account deletion until an admin /unban.
-    if (await isPermanentlyBanned(id) || user?.isBanned) {
-      await bot.sendMessage(chatId, "🚫 Your account has been banned. You cannot use this platform.");
-      return;
-    }
     if (!user) {
       user = await upsertUser(id, {
         firstName: msg.from!.first_name ?? "",
@@ -4091,73 +1804,18 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
       user = await getUser(id) ?? user;
     }
 
-    // ── Terms gate — shown on every /start (new and returning users) ────────
-    {
-      await bot.sendMessage(chatId,
-        "🔒 *TERMS OF USE & DISCLAIMER — Please Read Carefully*\n" +
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
-
-        "📌 *What is this platform?*\n" +
-        "Global Chat Connect is an *anonymous chatting platform*, NOT a dating app or matrimonial service. It connects you with random strangers for text-based anonymous conversations.\n\n" +
-
-        "🔞 *Age Requirement (18+)*\n" +
-        "You must be *at least 18 years old* to use this service. By accepting, you confirm you are 18+. This is mandatory under Indian laws (IT Act 2000, POCSO Act 2012).\n\n" +
-
-        "🎭 *No Gender Guarantee*\n" +
-        "We do NOT guarantee the gender, age, location, or identity of your match. Matches are random and depend on availability.\n\n" +
-
-        
-
-        "🚫 *No Criminal Liability*\n" +
-        "The platform owner/admin is NOT responsible for any criminal offence, harm, fraud, harassment, or illegal activity carried out by users. Users are solely responsible for their actions under IPC/BNS and IT Act 2000.\n\n" +
-
-        "🔐 *Privacy & Data Safety*\n" +
-        "• Do NOT share your phone number, address, photos, Aadhaar, bank details, or any sensitive personal data in chat.\n" +
-        "• We collect only your Telegram ID and profile data you voluntarily provide.\n" +
-        "• Type /privacy for our full Privacy Policy.\n\n" +
-
-        "⚖️ *Zero Tolerance for Illegal Activity*\n" +
-        "We strictly prohibit and do NOT support: sexual exploitation, harassment, hate speech, threats, fraud, drugs, or any activity illegal under Indian law or Telegram's Terms of Service. Violations result in immediate permanent ban.\n\n" +
-
-        "💳 *Premium Required to Match*\n" +
-        "Matching with real users requires a Premium membership (paid via Telegram Stars). Female users get free access. Payments once activated are non-refundable.\n\n" +
-
-        "🗑️ *Delete Your Profile*\n" +
-        "You may delete all your data at any time by sending /deleteaccount.\n\n" +
-
-        "📋 *Full Legal Docs*\n" +
-        "• /disclaimer — Full Terms of Use\n" +
-        "• /privacy — Privacy Policy\n\n" +
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-        "_By tapping ✅ I Accept below, you confirm that:\n" +
-        "1. You are 18 years or older\n" +
-        "2. You have read and understood all terms above\n" +
-        "3. You agree to abide by Indian laws and Telegram ToS_",
-        {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "✅ I Accept — I Am 18+", callback_data: "agree_terms" }],
-              [{ text: "❌ I Decline", callback_data: "decline_terms" }]
-            ]
-          }
-        }
-      );
-      return;
-    }
-
     // Welcome message only for truly first-time users
     if (isNew) {
       await bot.sendMessage(chatId,
-        "🌍 Welcome to *Global Chat Connect!*\n\nChat anonymously with people from around the world. Your identity is always protected.\n\n_This is an anonymous chat platform — not a dating or matrimonial service._"
+        "💕 Welcome to WorldMatch Dating Bot!\n\nConnect with people from all over the world. Find your perfect match and start chatting! 🌍\n\n" +
+        "📋 By using this bot you agree to our terms — type /disclaimer to read them."
       );
     }
 
     // Show menu — if user row is missing somehow, fall back to a simple prompt
     if (!user) {
       await bot.sendMessage(chatId, "👋 Tap the button below to get started!", {
-        reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
+        reply_markup: { keyboard: [[{ text: "✨ Create Profile" }]], resize_keyboard: true },
       });
       return;
     }
@@ -4168,499 +1826,209 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
     console.error(`[START ERROR] user=${id} error=${errMsg}`);
     // Just show the menu buttons — don't confuse the user with error text
     bot.sendMessage(chatId, "👋 Welcome! Tap the button to get started.", {
-      reply_markup: { keyboard: [[{ text: "🚀 Setup Profile" }]], resize_keyboard: true },
+      reply_markup: { keyboard: [[{ text: "✨ Create Profile" }]], resize_keyboard: true },
     }).catch(() => {});
   }
 });
 
 // ── /help ────────────────────────────────────────────────────────────────────
 
-// ── Terms acceptance callback ────────────────────────────────────────────────
-bot.on('callback_query', async (query) => {
-  const userId = query.from.id;
-  const chatId = query.message?.chat.id;
-  if (!chatId) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
-  try {
-  touchLastSeen(userId);
-  if (await isPermanentlyBanned(userId)) { await bot.answerCallbackQuery(query.id, { text: "🚫 Your account has been banned." }).catch(() => {}); return; }
-
-  // ── Terms acceptance ────────────────────────────────────────────────────────
-  if (query.data === 'agree_terms') {
-    try {
-      await db.update(usersTable)
-        .set({ termsAccepted: true, termsAcceptedAt: new Date(), updatedAt: new Date() })
-        .where(eq(usersTable.id, userId));
-      await bot.answerCallbackQuery(query.id, { text: '✅ Welcome! Terms accepted.' });
-      await bot.editMessageText(
-        '✅ *Terms Accepted!*\n\nWelcome to *Global Chat Connect* 🌍\n\nYour identity is anonymous. Chat safely and respectfully.\n\n_Type /privacy anytime to view our Privacy Policy._',
-        { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
-      ).catch(() => {});
-      const user = await getUser(userId);
-      if (user) await sendMain(chatId, user);
-    } catch (err) {
-      logger.error({ err }, 'agree_terms callback error');
-      await bot.answerCallbackQuery(query.id, { text: 'Something went wrong. Send /start to try again.' });
-    }
-    return;
-  }
-
-  // ── Terms decline ─────────────────────────────────────────────────────────
-  if (query.data === 'decline_terms') {
-    await bot.answerCallbackQuery(query.id, { text: 'You declined. You cannot use the bot without accepting.' });
-    await bot.editMessageText(
-      '❌ *Terms Declined*\n\nYou cannot use Global Chat Connect without accepting the Terms of Use and confirming you are 18+.\n\nIf you change your mind, send /start to try again.',
-      { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
-    ).catch(() => {});
-    return;
-  }
-
-  // ── Plan button tapped — send Telegram Stars invoice ──────────────────────
-    if (query.data === 'plan_week2' || query.data === 'plan_month' || query.data === 'plan_yearly') {
-      const key = query.data.replace('plan_', '') as PlanKey;
-      const plan = PLANS[key];
-      await bot.answerCallbackQuery(query.id).catch(() => {});
-      await (bot as any).sendInvoice(
-        chatId,
-        `${plan.emoji} ${plan.label} Premium`,
-        `Unlock ${plan.label} Premium access with Telegram Stars!`,
-        key, "", "XTR",
-        [{ label: plan.label, amount: plan.stars }]
-      );
-      return;
-    }
-
-  // ── 48-hour flash offer ────────────────────────────────────────────────────
-  if (query.data === 'plan_offer48') {
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-    // Enforce the 48-hour expiry window
-    if (!offerEndsAt || new Date() > offerEndsAt) {
-      await bot.sendMessage(chatId,
-        "⏰ <b>This offer has expired.</b>\n\nDon't worry — you can still grab Premium at regular prices! Tap 💎 Go Premium from the main menu.",
-        { parse_mode: "HTML" }
-      );
-      return;
-    }
-    const plan = PLANS.offer48;
-    await (bot as any).sendInvoice(
-      chatId,
-      `🔥 FLASH OFFER — Lifetime Premium`,
-      `48-Hour Special: Lifetime Premium for just ${plan.stars} Stars — one-time, never expires!`,
-      "offer48", "", "XTR",
-      [{ label: "Lifetime Premium (48H Flash Offer)", amount: plan.stars }]
-    );
-    return;
-  }
-  // ── Admin gender-picker: connect with males or females ───────────────────
-  if (query.data === 'admin_match_female' || query.data === 'admin_match_male') {
-    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
-    const gender = query.data === 'admin_match_female' ? 'female' : 'male';
-    await findMatch(chatId, userId, gender);
-    return;
-  }
-
-  // ── Deals channel broadcast ───────────────────────────────────────────────
-  if (query.data === 'deals_broadcast_confirm') {
-    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-    await bot.editMessageText('📣 Sending deals broadcast...', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
-
-    const DEALS_MSG =
-      "Hey! 👋\n\n" +
-      "Ek useful cheez share karna tha — ek channel hai @dealsatyourdoo jahan daily discount deals post hoti hain.\n\n" +
-      "Electronics, fashion, daily essentials — kaafi baar 50-70% tak ka discount milta hai. Agar deals dhundhte ho toh worth checking out hai.\n\n" +
-      "Join karo: @dealsatyourdoo\n\n" +
-      "Bas itna hi, enjoy chatting! 😊";
-
-    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
-    let sent = 0, failed = 0;
-    for (const u of allUsers) {
-      let retries = 3;
-      while (retries-- > 0) {
-        try {
-          await bot.sendMessage(u.id, DEALS_MSG);
-          sent++;
-          break;
-        } catch (e: any) {
-          const retryAfter = e?.response?.body?.parameters?.retry_after;
-          if (retryAfter) {
-            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-          } else {
-            failed++;
-            break;
-          }
-        }
-      }
-      await new Promise(r => setTimeout(r, 50));
-    }
-    await bot.sendMessage(chatId,
-      `✅ *Deals broadcast done!*\n📤 Sent: ${sent} | ❌ Failed: ${failed}`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  // ── Custom broadcast confirm / cancel ────────────────────────────────────
-  if (query.data === 'custom_broadcast_confirm' || query.data === 'custom_broadcast_cancel') {
-    if (userId !== ADMIN_ID) { await bot.answerCallbackQuery(query.id).catch(() => {}); return; }
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-
-    if (query.data === 'custom_broadcast_cancel') {
-      awaitingBroadcastText.delete(userId);
-      await bot.editMessageText('❌ Broadcast cancelled.', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
-      return;
-    }
-
-    // Confirm — retrieve stored text
-    const stored = awaitingBroadcastText.get(userId);
-    if (!stored || !stored.startsWith('preview:')) {
-      await bot.sendMessage(chatId, '⚠️ No message found. Please start again with /broadcasttext').catch(() => {});
-      return;
-    }
-    const broadcastMsg = stored.slice('preview:'.length);
-    awaitingBroadcastText.delete(userId);
-    customBroadcastUsed = true;
-
-    await bot.editMessageText('📣 Sending...', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
-
-    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
-    let sent = 0, failed = 0;
-    for (const u of allUsers) {
-      // Retry on Telegram flood-control (429 retry_after) instead of giving up
-      // immediately — otherwise a brief rate-limit window silently drops
-      // whichever users happen to be in the queue at that moment.
-      let retries = 3;
-      while (retries-- > 0) {
-        try {
-          await bot.sendMessage(u.id, broadcastMsg, { parse_mode: 'Markdown' });
-          sent++;
-          break;
-        } catch (e: any) {
-          const retryAfter = e?.response?.body?.parameters?.retry_after;
-          if (retryAfter) {
-            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-          } else {
-            failed++;
-            break;
-          }
-        }
-      }
-      await new Promise(r => setTimeout(r, 60)); // 60ms delay — stay under Telegram rate limits
-    }
-    await bot.sendMessage(chatId,
-      `✅ *Broadcast complete!*\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n\n🔒 Custom broadcast is now locked for this session.`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  // ── Delete account confirmation ──────────────────────────────────────────
-  if (query.data === 'delete_confirm') {
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-    try {
-      const target = await getUser(userId);
-      if (!target) {
-        await bot.editMessageText('❌ Account not found.', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
-        return;
-      }
-      // Disconnect from any active chat first
-      if (target.state === 'chatting' && target.chattingWith && target.chattingWith !== FAKE_CHAT_ID) {
-        const partnerId = target.chattingWith;
-        const partner = await getUser(partnerId);
-        if (partner) {
-          await db.update(usersTable).set({ state: 'idle', chattingWith: null, updatedAt: new Date() })
-            .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, userId)));
-          await sendMain(partnerId, partner, 'Your match disconnected. Tap 💘 Find Match to connect with someone new!').catch(() => {});
-        }
-      }
-      if (target.state === 'chatting' && target.chattingWith === FAKE_CHAT_ID) {
-        const fakeTimer = chatTimerMap.get(userId);
-        if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(userId); }
-        fakePersonaMap.delete(userId);
-        fakeReplySet.delete(userId);
-      }
-      await db.delete(usersTable).where(eq(usersTable.id, userId));
-      await bot.editMessageText(
-        '🗑️ *Account deleted.*\n\nAll your data has been removed. You can start fresh anytime with /start.',
-        { chat_id: chatId, message_id: query.message?.message_id, parse_mode: 'Markdown' }
-      ).catch(() => {});
-    } catch (err) {
-      logger.error({ err, userId }, 'delete_confirm callback error');
-      await bot.sendMessage(chatId, '❌ Something went wrong. Try again or contact support.').catch(() => {});
-    }
-    return;
-  }
-
-  if (query.data === 'delete_cancel') {
-    await bot.answerCallbackQuery(query.id, { text: 'Cancelled.' }).catch(() => {});
-    await bot.editMessageText('✅ Your account is safe — nothing was deleted.', { chat_id: chatId, message_id: query.message?.message_id }).catch(() => {});
-    return;
-  }
-
-  // Unknown callback — ignore silently
-  await bot.answerCallbackQuery(query.id).catch(() => {});
-  } catch (err) {
-    logger.error({ err, userId, data: query.data }, "callback_query unhandled error");
-    bot.answerCallbackQuery(query.id, { text: "Something went wrong. Please try again." }).catch(() => {});
-  }
-});
-
-// ── Telegram Stars: approve all incoming pre-checkout queries ─────────────────
-// Telegram sends this within seconds of the user tapping "Pay". The bot MUST
-// answer within 10 seconds or Telegram automatically cancels the payment.
-bot.on('pre_checkout_query', async (query) => {
-  try {
-    await bot.answerPreCheckoutQuery(query.id, true);
-    logger.info({ userId: query.from.id, payload: query.invoice_payload }, "Pre-checkout approved");
-  } catch (err) {
-    logger.warn({ err }, "answerPreCheckoutQuery failed");
-  }
-});
-
-// ── Telegram Stars: grant premium after successful payment ────────────────────
-// Fires once Telegram has debited the Stars. This is the ONLY place
-// where premium should be granted for Stars payments.
-bot.on('message', async (msg) => {
-  if (!msg.successful_payment) return;
-
-  const userId = msg.from!.id;
-  const chatId = msg.chat.id;
-  const payload = msg.successful_payment.invoice_payload as PlanKey;
-  const plan = PLANS[payload];
-
-  if (!plan) {
-    logger.warn({ userId, payload }, "Unknown plan payload in successful_payment — cannot grant premium");
-    return;
-  }
-
-  // Lifetime plans (yearly + offer48) get null expiry so isPremiumActive treats them as permanent
-  const isLifetime = payload === "yearly" || payload === "offer48";
-  const expiry = isLifetime ? null : getPremiumExpiry(plan.days);
-  const expStr = expiry
-    ? expiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
-    : "Forever ♾️";
-
-  try {
-    await db.update(usersTable)
-      .set({ hasPaid: true, premiumExpiresAt: expiry, updatedAt: new Date() })
-      .where(eq(usersTable.id, userId));
-
-    // If user was mid-fake-chat, clear that so they can Find Match immediately
-    if (fakePersonaMap.has(userId)) {
-      const fakeTimer = chatTimerMap.get(userId);
-      if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(userId); }
-      fakePersonaMap.delete(userId);
-      fakeReplySet.delete(userId);
-      await db.update(usersTable)
-        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-        .where(and(eq(usersTable.id, userId), eq(usersTable.state, "chatting")));
-    }
-
-    const user = await getUser(userId);
-    if (user) {
-      await sendMain(userId, user,
-        `🎉 *Payment successful!* Welcome to Premium ${plan.emoji}\n\n` +
-        `✅ *${plan.label}* access activated\n` +
-        (isLifetime ? `♾️ *Lifetime access — never expires!*\n\n` : `📅 Valid until: *${expStr}*\n\n`) +
-        `Tap 💘 Find Match to connect with real people now!`
-      );
-    }
-
-    logger.info({ userId, plan: payload, expiry }, "Premium granted via Telegram Stars");
-
-    bot.sendMessage(ADMIN_ID,
-      `💎 New Stars payment!\nUser: ${userId}\nPlan: ${plan.label} (${plan.stars} ⭐)\nExpires: ${expStr}`
-    ).catch(() => {});
-
-  } catch (err) {
-    logger.error({ err, userId }, "Failed to grant premium after successful_payment");
-    await bot.sendMessage(chatId,
-      "❌ Payment received but activation failed. Please contact support with your Telegram ID."
-    ).catch(() => {});
-  }
-});
-
-
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
-    "ℹ️ *WorldMatch Commands*\n\n" +
-    "/start — Start / restart\n" +
+    "ℹ️ <b>FlirtyBaby Commands</b>\n\n" +
+    "/start — Start the bot\n" +
     "/profile — View your profile\n" +
     "/edit — Edit your profile\n" +
     "/match — Find a match\n" +
     "/stop — End current chat\n" +
-    "/report — Report current match to admin\n" +
-    "/block — Block current match\n" +
     "/premium — Upgrade to Premium 💎\n" +
-    "/pay — Payment info\n" +
-    "/disclaimer — Full Terms of Use & Legal Notice\n" +
-    "/privacy — Privacy Policy\n" +
+    "/disclaimer — Terms of use &amp; legal notice\n" +
+    "/deleteaccount — 🗑 Permanently delete your account &amp; data\n" +
     "/help — Show this help",
-    { parse_mode: "Markdown" }
+    { parse_mode: "HTML" }
   );
 });
 
-  // ── /disclaimer ───────────────────────────────────────────────────────────────
-  bot.onText(/\/disclaimer/, async (msg) => {
-    const part1 =
-      "📋 *TERMS OF USE & FULL DISCLAIMER*\n" +
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+// ── /disclaimer ───────────────────────────────────────────────────────────────
 
-      "*1. Platform Nature*\n" +
-      "Global Chat Connect is an *anonymous chatting platform*. It is NOT a dating app, matrimonial service, or social network. The platform facilitates anonymous text-based conversations between consenting adults for entertainment and social interaction only.\n\n" +
+bot.onText(/\/disclaimer/, async (msg) => {
+  await bot.sendMessage(msg.chat.id,
+    `📋 <b>DISCLAIMER / TERMS OF USE</b>\n` +
+    `<i>By using this service, you agree to the following:</i>\n\n` +
 
-      "*2. Age Restriction (18+)*\n" +
-      "This service is strictly for users aged 18 years and above. Use by minors is prohibited under the Protection of Children from Sexual Offences (POCSO) Act, 2012, and the Information Technology (Intermediary Guidelines) Rules, 2021. By using this service you confirm you are 18+.\n\n" +
+    `<b>1. Nature of Service</b>\n` +
+    `• This platform provides chat-based interactions for entertainment and social connection.\n` +
+    `• We do not guarantee real-life meetings, relationships, or outcomes.\n\n` +
 
-      "*3. No Gender Guarantee*\n" +
-      "We do NOT guarantee the gender, age, location, nationality, or identity of any user you are matched with. Matching is random and subject to platform availability. No claims of any specific gender match are made or implied.\n\n" +
+    `<b>2. Matching &amp; Users</b>\n` +
+    `• We do NOT guarantee connection with any specific gender.\n` +
+    `• Matches depend on availability, activity, and system logic.\n\n` +
 
-      "*4. Premium Required*\n" +
-      "Matching with real users requires an active Premium membership. Female users are granted free access. No AI-simulated chat sessions are provided.\n\n" +
+    `<b>3. Interaction</b>\n` +
+    `• Initial or fallback chats may be powered by automated systems.\n` +
+    `• These are used to maintain engagement when real users are unavailable.\n\n` +
 
-      "*5. No Criminal Liability*\n" +
-      "The platform owner, developers, and administrators are NOT responsible for any criminal offence, civil wrong, harm, fraud, harassment, cheating, defamation, extortion, blackmail, or any illegal act committed by users. Each user is solely responsible for their conduct under the Indian Penal Code / Bharatiya Nyaya Sanhita (BNS) 2023, IT Act 2000, and all applicable laws.\n\n" +
+    `<b>4. No Guarantee of Match</b>\n` +
+    `• We do not guarantee that you will always be connected to a real human.\n` +
+    `• Delays or unavailability of matches may occur.\n\n` +
 
-      "*6. Zero Tolerance Policy*\n" +
-      "We strictly PROHIBIT and do NOT support:\n" +
-      "• Sexual exploitation, grooming, or obscene content\n" +
-      "• Harassment, bullying, or threatening messages\n" +
-      "• Hate speech based on religion, caste, gender, or ethnicity\n" +
-      "• Fraud, phishing, or financial scams\n" +
-      "• Drug promotion or any illegal trade\n" +
-      "• Any content violating Telegram's Terms of Service\n" +
-      "Violations result in immediate and permanent ban. We cooperate fully with law enforcement.\n\n" +
+    `<b>5. Payments</b>\n` +
+    `• Payments unlock features such as extended chat access or priority matching.\n` +
+    `• Payment does NOT guarantee a specific type of match.\n` +
+    `• All payments are final and non-refundable once service is activated.\n\n` +
 
-      "*7. Privacy & Data Protection*\n" +
-      "• Do NOT share: phone numbers, home address, Aadhaar/PAN, bank details, or photos showing your face or identity.\n" +
-      "• We collect only: your Telegram ID, chosen display name, age, gender preference.\n" +
-      "• Data is handled per the Digital Personal Data Protection Act (DPDPA) 2023.\n" +
-      "• Type /privacy for our complete Privacy Policy.\n\n" +
+    `<b>6. User Responsibility</b>\n` +
+    `• You agree to use respectful language and behavior.\n` +
+    `• Abuse, harassment, or misuse may result in suspension or ban without refund.\n\n` +
 
-      "*8. Payment Terms*\n" +
-      "• Matching requires a Premium membership (paid via Telegram Stars).\n" +
-      "• Female users have free access to all matching features.\n" +
-      "• Payments are non-refundable once the premium service is activated.\n" +
-      "• Payment does NOT guarantee any specific type, gender, or quality of match.\n\n" +
+    `<b>7. Privacy</b>\n` +
+    `• Do not share sensitive personal information (phone, address, etc.).\n` +
+    `• We are not responsible for information voluntarily shared with others.\n\n` +
 
-      "*9. Account Deletion*\n" +
-      "You may delete your profile and all associated data at any time by sending /deleteaccount. Data is removed within 30 days of the request.\n\n" +
+    `<b>8. Service Availability</b>\n` +
+    `• We do not guarantee uninterrupted or error-free service.\n` +
+    `• Features may change at any time without notice.\n\n` +
 
-      "*10. Disclaimer of Warranties*\n" +
-      "The service is provided 'as is' without any warranty of uninterrupted access, error-free operation, or fitness for a particular purpose. Features may be modified or discontinued at any time.\n\n" +
+    `<b>9. Age Requirement</b>\n` +
+    `• You must be 18+ to use this service.\n` +
+    `• Accounts found to belong to minors will be deleted immediately.\n\n` +
 
-      "*11. Governing Law*\n" +
-      "This service is governed by the laws of India. Any disputes are subject to the jurisdiction of courts in India. Users must also comply with Telegram's Terms of Service (https://telegram.org/tos).\n\n" +
+    `⚠️ <b>SCAM ALERT — PLEASE READ CAREFULLY</b> ⚠️\n` +
+    `• We have received multiple complaints from users who were SCAMMED by individuals on this platform.\n` +
+    `• <b>DO NOT pay any girl (or anyone) for a "paid live video call", "private video show", or any sexual/vulgar content.</b>\n` +
+    `• These are scams. Once you pay, they block you or disappear. You will NOT get anything.\n` +
+    `• We have ZERO connection to any such transactions. We do NOT endorse, support, or allow this.\n` +
+    `• If someone asks you for money or payment outside this bot — report them immediately using /report.\n` +
+    `• <b>You have been warned. Paying them is your decision at your own risk. We are not responsible.</b>\n\n` +
 
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-      "_Last updated: 2025. By using this bot you confirm you have read, understood, and agreed to these terms._\n\n" +
-      "_Type /privacy for our Privacy Policy._";
+    `<b>10. Your Data Rights</b>\n` +
+    `• You may view your stored data at any time using /profile.\n` +
+    `• You may update your data at any time using /edit.\n` +
+    `• You may permanently delete ALL your data using /deleteaccount.\n` +
+    `• Deletion is instant and irreversible.\n\n` +
 
-    await bot.sendMessage(msg.chat.id, part1, { parse_mode: "Markdown", disable_web_page_preview: true });
-  });
+    `<b>11. Privacy Policy</b>\n` +
+    `• Full privacy policy: https://flirtybabybot.replit.app/privacy\n\n` +
 
+    `<i>By continuing to use the bot, you confirm that you are 18+, understand, and accept these terms.</i>`,
+    { parse_mode: "HTML" }
+  );
+});
 
-  // ── /privacy ─────────────────────────────────────────────────────────────────
-  bot.onText(/\/privacy/, async (msg) => {
+// ── /deleteaccount — user self-deletion (GDPR right to erasure) ──────────────
+
+const pendingDeleteConfirm = new Set<number>();
+
+bot.onText(/\/deleteaccount/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from!.id;
+
+  const user = await getUser(userId);
+  if (!user) {
+    await bot.sendMessage(chatId, "You don't have an account to delete.");
+    return;
+  }
+
+  pendingDeleteConfirm.add(userId);
+  await bot.sendMessage(chatId,
+    `⚠️ <b>Delete Account</b>\n\n` +
+    `This will permanently delete:\n` +
+    `• Your profile (name, age, gender, bio, photo)\n` +
+    `• Your match history\n` +
+    `• Your preferences\n` +
+    `${user.hasPaid ? `• Your <b>Premium</b> subscription (no refund)\n` : ""}` +
+    `\nThis action is <b>instant and irreversible</b>.\n\n` +
+    `Type <code>DELETE</code> to confirm, or anything else to cancel.`,
+    { parse_mode: "HTML" }
+  );
+});
+
+bot.on("message", async (msg) => {
+  const userId = msg.from!.id;
+  if (!pendingDeleteConfirm.has(userId)) return;
+  if (!msg.text) return;
+
+  pendingDeleteConfirm.delete(userId);
+
+  if (msg.text.trim().toUpperCase() !== "DELETE") {
+    await bot.sendMessage(msg.chat.id, "✅ Account deletion cancelled. Your data is safe.");
+    return;
+  }
+
+  try {
+    const user = await getUser(userId);
+    if (!user) { await bot.sendMessage(msg.chat.id, "Account not found."); return; }
+
+    // Disconnect chat partner if active
+    if (user.state === "chatting" && user.chattingWith) {
+      await db.update(usersTable)
+        .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+        .where(eq(usersTable.id, user.chattingWith));
+      bot.sendMessage(user.chattingWith,
+        "Your chat partner has left. Tap 💘 Find Match to find a new match!"
+      ).catch(() => {});
+    }
+
+    await db.delete(usersTable).where(eq(usersTable.id, userId));
+
+    logger.info({ userId }, "User self-deleted account");
+
     await bot.sendMessage(msg.chat.id,
-      "🔐 *PRIVACY POLICY — Global Chat Connect*\n" +
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
-
-      "*1. Data We Collect*\n" +
-      "• Your Telegram User ID (assigned by Telegram, not chosen by you)\n" +
-      "• Display name and age you enter during profile setup\n" +
-      "• Gender and chat preference\n" +
-      "• Country (optional)\n" +
-      "• Premium payment status (Stars transaction reference only)\n" +
-      "• Chat activity timestamps (no message content is stored)\n\n" +
-
-      "*2. Data We Do NOT Collect*\n" +
-      "• Your real name, phone number, email, or address\n" +
-      "• The content of your chats (messages are not logged or stored)\n" +
-      "• Your IP address or device information\n" +
-      "• Any financial/payment instrument details\n\n" +
-
-      "*3. How We Use Your Data*\n" +
-      "• To match you with other users\n" +
-      "• To maintain your account and premium status\n" +
-      "• To enforce our Terms of Use and ban policy\n" +
-      "• To send platform-related announcements via the bot\n\n" +
-
-      "*4. Data Sharing*\n" +
-      "• We do NOT sell, rent, or share your data with third parties for marketing.\n" +
-      "• We may share data with Indian law enforcement agencies if legally required under the IT Act 2000 or court order.\n\n" +
-
-      "*5. Data Retention*\n" +
-      "• Your data is retained while your account is active.\n" +
-      "• Send /deleteaccount to request deletion. All personal data is erased within 30 days.\n" +
-      "• Logs required for legal compliance may be retained for up to 90 days as per IT Rules 2021.\n\n" +
-
-      "*6. Children's Privacy*\n" +
-      "This service is strictly for adults (18+). We do not knowingly collect data from minors. If we become aware a minor has used the service, their account is immediately deleted.\n\n" +
-
-      "*7. Security*\n" +
-      "• Data is stored on secured servers.\n" +
-      "• Chat sessions are anonymous — your Telegram identity is never revealed to your match.\n" +
-      "• We recommend you never share personal information in chat.\n\n" +
-
-      "*8. Your Rights (DPDPA 2023)*\n" +
-      "• Right to access your data: send /profile\n" +
-      "• Right to correct your data: send /edit\n" +
-      "• Right to delete your data: send /deleteaccount\n\n" +
-
-      "*9. Cookies & Tracking*\n" +
-      "This is a Telegram bot — no cookies, tracking pixels, or analytics scripts are used.\n\n" +
-
-      "*10. Contact*\n" +
-      "For privacy concerns or data requests, contact the platform admin via Telegram.\n\n" +
-
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-      "_Governed by the Digital Personal Data Protection Act (DPDPA) 2023, India._",
-      { parse_mode: "Markdown" }
+      `✅ <b>Account deleted.</b>\n\n` +
+      `All your data has been permanently removed from our systems.\n\n` +
+      `If you ever want to come back, just send /start 💕`,
+      { parse_mode: "HTML", reply_markup: { remove_keyboard: true } }
     );
-  });
+  } catch (err) {
+    logger.error({ userId, err }, "Failed to delete user account");
+    await bot.sendMessage(msg.chat.id, "❌ Something went wrong. Please try again or contact support.");
+  }
+});
 
-  // ── Profile helpers ──────────────────────────────────────────────────────────
+// ── Profile helpers ──────────────────────────────────────────────────────────
 
 const EDIT_FIELD_LABELS = [
-  "📝 Change Name", "🎂 Change Age", "❌ Cancel",
+  "📝 Change Name", "🎂 Change Age", "⚤ Change Gender",
+  "💞 Change Looking For", "📖 Change Bio", "🌍 Change Country", "❌ Cancel",
 ];
 
 async function showProfile(chatId: number, user: NonNullable<Awaited<ReturnType<typeof getUser>>>) {
   const gLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", other: "🧑 Other" };
+  const lfLabel: Record<string, string> = { male: "👨 Male", female: "👩 Female", any: "💞 Any" };
+  const premiumLine = user.hasPaid
+    ? `\n✅ <b>Premium</b> — ${user.premiumPlan ?? "Active"}` +
+      (user.premiumExpiresAt ? ` · expires ${new Date(user.premiumExpiresAt).toDateString()}` : "")
+    : `\n🔓 Free account`;
   await bot.sendMessage(chatId,
-    `👤 <b>Your Profile</b>\n\n` +
-    `🏷 Name: <b>${escHtml(user.name)}</b>\n` +
-    `🎂 Age: <b>${escHtml(user.age)}</b>\n` +
-    `⚤ Gender: <b>${escHtml(gLabel[user.gender ?? ""] ?? "—")}</b>\n` +
-        `🌍 Country: <b>${escHtml(user.country)}</b>\n` +
-    `📖 Bio: <i>${escHtml(user.bio)}</i>\n\n` +
-    (() => {
-      const active = isPremiumActive(user);
-      if (!active) return `🔒 Free account — tap 💎 Go Premium to unlock`;
-      if (user.premiumExpiresAt) {
-        const expStr = user.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
-        return `✅ <b>Premium</b> — valid until <b>${expStr}</b>`;
-      }
-      return `✅ <b>Premium member</b>`;
-    })(),
-    { parse_mode: "HTML" }
+    `👤 <b>My Profile</b>\n\n` +
+    `<b>${escHtml(user.name)}</b>, ${escHtml(user.age)} · ${escHtml(gLabel[user.gender ?? ""] ?? "—")}\n` +
+    `💞 Looking for: ${escHtml(lfLabel[user.lookingFor ?? ""] ?? "—")}\n` +
+    `🌍 ${escHtml(user.country)}\n\n` +
+    `<i>${escHtml(user.bio)}</i>` +
+    premiumLine,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[{ text: "✏️ Edit Profile", callback_data: "edit_profile" }]],
+      },
+    }
   );
 }
 
 // First-time profile setup (only called when no profile exists)
 async function startSetup(chatId: number, id: number) {
+  // Safety guard: if profile is already complete, don't wipe it — send them to main menu
+  const existing = await getUser(id);
+  if (existing?.isProfileComplete) {
+    await sendMain(chatId, existing, "Your profile is already set up! Choose what to do next.");
+    return;
+  }
   editModeMap.delete(id); // ensure we're NOT in edit mode
-  // Gender is permanent once chosen — preserve it for ALL genders so users can't
-  // re-do setup to swap gender (e.g. male trying to flip to female for free access)
-  const existingForSetup = await getUser(id);
-  const isGenderLocked = existingForSetup?.gender != null;
-  // Wipe all old profile fields — but always keep gender if already set
+  // Wipe all old profile fields so the user always starts completely fresh
   await upsertUser(id, {
     name: null as any,
     age: null as any,
-    ...(isGenderLocked ? {} : { gender: null as any }),
+    gender: null as any,
     lookingFor: null as any,
     bio: null as any,
     country: null as any,
@@ -4668,7 +2036,7 @@ async function startSetup(chatId: number, id: number) {
     state: "setup_name",
   });
   await bot.sendMessage(chatId,
-    "Just 3 questions — let's get started! 🎉\n\n*Step 1 of 3* — 📝 What is your name?\n\n_First name only._",
+    "Let's build your profile! 🎉\n\n*Step 1 of 3* — 📝 What's your name?\n\n_Type your first name only._",
     { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
   );
 }
@@ -4677,12 +2045,14 @@ async function startSetup(chatId: number, id: number) {
 async function startEditProfile(chatId: number, id: number) {
   editModeMap.set(id, "choosing");
   await bot.sendMessage(chatId,
-    "✏️ *Edit Profile*\n\nWhat do you want to change?",
+    "✏️ *Edit Profile*\n\nWhich field do you want to change?",
     {
       parse_mode: "Markdown",
       reply_markup: {
         keyboard: [
           [{ text: "📝 Change Name" }, { text: "🎂 Change Age" }],
+          [{ text: "⚤ Change Gender" }, { text: "💞 Change Looking For" }],
+          [{ text: "📖 Change Bio" }, { text: "🌍 Change Country" }],
           [{ text: "❌ Cancel" }],
         ],
         resize_keyboard: true,
@@ -4703,32 +2073,40 @@ async function finishEditField(chatId: number, id: number) {
 // ── Message router ────────────────────────────────────────────────────────────
 
 bot.on("message", async (msg) => {
-  if (!msg.text && !msg.photo) return; // documents/files not supported
+
   if (!msg.from) return; // ignore channel posts / anonymous senders
   const chatId = msg.chat.id;
   const id = msg.from.id;
-  const text = (msg.text ?? "").trim();
-
-  if (text.startsWith("/")) return;
-
-  touchLastSeen(id);
-
-  // ── Banned gate ────────────────────────────────────────────────────────────
-  // Checked against the permanent ledger, not just the `users.isBanned` flag,
-  // so a ban still applies even if the account row was deleted and recreated.
-  if (await isPermanentlyBanned(id)) return; // silently drop — no reply for banned users
-
-  // ── Flood protection ──────────────────────────────────────────────────────
-  if (isFloodRestricted(id)) return; // silently drop while restricted
-  if (checkFlood(id)) {
-    if (!userFloodWarned.has(id)) {
-      userFloodWarned.add(id);
-      await bot.sendMessage(chatId,
-        "⏳ Slow down — too many messages at once. Please wait 30 seconds and try again."
-      ).catch(() => {});
+  const successfulPayment = (msg as any).successful_payment as { invoice_payload?: string; total_amount?: number; currency?: string } | undefined;
+  if (successfulPayment) {
+    try {
+      const parts = String(successfulPayment.invoice_payload ?? "").split(":");
+      const paidUserId = Number(parts[1]);
+      const plan = parts[2] as PremiumPlanKey;
+      if (parts[0] !== "premium" || paidUserId !== id || !PREMIUM_PLANS[plan]) {
+        logger.warn({ userId: id, payload: successfulPayment.invoice_payload }, "Invalid Telegram Stars payment payload");
+        await bot.sendMessage(chatId, "Payment received, but plan verification failed. Please contact admin.");
+        return;
+      }
+      const expiresAt = await activatePremium(id, plan);
+      const updated = await getUser(id);
+      await bot.sendMessage(
+        chatId,
+        `🎉 *Premium Activated!*\n\nPlan: *${PREMIUM_PLANS[plan].label}*\nPaid: *${PREMIUM_PLANS[plan].stars} Stars ⭐*\nExpires: *${expiresAt.toDateString()}*\n\nAb unlimited real matches — no timer, no limits 💎`,
+        { parse_mode: "Markdown" }
+      );
+      if (updated) await sendMain(chatId, updated, "Tap 💘 Find Match to start chatting!");
+      logger.info({ userId: id, plan, stars: successfulPayment.total_amount }, "Telegram Stars premium activated");
+    } catch (err) {
+      logger.error({ userId: id, err }, "Telegram Stars payment activation failed");
+      await bot.sendMessage(chatId, "Payment received, but activation failed. Please message admin with /premium.");
     }
     return;
   }
+  if (!msg.text && !msg.photo) return; // documents/files not supported
+  const text = (msg.text ?? "").trim();
+
+  if (text.startsWith("/")) return;
 
   // Per-user lock — prevents concurrent DB hammering when user taps buttons rapidly
   if (processingSet.has(id)) return;
@@ -4748,28 +2126,18 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // ── Satisfy Yourself: Amazon Deals ───────────────────────────────────────
-    if (text === "🛍️ Satisfy Yourself") {
-      await bot.sendMessage(chatId,
-        "🛍️ *Satisfy Yourself!*\n\n🔥 Top Amazon deals — tap the link below to open instantly:\n\n[👉 Shop Deals Now](https://link.amazon/B07xsETmy)\n\nGreat discounts on electronics, fashion & daily essentials! 🛒",
-        {
-          parse_mode: "Markdown",
-          disable_web_page_preview: false,
-          reply_markup: {
-            inline_keyboard: [[
-              { text: "🛒 Open Amazon Deals", url: "https://link.amazon/B07xsETmy" }
-            ]]
-          }
-        }
-      );
+    // ── Auto-repair: silently fix profiles where all fields filled but flag not set ──
+    user = await repairProfileIfNeeded(user);
+
+    if (msg.photo && !user.hasPaid) {
+      await sendPayGate(chatId, "📸 Payment screenshot ki zaroorat nahi hai — ab Premium sirf Telegram Stars se instant activate hota hai.");
       return;
     }
 
     // ── Escape hatch: pressing any main-menu button while stuck in a setup step resets to idle ──
     const MAIN_MENU_BUTTONS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile",
-      "🛑 Stop Matching", "🛑 Stop Chat", "💎 Go Premium",
-      "✅ Premium", "💳 Support Us", "🚀 Setup Profile",
-      "🛍️ Satisfy Yourself"];
+      "🛑 Stop Matching", "🛑 Stop Chat", "💎 Go Premium", "⭐ Go Premium",
+      "✅ Premium", "💳 Support Us", "🚀 Setup Profile", "✨ Create Profile"];
     if (MAIN_MENU_BUTTONS.includes(text) &&
         user.state !== "idle" && user.state !== "chatting") {
       editModeMap.delete(id);
@@ -4793,15 +2161,6 @@ bot.on("message", async (msg) => {
     // ── Edit field picker (idle + editModeMap = "choosing") ─────────────
     if (user.state === "idle" && editModeMap.get(id) === "choosing") {
       if (text === "📝 Change Name") {
-        // Female users cannot change their name — it is permanently locked
-        if (user.gender === "female") {
-          await bot.sendMessage(chatId, "♀️ Female profiles have a locked name and cannot be changed.", { reply_markup: { remove_keyboard: true } });
-          editModeMap.delete(id);
-          await upsertUser(id, { state: "idle" });
-          const fresh = await getUser(id);
-          await sendMain(chatId, fresh!);
-          return;
-        }
         editModeMap.set(id, "name");
         await upsertUser(id, { state: "setup_name" });
         await bot.sendMessage(chatId,
@@ -4821,6 +2180,13 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId,
           `⚤ *Change Gender*\n\nCurrent: *${escMd(user.gender)}*`,
           { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
+        );
+      } else if (text === "💞 Change Looking For") {
+        editModeMap.set(id, "looking_for");
+        await upsertUser(id, { state: "setup_looking_for" });
+        await bot.sendMessage(chatId,
+          `💞 *Change Looking For*\n\nCurrent: *${escMd(user.lookingFor)}*`,
+          { parse_mode: "Markdown", reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Any" }], [{ text: "❌ Cancel" }]], resize_keyboard: true, one_time_keyboard: true } }
         );
       } else if (text === "📖 Change Bio") {
         editModeMap.set(id, "bio");
@@ -4848,17 +2214,9 @@ bot.on("message", async (msg) => {
       const isEdit = editModeMap.get(id) === "name";
       // Allow "skip" during edit to keep current value
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
-      // Block female users from changing their name (name is permanently locked for females)
-      if (isEdit && user.gender === "female") {
-        await bot.sendMessage(chatId, "♀️ Female profiles have a permanently locked name and cannot be changed.", { reply_markup: { remove_keyboard: true } });
-        editModeMap.delete(id);
-        await upsertUser(id, { state: "idle" });
-        const fresh = await getUser(id);
-        await sendMain(chatId, fresh!);
-        return;
-      }
       const BUTTON_LABELS = ["💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🛑 Stop Chat",
-        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "✅ Premium", "🚀 Setup Profile", ...EDIT_FIELD_LABELS];
+        "🛑 Stop Matching", "💳 Support Us", "💎 Go Premium", "⭐ Go Premium", "✅ Premium",
+        "🚀 Setup Profile", "✨ Create Profile", ...EDIT_FIELD_LABELS];
       if (!text || text.length < 2 || text.length > 50 || BUTTON_LABELS.includes(text) || !/^[a-zA-ZÀ-ÿ\s'\-]+$/.test(text)) {
         await bot.sendMessage(chatId, "Please type your real name (letters only, 2–50 chars).", { reply_markup: { remove_keyboard: true } });
         return;
@@ -4866,7 +2224,7 @@ bot.on("message", async (msg) => {
       const capitalized = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
       await upsertUser(id, { name: capitalized, state: isEdit ? "idle" : "setup_age" });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 😊\n\n*Step 2 of 3* — 🎂 How old are you?`, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, `Nice to meet you, *${capitalized}*! 🎉\n\n*Step 2 of 3* — 🎂 How old are you?`, { parse_mode: "Markdown" });
       return;
     }
 
@@ -4878,34 +2236,9 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, "Please enter a valid age between 18 and 80.");
         return;
       }
-      // Skip gender step if gender is already locked (all genders, not just female)
-      const skipGenderStep = !isEdit && user.gender != null;
-      if (skipGenderStep) {
-        if (user.gender === "female") {
-          // Female: grant lifetime premium and tell her she matches with males only
-          await upsertUser(id, { age, lookingFor: "any", state: "idle" as const, isProfileComplete: true, hasPaid: true, premiumExpiresAt: null });
-          const updatedFemale = await getUser(id);
-          await sendMain(chatId, updatedFemale!,
-            "🎉 Profile ready! 💎 *Lifetime Premium granted — FREE, forever!*\n\n" +
-            "💘 You will be matched with *male users only*. Tap 💘 *Find Match* to begin!"
-          );
-          bot.sendMessage(
-            ADMIN_ID,
-            `👩 <b>New Girl Joined!</b>\n\nName: <b>${escHtml(updatedFemale?.name ?? "Unknown")}</b>\nAge: ${escHtml(updatedFemale?.age ?? "?")} yrs\nID: <code>${id}</code>\nUsername: @${escHtml(updatedFemale?.telegramUsername ?? "none")}`,
-            { parse_mode: "HTML" }
-          ).catch(() => {});
-        } else {
-          // Male / Other: gender is locked, complete profile normally
-          await upsertUser(id, { age, lookingFor: "any", state: "idle", isProfileComplete: true });
-          const updatedMale = await getUser(id);
-          await sendMain(chatId, updatedMale!, "🎉 Profile complete! Unlock Premium to start matching. 👇");
-          await sendPayGate(chatId);
-        }
-        return;
-      }
       await upsertUser(id, { age, state: isEdit ? "idle" : "setup_gender" });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ What is your gender?`, {
+      await bot.sendMessage(chatId, `*Step 3 of 3* — ⚤ What's your *gender*?`, {
         parse_mode: "Markdown",
         reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }, { text: "Other" }]], resize_keyboard: true, one_time_keyboard: true },
       });
@@ -4915,64 +2248,42 @@ bot.on("message", async (msg) => {
     if (user.state === "setup_gender") {
       const isEdit = editModeMap.get(id) === "gender";
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
-      // Gender is permanently locked for everyone once chosen — cannot be changed at all
-      if (user.gender != null) {
-        const gLabel = user.gender === "female" ? "♀️ Female" : user.gender === "male" ? "♂️ Male" : "⚧ Other";
-        await bot.sendMessage(chatId,
-          `🔒 Your gender is permanently set to *${gLabel}* and cannot be changed.`,
-          { parse_mode: "Markdown" }
-        );
-        if (isEdit) { await finishEditField(chatId, id); } else { await upsertUser(id, { state: "idle" }); }
-        return;
-      }
       const gMap: Record<string, "male"|"female"|"other"> = { male:"male", female:"female", other:"other" };
       const g = gMap[text.toLowerCase()];
       if (!g) { await bot.sendMessage(chatId, "Please tap Male, Female, or Other."); return; }
-      const isFemale = g === "female";
-      // Grant lifetime premium immediately for females; complete profile for all
-      if (isFemale) {
-        await upsertUser(id, { gender: g, lookingFor: "any", state: "idle" as const, isProfileComplete: true, hasPaid: true, premiumExpiresAt: null });
-      } else {
-        await upsertUser(id, { gender: g, lookingFor: "any", state: "idle" as const, isProfileComplete: true });
+      if (isEdit) {
+        await upsertUser(id, { gender: g, state: "idle" });
+        await finishEditField(chatId, id);
+        return;
       }
+      await upsertUser(id, { gender: g, lookingFor: "any", state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
-      if (isFemale) {
-        await sendMain(chatId, updated!,
-          "🎉 Profile complete! 💎 *Lifetime Premium granted — FREE, forever!*\n\n" +
-          "💘 You will be matched with *male users only*. Tap 💘 *Find Match* to begin!"
-        );
-        bot.sendMessage(
-          ADMIN_ID,
-          `👩 <b>New Girl Joined!</b>\n\n` +
-          `Name: <b>${escHtml(updated?.name ?? "Unknown")}</b>\n` +
-          `Age: ${escHtml(updated?.age ?? "?")} yrs\n` +
-          `ID: <code>${id}</code>\n` +
-          `Username: @${escHtml(updated?.telegramUsername ?? "none")}`,
-          { parse_mode: "HTML" }
-        ).catch(() => {});
-      } else {
-        await bot.sendMessage(chatId, "🎉 Profile complete! Unlock Premium to start matching with real people. 👇", { parse_mode: "Markdown" });
-        await sendPayGate(chatId);
-      }
+      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set — tap 💘 Find Match to start chatting!");
       return;
     }
 
+    if (user.state === "setup_looking_for") {
+      const isEdit = editModeMap.get(id) === "looking_for";
+      if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
+      const lfMap: Record<string, "male"|"female"|"any"> = { male:"male", female:"female", any:"any" };
+      const lf = lfMap[text.toLowerCase()];
+      if (!lf) { await bot.sendMessage(chatId, "Please tap Male, Female, or Any."); return; }
+      await upsertUser(id, { lookingFor: lf, state: isEdit ? "idle" : "idle", isProfileComplete: true });
+      if (isEdit) { await finishEditField(chatId, id); return; }
+      const updated = await getUser(id);
+      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set — tap 💘 Find Match to start chatting!");
+      return;
+    }
 
     if (user.state === "setup_bio") {
       const isEdit = editModeMap.get(id) === "bio";
       if (isEdit && text.toLowerCase() === "skip") { await finishEditField(chatId, id); return; }
-      if (MAIN_MENU_BUTTONS.includes(text) || EDIT_FIELD_LABELS.includes(text)) {
-        await bot.sendMessage(chatId, "Please write a short bio about yourself (at least 3 characters).");
-        return;
-      }
       if (!text || text.trim().length < 3) { await bot.sendMessage(chatId, "Bio must be at least 3 characters."); return; }
       if (text.length > 300) { await bot.sendMessage(chatId, "Too long! Keep it under 300 characters."); return; }
-      await upsertUser(id, { bio: text.trim(), state: isEdit ? "idle" : "setup_country" });
+      await upsertUser(id, { bio: text.trim(), state: isEdit ? "idle" : "idle", isProfileComplete: true });
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await bot.sendMessage(chatId, `*Step 6 of 6* — 🌍 Which *country* are you from?`, {
-        parse_mode: "Markdown",
-        reply_markup: { remove_keyboard: true },
-      });
+      const updated = await getUser(id);
+      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set — tap 💘 Find Match to start chatting!");
       return;
     }
 
@@ -4987,7 +2298,7 @@ bot.on("message", async (msg) => {
       await upsertUser(id, { country, state: "idle", isProfileComplete: true });
       const updated = await getUser(id);
       if (isEdit) { await finishEditField(chatId, id); return; }
-      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set — tap 👤 My Profile to see it.");
+      await sendMain(chatId, updated!, "🎉 Profile complete! You're all set — tap 💘 Find Match to start chatting!");
       return;
     }
 
@@ -4998,8 +2309,8 @@ bot.on("message", async (msg) => {
 
       // Block any menu button from being accidentally relayed as a chat message
       const CHAT_BLOCKED_BUTTONS = [
-        "💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🚀 Setup Profile",
-        "💎 Go Premium", "✅ Premium", "💳 Support Us", "🛑 Stop Matching",
+        "💘 Find Match", "👤 My Profile", "✏️ Edit Profile", "🚀 Setup Profile", "✨ Create Profile",
+        "💎 Go Premium", "⭐ Go Premium", "✅ Premium", "💳 Support Us", "🛑 Stop Matching",
         ...EDIT_FIELD_LABELS,
       ];
       if (CHAT_BLOCKED_BUTTONS.includes(text ?? "")) {
@@ -5019,9 +2330,8 @@ bot.on("message", async (msg) => {
           if (fresh) await sendMain(chatId, fresh, "Chat session ended. Tap 💘 Find Match to start a new one!");
           return;
         }
-        // Photos during fake chat — no longer used for payments (Telegram Stars handles automatically)
         if (msg.photo) {
-          await bot.sendMessage(chatId, "💬 Photo support is coming soon! Use text messages for now. Or tap the ⭐ Pay with Stars button above to unlock Premium instantly.");
+          await sendPayGate(chatId, "📸 Screenshot nahi chahiye — Telegram Stars se Premium instant active ho jayega.");
           return;
         }
         // Fire-and-forget — releases the processing lock immediately, reply comes async
@@ -5033,10 +2343,9 @@ bot.on("message", async (msg) => {
 
       // Real chat relay — allow messages whenever both sides are still connected to each other
 
-      // ── SAFETY GATE: non-premium, non-female users must NEVER relay to real users ──
-      // Admin always bypasses this gate
-      if (!isPremiumActive(user) && user.gender !== "female" && id !== ADMIN_ID) {
-        logger.warn({ userId: id }, "Relay blocked: no active premium in real chat — force-disconnecting");
+      // ── SAFETY GATE: unpaid users must NEVER relay to real users ───────────
+      if (!user.hasPaid) {
+        logger.warn({ userId: id }, "Relay blocked: unpaid user in real chat — force-disconnecting");
         await db.update(usersTable)
           .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
           .where(eq(usersTable.id, id));
@@ -5057,7 +2366,7 @@ bot.on("message", async (msg) => {
           recipient?.state === "chatting" &&
           recipient.chattingWith === id &&
           recipient.chattingWith !== FAKE_CHAT_ID && // recipient must NOT be in AI fake chat
-          (isPremiumActive(recipient) || recipient.gender === "female" || recipientId === ADMIN_ID) // paid OR female (free tier) OR admin
+          recipient.hasPaid // recipient must still be a paid user
         ) {
           // Both still connected and both verified paid — relay the message
           try {
@@ -5067,20 +2376,6 @@ bot.on("message", async (msg) => {
                 reply_markup: { keyboard: [[{ text: "🛑 Stop Chat" }]], resize_keyboard: true },
               });
             } else if (text) {
-              // ── NSFW gate before relay ──────────────────────────────────────
-              if (isNsfw(text)) {
-                const dropped = await handleNsfwViolation(chatId, id);
-                if (dropped) {
-                  // Restrict — end this chat too
-                  await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, id));
-                  await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, recipientId));
-                  const freshR = await getUser(recipientId).catch(() => null);
-                  if (freshR) await sendMain(recipientId, freshR, "Chat ended.").catch(() => {});
-                  const freshU = await getUser(id);
-                  if (freshU) await sendMain(chatId, freshU, "Chat ended due to policy violation.").catch(() => {});
-                }
-                return;
-              }
               const safeName = escHtml(user.name ?? "Match");
               const safeText = escHtml(text);
               await bot.sendMessage(recipientId, `💬 <b>${safeName}</b>: ${safeText}`, { parse_mode: "HTML" });
@@ -5112,105 +2407,61 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // ── Handle photo sent while idle — treat as Cashfree payment screenshot ──
-    if (msg.photo && !isPremiumActive(user)) {
-      const fileId = msg.photo[msg.photo.length - 1].file_id;
-      if (ADMIN_ID) {
-        await bot.sendPhoto(ADMIN_ID, fileId, {
-          caption:
-            `💰 *Payment Screenshot!*\n\n` +
-            `User: *${escMd(user.name ?? "Unknown")}* (${escMd(user.age ?? "?")})\n` +
-            `ID: \`${user.id}\`\n` +
-            `Username: @${escMd(user.telegramUsername ?? "none")}\n\n` +
-            `Verify payment then run:\n/grant ${user.id}`,
-          parse_mode: "Markdown",
-        }).catch(() => {});
-      }
-      await bot.sendMessage(chatId,
-        "📸 *Screenshot mil gaya!* ✅\n\n" +
-        "Humara team 5-10 minutes mein verify karke tumhara account unlock kar dega. 🚀\n\n" +
-        "Thank you for choosing WorldMatch Premium! 💜",
-        { parse_mode: "Markdown" }
-      );
+    // ── Photo sent without premium — prompt payment ───────────────
+
+    if (msg.photo && !user.hasPaid) {
+      await sendPayGate(chatId, "📸 Premium lo aur chat freely karo!");
       return;
     }
 
     // ── Menu buttons ────────────────────────────────────────────────────
 
-    if (text === "🚀 Setup Profile") {
-      // Always start completely fresh — wipes old profile data
+    // ── Create / Setup Profile ──────────────────────────────────────────────
+    if (text === "✨ Create Profile" || text === "🚀 Setup Profile") {
       if ((user.state as string) === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before setting up your profile."); return; }
       await startSetup(chatId, id);
       return;
     }
-    if (text === "✏️ Edit Profile") {
-      if ((user.state as string) === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before editing your profile."); return; }
-      await startSetup(chatId, id);
-      return;
-    }
-    if (text === "💘 Find Match") {
-      // Admin gets a gender-choice picker before matching
-      if (id === ADMIN_ID) {
-        await bot.sendMessage(chatId, "👑 *Admin Match* — Who do you want to connect with?", {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "👩 Active Females", callback_data: "admin_match_female" }],
-              [{ text: "👨 Active Males",   callback_data: "admin_match_male"   }],
-            ],
-          },
-        });
-        return;
-      }
-      await findMatch(chatId, id);
-      return;
-    }
+    // ── Find Match ─────────────────────────────────────────────────────────
+    if (text === "💘 Find Match") { await findMatch(chatId, id); return; }
+    // ── My Profile ─────────────────────────────────────────────────────────
     if (text === "👤 My Profile") {
       await showProfile(chatId, user);
       return;
     }
+    // ── Edit Profile (keyboard text — legacy / fallback) ───────────────────
+    if (text === "✏️ Edit Profile") {
+      if ((user.state as string) === "chatting") { await bot.sendMessage(chatId, "Stop the current chat first before editing your profile."); return; }
+      await startEditProfile(chatId, id);
+      return;
+    }
+    // ── Stop Chat / Stop Matching ──────────────────────────────────────────
     if (text === "🛑 Stop Matching" || text === "🛑 Stop Chat") { await stopChat(chatId, id); return; }
-    if (text === "💎 Go Premium") {
-      if (id === ADMIN_ID) { await bot.sendMessage(chatId, "👑 You have admin access — no premium required!"); return; }
-      if (isPremiumActive(user)) {
-        const expStr = user.premiumExpiresAt
-          ? `\n📅 Valid until: *${user.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
-          : "";
-        await bot.sendMessage(chatId, `✅ You're a *Premium* member! 💎${expStr}\n\nRenew anytime to extend:`, {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: `⚡ Extend 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-              [{ text: `💎 Extend 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-              [{ text: `👑 Extend Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-            ],
-          },
-        });
+    // ── Go Premium ─────────────────────────────────────────────────────────
+    if (text === "⭐ Go Premium" || text === "💎 Go Premium") {
+      if (user.hasPaid) {
+        await bot.sendMessage(chatId, "✅ You're already a *Premium* member! Enjoy unlimited matches 💖", { parse_mode: "Markdown" });
         return;
       }
       await sendPayGate(chatId);
       return;
     }
-    if (text === "✅ Premium") {
-      if (id === ADMIN_ID) { await bot.sendMessage(chatId, "👑 You have admin access — no premium required!"); return; }
-      if (isPremiumActive(user)) {
-        const expStr = user.premiumExpiresAt
-          ? `\n📅 Expires: *${user.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
-          : "";
-        await bot.sendMessage(chatId, `✅ You're a *Premium* member — unlimited real matches enabled! 💎${expStr}`, { parse_mode: "Markdown" });
-      } else {
-        // Premium expired while button was still shown
-        await sendPayGate(chatId, "⏳ *Your Premium has expired.* Renew now to keep matching! 💕");
-      }
+
+    if (msg.photo && user && !user.hasPaid) {
+      await sendPayGate(chatId, "📸 Screenshot nahi chahiye — Telegram Stars se Premium instant active ho jayega.");
       return;
     }
-    if (text === "💳 Support Us") { if (id !== ADMIN_ID) await sendPayGate(chatId); return; }
+    if (text === "✅ Premium") {
+      await bot.sendMessage(chatId, "✅ You're a *Premium* member — unlimited real matches enabled! 💎", { parse_mode: "Markdown" });
+      return;
+    }
+    if (text === "💳 Support Us") { await sendPayGate(chatId); return; } // legacy button — keep handler so old keyboards still work
 
     // Unrecognised input:
     // — if free user who used trial, they're probably confused & trying to chat → show paygate
     // — otherwise re-show the menu so buttons are always visible
-    if (!isPremiumActive(user) && user.gender !== "female") {
-      await sendPayGate(chatId);
+    if (!user.hasPaid && (user.chatCount ?? 0) > 0) {
+      await sendPayGate(chatId, "💬 Want to keep chatting? Unlock Premium to connect with real people! 💕");
     } else {
       await sendMain(chatId, user);
     }
@@ -5260,61 +2511,22 @@ bot.onText(/\/test/, async (msg) => {
   }
 });
 
-// ── Admin /demo — test AI chat as if you're a fresh free user ─────────────────
-bot.onText(/\/demo/, async (msg) => {
-  if (msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-  const userId = msg.from!.id;
-  const u = await getUser(userId);
-  // Temporarily reset chatCount so admin can experience the fake chat
-  await db.update(usersTable)
-    .set({ state: "idle", chattingWith: null, chatCount: 0, updatedAt: new Date() })
-    .where(eq(usersTable.id, userId));
-  await bot.sendMessage(chatId, "🔧 Demo mode: Starting AI chat as a fresh user. Use /restore to go back to premium.");
-  await startFakeChat(chatId, userId, u?.lookingFor ?? "any", u?.gender ?? "male");
-});
-
-bot.onText(/\/restore/, async (msg) => {
-  if (msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-  await db.update(usersTable)
-    .set({ state: "idle", chattingWith: null, chatCount: 1, hasPaid: true, updatedAt: new Date() })
-    .where(eq(usersTable.id, msg.from!.id));
-  await bot.sendMessage(chatId, "✅ Restored to premium. All good.");
-});
-
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 bot.onText(/\/profile/, async (msg) => {
-  try {
-    const u = await getUser(msg.from!.id);
-    if (!u?.isProfileComplete) { await bot.sendMessage(msg.chat.id, "Set up your profile first! Send /start."); return; }
-    await showProfile(msg.chat.id, u);
-  } catch (err) {
-    logger.error({ err, userId: msg.from?.id }, "/profile error");
-    await bot.sendMessage(msg.chat.id, "Something went wrong. Please try again.").catch(() => {});
-  }
+  const u = await getUser(msg.from!.id);
+  if (!u?.isProfileComplete) { await bot.sendMessage(msg.chat.id, "Set up your profile first! Send /start."); return; }
+  await showProfile(msg.chat.id, u);
 });
 
 bot.onText(/\/edit/, async (msg) => {
-  try {
-    await startSetup(msg.chat.id, msg.from!.id);
-  } catch (err) {
-    logger.error({ err, userId: msg.from?.id }, "/edit error");
-    await bot.sendMessage(msg.chat.id, "Something went wrong. Please try again or send /start.").catch(() => {});
-  }
+  await startSetup(msg.chat.id, msg.from!.id);
 });
 bot.onText(/\/match/, async (msg) => {
   const id = msg.from!.id;
-  const chatId = msg.chat.id;
-  const u = await getUser(id);
-  if (!u?.termsAccepted) {
-    await bot.sendMessage(chatId, "⚠️ Please accept our terms first. Send /start to continue.");
-    return;
-  }
   if (processingSet.has(id)) return;
   processingSet.add(id);
-  try { await findMatch(chatId, id); } finally { processingSet.delete(id); }
+  try { await findMatch(msg.chat.id, id); } finally { processingSet.delete(id); }
 });
 bot.onText(/\/stop/, async (msg) => {
   const id = msg.from!.id;
@@ -5323,77 +2535,12 @@ bot.onText(/\/stop/, async (msg) => {
   try { await stopChat(msg.chat.id, id); } finally { processingSet.delete(id); }
 });
 
-// ── /report — report current match to admin ───────────────────────────────────
-bot.onText(/\/report/, async (msg) => {
-  const chatId = msg.chat.id;
-  const id = msg.from!.id;
-  try {
-    const user = await getUser(id);
-    if (!user || user.state !== "chatting" || !user.chattingWith || user.chattingWith === FAKE_CHAT_ID) {
-      await bot.sendMessage(chatId, "ℹ️ /report is only available while you are in a real chat.\nIf you experienced harassment, contact our support.");
-      return;
-    }
-    const reportedId = user.chattingWith;
-    // End chat for both
-    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, id));
-    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, reportedId));
-    // Notify admin
-    await bot.sendMessage(ADMIN_ID,
-      `🚨 *Report Received*\n\nReporter: \`${id}\` (${user.name ?? "—"})\nReported: \`${reportedId}\`\n\nAction: Chat ended automatically.`,
-      { parse_mode: "Markdown" }
-    ).catch(() => {});
-    // Block the pair session-level
-    if (!matchBlockList.has(id)) matchBlockList.set(id, new Set());
-    matchBlockList.get(id)!.add(reportedId);
-    const fresh = await getUser(id);
-    if (fresh) await sendMain(chatId, fresh, "✅ Report submitted. Chat has been ended. Thank you for keeping WorldMatch safe.");
-  } catch (err) {
-    logger.error({ err, userId: id }, "/report error");
-  }
-});
-
-// ── /block — block current match (session-level) ──────────────────────────────
-bot.onText(/\/block/, async (msg) => {
-  const chatId = msg.chat.id;
-  const id = msg.from!.id;
-  try {
-    const user = await getUser(id);
-    if (!user || user.state !== "chatting" || !user.chattingWith || user.chattingWith === FAKE_CHAT_ID) {
-      await bot.sendMessage(chatId, "ℹ️ /block is only available while you are in a real chat.");
-      return;
-    }
-    const blockedId = user.chattingWith;
-    // Block pair session-level
-    if (!matchBlockList.has(id)) matchBlockList.set(id, new Set());
-    matchBlockList.get(id)!.add(blockedId);
-    // End chat for both
-    await stopChat(chatId, id);
-    await bot.sendMessage(chatId, "🚫 User blocked. You won't be matched with them again this session.").catch(() => {});
-  } catch (err) {
-    logger.error({ err, userId: id }, "/block error");
-  }
-});
-
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
-
-// ── Telegram Stars: approve all incoming pre-checkout queries ─────────────────
 
 bot.onText(/\/premium/, async (msg) => {
   const u = await getUser(msg.from!.id);
-  if (u && isPremiumActive(u)) {
-    const expStr = u.premiumExpiresAt
-      ? `\n📅 Valid until: *${u.premiumExpiresAt.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}*`
-      : "";
-    await bot.sendMessage(msg.chat.id, `✅ You're a *Premium* member! Enjoy unlimited matches 💎${expStr}\n\nTap below to renew or upgrade anytime ⬇️`, {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: `⚡ Extend 2 Weeks — ${PLANS.week2.stars} Stars`, callback_data: "plan_week2" }],
-          [{ text: `💎 Extend 1 Month — ${PLANS.month.stars} Stars`, callback_data: "plan_month" }],
-          [{ text: `👑 Extend Lifetime — ${PLANS.yearly.stars} Stars`, callback_data: "plan_yearly" }],
-        ],
-      },
-    });
+  if (u?.hasPaid) {
+    await bot.sendMessage(msg.chat.id, "✅ You're already a *Premium* member! Enjoy unlimited matches 💎", { parse_mode: "Markdown" });
     return;
   }
   await sendPayGate(msg.chat.id);
@@ -5437,14 +2584,12 @@ bot.onText(/\/grant (.+)/, async (msg, match) => {
       fakePersonaMap.delete(targetId);
     }
 
-    // Grant lifetime premium (no expiry); if mid-fake-chat reset to idle
-    const grantExpiry = getPremiumExpiry(36500);
-    const grantExpStr = grantExpiry.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
-    const grantUpdate: Partial<typeof usersTable.$inferInsert> = { hasPaid: true, premiumExpiresAt: grantExpiry, updatedAt: new Date() };
+    // Grant premium; if they were mid-fake-chat also reset to idle so they can Find Match immediately
+    const grantUpdate: Partial<typeof usersTable.$inferInsert> = { hasPaid: true, updatedAt: new Date() };
     if (wasInFakeChat) { grantUpdate.state = "idle"; grantUpdate.chattingWith = null; }
     await db.update(usersTable).set(grantUpdate).where(eq(usersTable.id, targetId));
 
-    await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})\n📅 Expires: ${grantExpStr}`);
+    await bot.sendMessage(chatId, `✅ Premium granted to ${target.name ?? "User"} (ID: ${targetId})`);
 
     const updated = await getUser(targetId);
     if (!updated) return;
@@ -5533,422 +2678,147 @@ bot.onText(/\/deleteuser (.+)/, async (msg, match) => {
   }
 });
 
-// ── Admin: /ban <userId> — ban a user from the platform ──────────────────────
+// ── Admin: /broadcast — FOMO blast to all unpaid demo users ──────────────────
 
-bot.onText(/\/ban (.+)/, async (msg, match) => {
+bot.onText(/\/broadcast/, async (msg) => {
   const chatId = msg.chat.id;
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
-    await bot.sendMessage(chatId, "⛔ Not authorised.");
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) { await bot.sendMessage(chatId, "⛔ Not authorised."); return; }
+
+  const GIRL_NAMES = ["Riya","Priya","Neha","Simran","Komal","Ananya","Kavya","Shreya","Pooja","Nidhi","Megha","Tanya","Ishika","Aisha","Sanya"];
+
+  // ── Broadcast cooldown: max 1 every 3 days ──────────────────────────────────
+  const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+  if (broadcastLastSentAt && Date.now() - broadcastLastSentAt < THREE_DAYS_MS) {
+    const remainMs = THREE_DAYS_MS - (Date.now() - broadcastLastSentAt);
+    const remainHrs = Math.ceil(remainMs / (60 * 60 * 1000));
+    await bot.sendMessage(chatId, `⏳ Broadcast cooldown active — wait *${remainHrs}h* more before next broadcast.\n\n_Telegram anti-spam protection: max 1 broadcast per 3 days._`, { parse_mode: "Markdown" });
     return;
   }
-  const targetId = parseInt(match![1].trim(), 10);
-  if (isNaN(targetId)) {
-    await bot.sendMessage(chatId, "❌ Invalid user ID. Usage: /ban 1234567890");
-    return;
-  }
-  if (isProtected(targetId)) {
-    await bot.sendMessage(chatId, "⛔ Cannot ban a protected account.");
-    return;
-  }
-  try {
-    const target = await getUser(targetId);
-    if (!target) {
-      await bot.sendMessage(chatId, `❌ User ${targetId} not found in DB.`);
-      return;
-    }
-    if (target.isBanned) {
-      // Backfill the permanent ledger in case this account was banned before
-      // the ledger existed — so it still survives a future account deletion.
-      await db.insert(bannedUsersTable)
-        .values({ id: targetId, bannedBy: msg.from!.id })
-        .onConflictDoNothing({ target: bannedUsersTable.id });
-      await bot.sendMessage(chatId, `ℹ️ User ${targetId} (${target.name ?? "Unknown"}) is already banned.`);
-      return;
-    }
 
-    // Disconnect from any active chat first
-    if (target.state === "chatting" && target.chattingWith && target.chattingWith !== FAKE_CHAT_ID) {
-      const partnerId = target.chattingWith;
-      const partner = await getUser(partnerId);
-      if (partner) {
-        await db.update(usersTable)
-          .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
-          .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, targetId)));
-        await sendMain(partnerId, partner, "Your match is no longer available. Tap 💘 Find Match to connect with someone new!").catch(() => {});
-      }
-    }
-    // Clear fake chat state
-    if (target.state === "chatting" && target.chattingWith === FAKE_CHAT_ID) {
-      const fakeTimer = chatTimerMap.get(targetId);
-      if (fakeTimer) { clearTimeout(fakeTimer); chatTimerMap.delete(targetId); }
-      fakePersonaMap.delete(targetId);
-      fakeReplySet.delete(targetId);
-    }
+  function rndName() { return GIRL_NAMES[Math.floor(Math.random() * GIRL_NAMES.length)]; }
 
-    await db.update(usersTable)
-      .set({ isBanned: true, isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() })
-      .where(eq(usersTable.id, targetId));
+  function fomoMsg(name: string): string {
+    const payLine = `\n\n⭐ *Telegram Stars se instant Premium lo:* /premium\n\nPlans: 100⭐ week · 150⭐ month · 1500⭐ year`;
+    const msgs = [
+      // ── Fresh match style ──────────────────────────────────────────────────
+      `🔔 *New Match Alert!*\n\n*${name}* ne tumhe match kiya abhi abhi 💘\n\nWoh tumhara wait kar rahi hai — ab baat karo!\n\n🔒 Premium lo aur unlock karo *${name}* ka chat${payLine}`,
 
-    // Permanent ledger entry — outlives the `users` row, so deleting their
-    // account (/deleteaccount or /deleteuser) can never lift this ban.
-    await db.insert(bannedUsersTable)
-      .values({ id: targetId, bannedBy: msg.from!.id })
-      .onConflictDoUpdate({ target: bannedUsersTable.id, set: { bannedAt: new Date(), bannedBy: msg.from!.id } });
+      `💘 *${name} tumhe miss kar rahi thi...*\n\nAur abhi abhi — MATCH ho gaya! 🎉\n\n_"finally koi interesting mila"_ — yahi socha usne tumhare baare mein 🥺\n\n🔓 Unlock karo abhi aur baat shuru karo!${payLine}`,
 
-    await bot.sendMessage(chatId,
-      `🚫 *User Banned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target.name ?? "Unknown")}\n*Username:* @${escMd(target.telegramUsername ?? "none")}\n\nThey can no longer use the bot or connect with anyone — even if they delete their account, this ban stays in effect until you /unban them.`,
-      { parse_mode: "Markdown" }
-    );
+      `⚡ *Ruko ruko ruko —*\n\n*${name}* ne tumhe match kiya hai! 💕\n\nWoh online hai abhi. Typing... 👀\n\n🔒 Sirf Premium users hi reply kar sakte hain.${payLine}`,
 
-    // Notify the banned user
-    await bot.sendMessage(targetId,
-      "🚫 Your account has been banned by an administrator. You can no longer use this platform."
-    ).catch(() => {});
+      `🥺 *${name}* tumhara intezaar kar rahi thi...\n\nAur guess what — MATCH! 💘\n\n_"iss baar koi accha mile"_ — woh yahi soch ke aayi thi\n\nWoh abhi bhi yahan hai. Baat karo usse!${payLine}`,
 
-  } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    await bot.sendMessage(chatId, `❌ Ban failed: ${errMsg.slice(0, 200)}`).catch(() => {});
-  }
-});
+      // ── Classic FOMO style ─────────────────────────────────────────────────
+      `💌 *${name}* ab bhi soch rahi hai tumhare baare mein 🥺\n\n_"unka message padhke dil khush ho gaya"_\n\nReal log, real baat — ek baar unlock karo, phir koi limit nahi 💕${payLine}`,
 
-// ── Admin: /unban <userId> — unban a user ────────────────────────────────────
+      `🔔 Yaad hai tumhara woh match?\n\n*${name}* ne poochha — _"kya woh wapas aayenge?"_ 🥺\n\nWoh abhi bhi yahan hai. Premium lo aur baat shuru karo 💕${payLine}`,
 
-bot.onText(/\/unban (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
-    await bot.sendMessage(chatId, "⛔ Not authorised.");
-    return;
-  }
-  const targetId = parseInt(match![1].trim(), 10);
-  if (isNaN(targetId)) {
-    await bot.sendMessage(chatId, "❌ Invalid user ID. Usage: /unban 1234567890");
-    return;
-  }
-  try {
-    const target = await getUser(targetId);
-    const [ledgerEntry] = await db.select().from(bannedUsersTable).where(eq(bannedUsersTable.id, targetId));
+      `💕 *${name}* nahi bhooli tumhe.\n\n_"interesting lag rahe the, kash aur baat hoti"_ — yahi kaha usne 🥺\n\nReal conversations. One-time payment. No limits.${payLine}`,
 
-    if (!target?.isBanned && !ledgerEntry) {
-      await bot.sendMessage(chatId, `ℹ️ User ${targetId}${target?.name ? ` (${target.name})` : ""} is not banned.`);
-      return;
-    }
+      `🌙 Late night — *${name}* abhi bhi app pe hai.\n\nWoh match kiya tha tumhare saath ek reason se 💕\n\nPremium = real chats, real people, koi timer nahi.${payLine}`,
 
-    // Ledger is the source of truth — a target row may not even exist if the
-    // user deleted their account while banned.
-    await db.delete(bannedUsersTable).where(eq(bannedUsersTable.id, targetId));
-
-    if (target) {
-      await db.update(usersTable)
-        .set({ isBanned: false, isActive: true, updatedAt: new Date() })
-        .where(eq(usersTable.id, targetId));
-    }
-
-    await bot.sendMessage(chatId,
-      `✅ *User Unbanned*\n\n*ID:* \`${targetId}\`\n*Name:* ${escMd(target?.name ?? "Unknown")}\n*Username:* @${escMd(target?.telegramUsername ?? "none")}\n\nThey can now use the bot again.`,
-      { parse_mode: "Markdown" }
-    );
-
-    // Notify the unbanned user (only if their account still exists)
-    if (target) {
-      await bot.sendMessage(targetId,
-        "✅ Your account ban has been lifted. You can now use the platform again. Send /start to continue."
-      ).catch(() => {});
-    }
-
-  } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    await bot.sendMessage(chatId, `❌ Unban failed: ${errMsg.slice(0, 200)}`).catch(() => {});
-  }
-});
-
-// ── /deleteaccount — self-service account deletion ────────────────────────────
-bot.onText(/\/deleteaccount/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from?.id;
-  if (!userId) return;
-  const user = await getUser(userId).catch(() => null);
-  if (!user) {
-    await bot.sendMessage(chatId, "No account found. Send /start to create one.");
-    return;
-  }
-  await bot.sendMessage(chatId,
-    "🗑️ *Delete Account*\n\nThis will permanently erase your profile and all data. This cannot be undone.\n\nAre you sure?",
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "✅ Yes, delete my account", callback_data: "delete_confirm" }],
-          [{ text: "❌ No, keep my account",    callback_data: "delete_cancel"  }],
-        ],
-      },
-    }
-  );
-});
-
-// ── Admin: /banhealth — quick health snapshot (block-rate, paid users, etc.) ─
-// Surfaces early-warning signals BEFORE Telegram bans the bot:
-//  - block-rate spike in last hour (sudden mass-block ⇒ likely spam-report storm)
-//  - share of paid users sitting in idle (delivery risk)
-//  - total active vs inactive
-bot.onText(/\/banhealth/, async (msg) => {
-  const chatId = msg.chat.id;
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
-    await bot.sendMessage(chatId, "⛔ Not authorised.");
-    return;
-  }
-  try {
-    const rows = await db.select({
-      isActive:  usersTable.isActive,
-      hasPaid:   usersTable.hasPaid,
-      state:     usersTable.state,
-      chatCount: usersTable.chatCount,
-    }).from(usersTable);
-    let total = rows.length, active = 0, inactive = 0, paid = 0, paidIdle = 0, stuckPaid = 0;
-    for (const r of rows) {
-      if (r.isActive) active++; else inactive++;
-      if (r.hasPaid) {
-        paid++;
-        if (r.state === "idle") paidIdle++;
-        if ((r.chatCount ?? 0) === 0) stuckPaid++;
-      }
-    }
-    const blockedHr = _blockRateLastHour();
-    const queued = _blockedUserIds.size;
-    // Heuristic warnings
-    const warnings: string[] = [];
-    if (blockedHr > 50) warnings.push(`🚨 ${blockedHr} blocks in last hour — possible spam-report storm`);
-    else if (blockedHr > 20) warnings.push(`⚠️ ${blockedHr} blocks in last hour — keep an eye on it`);
-    if (paid > 0 && stuckPaid / paid > 0.20) warnings.push(`🚨 ${stuckPaid}/${paid} paid users have 0 chats — refund risk`);
-    if (total > 0 && inactive / total > 0.40) warnings.push(`⚠️ ${inactive}/${total} users inactive — pool shrinking`);
-    const lines = [
-      `📊 *Bot Ban-Health Snapshot*`,
-      ``,
-      `👥 Users: ${total} (active ${active} / inactive ${inactive})`,
-      `💎 Paid: ${paid} (idle ${paidIdle}, never-chatted ${stuckPaid})`,
-      ``,
-      `🚫 Blocks (last 1h): ${blockedHr}`,
-      `🕒 Pending DB-flush: ${queued}`,
-      ``,
-      warnings.length ? warnings.join("\n") : `✅ All signals look healthy.`,
+      `💬 *${name}* ne message kiya... lekin tumhara Premium nahi hai abhi.\n\nReal connection tha. Waste mat karo.\n\nPay once. Chat forever 💕${payLine}`,
     ];
-    await bot.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown" });
-  } catch (err) {
-    logger.error({ err }, "/banhealth failed");
-    await bot.sendMessage(chatId, "❌ Failed to fetch health snapshot.");
-  }
-});
-
-// ── Admin: /cleanblocked — silently probe all users, remove blocked ones ────────
-// Uses sendChatAction('typing') — completely invisible to users, no message sent
-// Returns 403 if user has blocked the bot → mark isActive=false in DB
-
-bot.onText(/\/cleanblocked/, async (msg) => {
-  const chatId = msg.chat.id;
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) {
-    await bot.sendMessage(chatId, "⛔ Not authorised.");
-    return;
+    return msgs[Math.floor(Math.random() * msgs.length)];
   }
 
-  await bot.sendMessage(chatId, "🔍 Starting silent block-detection scan...\n\n⚠️ This probes all active users with an invisible typing signal. No messages will be sent to users.\n\nThis may take several minutes for large user bases.");
+  await bot.sendMessage(chatId, "📡 Fetching unpaid users...");
 
-  // Use the existing database connection — no hardcoded credentials needed
-  const prodDb = db;
-
-  // Get all currently-active users (excluding all protected accounts)
-  const protectedList = Array.from(PROTECTED_IDS);
-  const targets = await prodDb.select({ id: usersTable.id })
+  const targets = await db.select({ id: usersTable.id })
     .from(usersTable)
     .where(
-      protectedList.length
-        ? and(eq(usersTable.isActive, true), notInArray(usersTable.id, protectedList))
-        : eq(usersTable.isActive, true)
+      and(
+        gt(usersTable.chatCount, 0),
+        eq(usersTable.hasPaid, false),
+        eq(usersTable.isProfileComplete, true),
+        eq(usersTable.broadcastOptOut, false),
+        ...(ADMIN_ID ? [ne(usersTable.id, ADMIN_ID)] : [])
+      )
     );
 
-  await bot.sendMessage(chatId, `📋 Found ${targets.length} active users to probe. Starting scan...`);
+  await bot.sendMessage(chatId, `📤 Sending to ${targets.length} users... I'll update every 100 messages.`);
+
+  let sent = 0, failed = 0;
 
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-  let probed = 0, cleaned = 0, errors = 0;
 
   for (const row of targets) {
+    const name = rndName();
     try {
-      // sendChatAction is invisible — no notification, no message shown to user
-      // Returns 403 immediately if user has blocked the bot
-      await bot.sendChatAction(row.id, "typing");
-    } catch (err: unknown) {
-      const statusCode = (err as any)?.response?.statusCode;
-      const errMsg = typeof (err as any)?.message === 'string' ? (err as any).message : '';
-      const isBlocked = statusCode === 403 || errMsg.includes('bot was blocked') || errMsg.includes('user is deactivated') || errMsg.includes('chat not found');
-      if (isBlocked) {
-        cleaned++;
-        await prodDb.update(usersTable)
-          .set({ isActive: false, updatedAt: new Date() })
-          .where(eq(usersTable.id, row.id))
-          .catch(() => {});
-      } else {
-        errors++;
-      }
-    }
-    probed++;
-
-    // Progress update every 200 users
-    if (probed % 200 === 0) {
-      await bot.sendMessage(
-        chatId,
-        `⏳ Probed: ${probed}/${targets.length} — 🚫 Blocked found: ${cleaned}`
-      ).catch(() => {});
-    }
-
-    await sleep(200); // ~5/sec — conservative rate, safer for Telegram spam detection
-  }
-
-  // (shared db connection — no pool to close)
-
-  await bot.sendMessage(
-    chatId,
-    `✅ *Block scan complete!*\n\n` +
-    `👥 Total probed: ${probed}\n` +
-    `🚫 Blocked & removed: ${cleaned}\n` +
-    `⚠️ Other errors: ${errors}\n\n` +
-    `Your active user count is now accurate. ${cleaned} blocked users were removed from active status.`,
-    { parse_mode: "Markdown" }
-  );
-});
-
-// ── Admin broadcasts are disabled to prevent spam reports and accidental bulk sends ──
-
-bot.onText(/\/broadcast(?:\s|$)/, async (msg) => {
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-  const allUsers = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
-  await bot.sendMessage(chatId, `📣 Broadcasting to ${allUsers.length} users... (one-time only)`);
-  let sent = 0, failed = 0;
-  for (const u of allUsers) {
-    // Retry on Telegram flood-control (429 retry_after) instead of giving up
-    // immediately — a plain catch-and-skip was silently dropping recipients
-    // any time Telegram briefly rate-limited the bot, even though the same
-    // user would have gone through fine a second or two later.
-    let retries = 3;
-    while (retries-- > 0) {
-      try {
-        await bot.sendMessage(u.id,
-          "💌 <b>Somewhere out there, someone's waiting to meet you.</b>\n\n" +
-          "Every day you wait is a conversation you never had, a connection you never made. " +
-          "Premium clears the way — no timers cutting you off mid-conversation, no limits on who you can talk to. " +
-          "Just you, real people, and the chance to actually find someone worth staying up late texting. 💫\n\n" +
-          "👇 Pick your plan and go find them.",
-          { parse_mode: "HTML" }
-        );
-        // Follow up with the real pay gate — teaser + live Stars plan buttons —
-        // instead of a second hand-rolled keyboard duplicating the same buttons.
-        await sendPayGate(u.id);
-        sent++;
-        break;
-      } catch (e: any) {
-        const retryAfter = e?.response?.body?.parameters?.retry_after;
-        if (retryAfter) {
-          await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-        } else {
-          failed++;
-          break;
+      await bot.sendMessage(row.id, fomoMsg(name), {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [[{ text: "🚫 Stop these messages", callback_data: "stop_broadcast" }]]
         }
-      }
+      });
+      sent++;
+    } catch {
+      failed++;
     }
-    await new Promise(r => setTimeout(r, 55));
+    if ((sent + failed) % 100 === 0) {
+      await bot.sendMessage(chatId, `⏳ Progress: ${sent + failed}/${targets.length} — ✅ ${sent} sent, ❌ ${failed} failed`).catch(() => {});
+    }
+    await sleep(80);
   }
-  await bot.sendMessage(chatId, `✅ Done! Sent: ${sent} | Failed: ${failed}\n\n🔒 Broadcast is now DISABLED for this session.`);
+
+  broadcastLastSentAt = Date.now();
+  await bot.sendMessage(chatId, `✅ Broadcast complete!\n\n📤 Total: ${targets.length}\n✅ Sent: ${sent}\n❌ Blocked/failed: ${failed}`);
 });
 
-// (duplicate /broadcastfemales handler removed — active handler is below)
-
-// ── Admin: /deals — preview & send deals channel broadcast ───────────────────
-bot.onText(/\/deals/, async (msg) => {
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  const DEALS_MSG =
-    "Hey! 👋\n\n" +
-    "Sharing something useful — @dealsatyourdoo posts daily discount deals.\n\n" +
-    "Electronics, fashion, daily essentials — often 50-70% off. Worth checking out!\n\n" +
-    "Join here: @dealsatyourdoo\n\n" +
-    "That's all, enjoy chatting! 😊";
-
-  const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
-  await bot.sendMessage(msg.chat.id,
-    `👀 *Preview — exactly as users will see it:*\n\n─────────────────\n${DEALS_MSG}\n─────────────────\n\n📤 Will send to *${allUsers.length} users*. Tap to confirm:`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '✅ Send to all users now', callback_data: 'deals_broadcast_confirm' },
-        ]]
-      }
-    }
-  );
-});
-
-// ── Admin: /broadcasttext — one-time custom message to all users ──────────────
-bot.onText(/\/broadcasttext(?:\s|$)/, async (msg) => {
+bot.onText(/\/stats/, async (msg) => {
   if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
   const chatId = msg.chat.id;
 
-  if (customBroadcastUsed) {
-    await bot.sendMessage(chatId,
-      '🔒 Custom broadcast has already been used this session.\n\nRestart the bot to enable it again.'
+  try {
+    const users = await db.select().from(usersTable);
+    const total = users.length;
+    const complete = users.filter(u => u.isProfileComplete).length;
+    const incomplete = total - complete;
+    const female = users.filter(u => u.gender === "female").length;
+    const male = users.filter(u => u.gender === "male").length;
+    const other = users.filter(u => u.gender === "other").length;
+    const unknown = users.filter(u => !u.gender).length;
+    const paid = users.filter(u => u.hasPaid).length;
+    const free = total - paid;
+    const trialUsed = users.filter(u => !u.hasPaid && (u.chatCount ?? 0) > 0).length;
+    const trialUnused = users.filter(u => !u.hasPaid && (u.chatCount ?? 0) === 0).length;
+    const activeChats = users.filter(u => u.state === "chatting").length;
+    const fakeChats = users.filter(u => u.state === "chatting" && u.chattingWith === FAKE_CHAT_ID).length;
+    const realChats = users.filter(u => u.state === "chatting" && u.chattingWith && u.chattingWith !== FAKE_CHAT_ID).length;
+    const bonusUsers = users.filter(u => (u.bonusChats ?? 0) > 0).length;
+    const referrals = users.reduce((sum, u) => sum + (u.referralCount ?? 0), 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const joinedToday = users.filter(u => u.createdAt && new Date(u.createdAt) >= todayStart).length;
+
+    await bot.sendMessage(
+      chatId,
+      `📊 *Bot Stats*\n\n` +
+      `👥 Total users: *${total}*\n` +
+      `✅ Profile complete: *${complete}*\n` +
+      `📝 Profile incomplete: *${incomplete}*\n` +
+      `📅 Joined today: *${joinedToday}*\n\n` +
+      `🚺 Female users: *${female}*\n` +
+      `🚹 Male users: *${male}*\n` +
+      `⚧ Other: *${other}*\n` +
+      `❔ Gender unknown: *${unknown}*\n\n` +
+      `💎 Premium users: *${paid}*\n` +
+      `🆓 Free users: *${free}*\n` +
+      `⏳ Trial used: *${trialUsed}*\n` +
+      `🆕 Trial not used: *${trialUnused}*\n\n` +
+      `💬 Active chats: *${activeChats}*\n` +
+      `🤖 AI trial chats: *${fakeChats}*\n` +
+      `👫 Real user chats: *${realChats}*\n\n` +
+      `🎁 Bonus users: *${bonusUsers}*\n` +
+      `🔗 Total referrals: *${referrals}*\n\n` +
+      `_Updated: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}_`,
+      { parse_mode: "Markdown" }
     );
-    return;
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await bot.sendMessage(chatId, `❌ Stats failed: ${errMsg.slice(0, 200)}`);
   }
-
-  if (awaitingBroadcastText.has(ADMIN_ID)) {
-    await bot.sendMessage(chatId, '⏳ Already waiting for your message. Just type it now.');
-    return;
-  }
-
-  awaitingBroadcastText.set(ADMIN_ID, 'awaiting');
-  const userCount = await db.select({ id: usersTable.id }).from(usersTable);
-  await bot.sendMessage(chatId,
-    `📝 *Custom Broadcast*\n\n` +
-    `Will send to *${userCount.length} users* — one time only.\n\n` +
-    `Type your message now (supports *bold*, _italic_, \`code\`):\n\n` +
-    `Send /cancel to abort.`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ── Admin message interceptor: captures text when awaiting broadcast ──────────
-bot.on('message', async (msg) => {
-  if (!msg.from || msg.from.id !== ADMIN_ID) return;
-  if (!awaitingBroadcastText.has(ADMIN_ID)) return;
-  if (awaitingBroadcastText.get(ADMIN_ID) !== 'awaiting') return;
-
-  const text = msg.text ?? '';
-  if (text.startsWith('/')) {
-    // Admin sent a command — cancel
-    awaitingBroadcastText.delete(ADMIN_ID);
-    await bot.sendMessage(msg.chat.id, '❌ Broadcast input cancelled.').catch(() => {});
-    return;
-  }
-
-  if (!text.trim()) {
-    await bot.sendMessage(msg.chat.id, '⚠️ Message is empty. Please type your broadcast text.').catch(() => {});
-    return;
-  }
-
-  // Store the text and show preview
-  awaitingBroadcastText.set(ADMIN_ID, `preview:${text}`);
-  const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
-
-  await bot.sendMessage(msg.chat.id,
-    `👀 *Preview* (exactly as users will see it):\n\n` +
-    `─────────────────\n${text}\n─────────────────\n\n` +
-    `📤 Will send to *${allUsers.length} users*. Confirm?`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '✅ Yes, send to everyone', callback_data: 'custom_broadcast_confirm' },
-          { text: '❌ Cancel', callback_data: 'custom_broadcast_cancel' },
-        ]]
-      }
-    }
-  );
 });
 
 // ── Admin: /users ─────────────────────────────────────────────────────────────
@@ -5985,193 +2855,6 @@ bot.onText(/\/users/, async (msg) => {
   if (page.trim()) await bot.sendMessage(chatId, page || "_No users yet._", { parse_mode: "Markdown" });
 });
 
-// ── Admin: /femalecount — count female users ──────────────────────────────────
-bot.onText(/\/femalecount/, async (msg) => {
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-  try {
-    const all = await db.select({ id: usersTable.id, gender: usersTable.gender, name: usersTable.name, age: usersTable.age, telegramUsername: usersTable.telegramUsername, createdAt: usersTable.createdAt }).from(usersTable);
-    const females = all.filter(u => u.gender === "female");
-    const lines = females.map(u =>
-      `• ${escMd(u.name ?? "—")} (${escMd(u.age ?? "?")}) | \`${u.id}\` | @${escMd(u.telegramUsername ?? "none")}`
-    );
-    const header = `👩 *Female Users: ${females.length}* / Total: ${all.length}\n\n`;
-    const MAX = 3800;
-    let page = header;
-    let pageNum = 1;
-    for (const line of lines) {
-      if ((page + line + "\n").length > MAX) {
-        await bot.sendMessage(chatId, page, { parse_mode: "Markdown" });
-        page = `_(page ${++pageNum})_\n`;
-      }
-      page += line + "\n";
-    }
-    await bot.sendMessage(chatId, page || "_No female users yet._", { parse_mode: "Markdown" });
-  } catch (err) {
-    logger.error({ err }, "/femalecount error");
-    await bot.sendMessage(chatId, "❌ Failed to fetch data.").catch(() => {});
-  }
-});
-
-// ── Admin: /broadcastoffer — 48-hour flash sale broadcast ────────────────────
-bot.onText(/\/broadcastoffer/, async (msg) => {
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-
-  try {
-    // Set the 48-hour window from NOW and persist to DB so restarts don't kill it
-    offerEndsAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
-    await saveOfferExpiry(offerEndsAt);
-    const expiryStr = offerEndsAt.toLocaleString("en-IN", {
-      day: "numeric", month: "long", year: "numeric",
-      hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata"
-    });
-
-    await bot.sendMessage(chatId,
-      `⏳ <b>48-Hour Flash Offer started!</b>\n\nOffer valid until: <b>${expiryStr} IST</b>\n\nBroadcasting to all users... I'll DM you the result.`,
-      { parse_mode: "HTML" }
-    );
-
-    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
-    let sent = 0, failed = 0;
-
-    const OFFER_MSG =
-      "🔥 <b>48-HOUR FLASH OFFER — Don't Miss This!</b> 🔥\n\n" +
-      "Hey! 💘 There's someone out there waiting to talk to you right now.\n\n" +
-      "<b>Global Chat Connect</b> connects you with real people anonymously — no numbers, no profiles, just real conversations. 🌍\n\n" +
-      "━━━━━━━━━━━━━━━━━━━━━\n" +
-      "🎁 <b>SPECIAL OFFER — FOR THE NEXT 48 HOURS ONLY:</b>\n\n" +
-      "👑 <b>Lifetime Premium — just 250 ⭐ Stars</b>\n" +
-      "🏷️ <s>Normal price: 1000 ⭐ Stars</s> → <b>Save 750 Stars!</b>\n\n" +
-      "✅ Unlimited real matches — forever\n" +
-      "✅ No timers, no interruptions\n" +
-      "✅ One-time payment — never pay again\n" +
-      "━━━━━━━━━━━━━━━━━━━━━\n\n" +
-      "⏰ This offer <b>expires in 48 hours</b> — once it's gone, it's gone.\n\n" +
-      "👇 Tap the button below to grab it now!";
-
-    for (const u of allUsers) {
-      let retries = 3;
-      while (retries-- > 0) {
-        try {
-          await bot.sendMessage(u.id, OFFER_MSG, {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [[
-                { text: "👑 Get Lifetime — 250 ⭐ (48H OFFER)", callback_data: "plan_offer48" },
-              ]],
-            },
-          });
-          sent++;
-          break;
-        } catch (e: any) {
-          const retryAfter = e?.response?.body?.parameters?.retry_after;
-          if (retryAfter) {
-            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-          } else {
-            failed++;
-            break;
-          }
-        }
-      }
-      await new Promise(r => setTimeout(r, 55)); // stay under Telegram rate limits
-    }
-
-    await bot.sendMessage(chatId,
-      `✅ <b>Offer broadcast complete!</b>\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n\n⏰ Offer expires: <b>${expiryStr} IST</b>`,
-      { parse_mode: "HTML" }
-    );
-  } catch (err) {
-    logger.error({ err }, "/broadcastoffer error");
-    await bot.sendMessage(chatId, `❌ Broadcast failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
-  }
-});
-
-// ── Admin: /broadcastfemales — grant lifetime premium + send love message ────
-bot.onText(/\/broadcastfemales/, async (msg) => {
-  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
-  const chatId = msg.chat.id;
-
-  // Acknowledge immediately — plain text, no parse_mode, can't fail on formatting
-  await bot.sendMessage(chatId, "⏳ Starting broadcast to all female users... I'll DM you when done.");
-
-  // Run in background so command returns instantly
-  (async () => {
-    try {
-      const females = await db
-        .select({ id: usersTable.id })
-        .from(usersTable)
-        .where(eq(usersTable.gender, "female"));
-
-      logger.info({ count: females.length }, "/broadcastfemales: starting");
-
-      // Grant lifetime premium to every female in one DB call
-      if (females.length > 0) {
-        await db
-          .update(usersTable)
-          .set({ hasPaid: true, premiumExpiresAt: null, updatedAt: new Date() })
-          .where(eq(usersTable.gender, "female"));
-        logger.info({ count: females.length }, "/broadcastfemales: DB grant done");
-      }
-
-      // Use HTML — no special-character escaping pitfalls unlike Markdown
-      const FEMALE_MSG =
-        "💖 <b>A Special Message Just For You</b> 💖\n\n" +
-        "Hey beautiful! 🌸\n\n" +
-        "We want to take a moment to celebrate YOU — every girl, every woman, every female who has joined our community. " +
-        "We stand with girlhood, femalehood, and womanhood — fully, proudly, and unconditionally. 🌺\n\n" +
-        "As a token of our love and respect, we have gifted you 💎 <b>Lifetime Premium</b> — completely FREE. " +
-        "No payments, no expiry, no catches. This is yours forever, because you deserve the very best. " +
-        "This would normally cost thousands of rupees — consider it our heartfelt gift to you. 🎁✨\n\n" +
-        "You bring warmth, depth, and joy to this space, and we are endlessly grateful for that. 🙏\n\n" +
-        "━━━━━━━━━━━━━━━━━━━━━\n" +
-        "⚠️ <b>A note on safety:</b>\n" +
-        "We take your security very seriously. Any man who attempts to disguise himself as a female to misuse this " +
-        "community will be <b>immediately and permanently blocked</b> from the bot and reported to Telegram. " +
-        "This space is safe — and we will keep it that way for you. 🛡️\n" +
-        "━━━━━━━━━━━━━━━━━━━━━\n\n" +
-        "With all our love,\n" +
-        "💗 The Global Chat Connect Team";
-
-      let sent = 0, failed = 0;
-      for (const u of females) {
-        let retries = 3;
-        let delivered = false;
-        while (retries-- > 0) {
-          try {
-            await bot.sendMessage(u.id, FEMALE_MSG, { parse_mode: "HTML" });
-            delivered = true;
-            break;
-          } catch (e: any) {
-            const retryAfter = e?.response?.body?.parameters?.retry_after;
-            if (retryAfter) {
-              // Telegram rate-limit — wait and retry
-              await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-            } else {
-              // Permanent error (bot blocked, account deleted) — skip
-              break;
-            }
-          }
-        }
-        if (delivered) { sent++; } else { failed++; }
-        await new Promise(r => setTimeout(r, 60)); // ~16 msg/sec — safe under Telegram limits
-      }
-
-      logger.info({ sent, failed }, "/broadcastfemales: complete");
-      await bot.sendMessage(
-        ADMIN_ID,
-        `✅ Female broadcast done!\n\n` +
-        `👩 Total females: ${females.length}\n` +
-        `📤 Sent: ${sent}\n` +
-        `❌ Failed (blocked/deleted): ${failed}`
-      );
-    } catch (err) {
-      logger.error({ err }, "/broadcastfemales failed");
-      await bot.sendMessage(ADMIN_ID, `❌ /broadcastfemales failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
-    }
-  })();
-});
-
 // ── Bot profile setup (runs once at startup) ──────────────────────────────
 
 async function setupBotProfile() {
@@ -6188,7 +2871,7 @@ async function setupBotProfile() {
           "🌍 Connect with singles from every corner of the world\n" +
           "💬 Start chatting instantly with real matches\n" +
           "🔒 Safe, private & fun\n\n" +
-          "✨ Upgrade to Premium and start matching with real people now!\n\n" +
+          "✨ Your first chat is FREE — find your match right now!\n\n" +
           "Tap START to begin your journey 👇",
       }),
     });
@@ -6198,7 +2881,7 @@ async function setupBotProfile() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        short_description: "💕 Chat anonymously worldwide. Get Premium to start matching! 🌍",
+        short_description: "💕 Meet & chat with singles worldwide. Your first match is FREE! 🌍",
       }),
     });
 
@@ -6213,6 +2896,25 @@ async function setupBotProfile() {
       if (json.ok) logger.info("Bot profile photo set successfully");
       else logger.warn({ json }, "Could not set bot profile photo");
     }
+
+    // Register bot commands (shows up in the "/" menu in Telegram)
+    await fetch(`${base}/setMyCommands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        commands: [
+          { command: "start",      description: "Start the bot" },
+          { command: "match",      description: "💘 Find a match" },
+          { command: "profile",    description: "👤 View your profile" },
+          { command: "edit",       description: "✏️ Edit your profile" },
+          { command: "premium",    description: "⭐ Go Premium" },
+          { command: "stop",       description: "🛑 End current chat" },
+          { command: "disclaimer",     description: "📋 Terms of use & legal notice" },
+          { command: "deleteaccount", description: "🗑 Delete your account & all data" },
+          { command: "help",          description: "ℹ️ Show all commands" },
+        ],
+      }),
+    });
 
     logger.info("Bot profile description set");
   } catch (err) {
@@ -6286,135 +2988,88 @@ setupBotProfile();
   }
 })();
 
-logger.info("Telegram bot polling started");
+// ── callback_query handler ────────────────────────────────────────────────────
 
-// ── One-time Female Lifetime Grant + Message broadcast ────────────────────────
-// Set FEMALE_LIFETIME_GRANT=true in Railway env vars, redeploy ONCE, then remove it.
-// This grants hasPaid=true + premiumExpiresAt=null (lifetime) to every female user
-// and sends them a warm appreciation message.
-(async () => {
-  if (process.env.FEMALE_LIFETIME_GRANT !== "true") return;
+bot.on("callback_query", async (query) => {
+  if (!query.message || !query.from) return;
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
 
-  // Wait 20s for bot to settle before blasting messages
-  await new Promise(r => setTimeout(r, 20_000));
+  logger.info({ userId, data: query.data }, "callback_query received");
 
-  const FEMALE_MSG =
-    "💖 A Special Message Just For You 💖\n\n" +
-    "Hey beautiful! 🌸\n\n" +
-    "We want to take a moment to celebrate YOU — every girl, every woman, every female who has joined our community. " +
-    "We stand with girlhood, femalehood, and womanhood — fully, proudly, and unconditionally. 🌺\n\n" +
-    "As a token of our love and respect, we have gifted you 💎 *Lifetime Premium* — completely FREE. " +
-    "No payments, no expiry, no catches. This is yours forever, because you deserve the very best. " +
-    "This would normally cost thousands of rupees — consider it our heartfelt gift to you. 🎁✨\n\n" +
-    "You bring warmth, depth, and joy to this space, and we are endlessly grateful for that. 🙏\n\n" +
-    "━━━━━━━━━━━━━━━━━━━━━\n" +
-    "⚠️ *A note on safety:*\n" +
-    "We take your security very seriously. Any man who attempts to disguise himself as a female to misuse this " +
-    "community will be *immediately and permanently blocked* from the bot and reported to Telegram. " +
-    "This space is safe — and we will keep it that way for you. 🛡️\n" +
-    "━━━━━━━━━━━━━━━━━━━━━\n\n" +
-    "With all our love,\n" +
-    "💗 The Global Chat Connect Team";
-
-  try {
-    const females = await db
-      .select({ id: usersTable.id })
-      .from(usersTable)
-      .where(eq(usersTable.gender, "female"));
-
-    logger.info({ count: females.length }, "Female lifetime grant: starting");
-
-    // Grant lifetime premium to all females in bulk first
-    if (females.length > 0) {
-      await db
-        .update(usersTable)
-        .set({ hasPaid: true, premiumExpiresAt: null, updatedAt: new Date() })
-        .where(eq(usersTable.gender, "female"));
-      logger.info({ count: females.length }, "Female lifetime grant: DB update done");
-    }
-
-    let sent = 0, failed = 0;
-    for (const u of females) {
-      let retries = 3;
-      while (retries-- > 0) {
-        try {
-          await bot.sendMessage(u.id, FEMALE_MSG, { parse_mode: "Markdown" });
-          sent++;
-          break;
-        } catch (e: any) {
-          const retryAfter = e?.response?.body?.parameters?.retry_after;
-          if (retryAfter) {
-            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-          } else {
-            failed++;
-            break;
-          }
-        }
-      }
-      await new Promise(r => setTimeout(r, 60)); // ~16 msg/sec, safe under Telegram limits
-    }
-
-    logger.info({ sent, failed }, "Female lifetime grant: broadcast complete");
-    bot.sendMessage(
-      ADMIN_ID,
-      `✅ *Female Lifetime Grant done!*\n\n` +
-      `👩 Total females: ${females.length}\n` +
-      `📤 Messages sent: ${sent}\n` +
-      `❌ Failed: ${failed}\n\n` +
-      `⚠️ Remove FEMALE_LIFETIME_GRANT from Railway env vars now.`,
-      { parse_mode: "Markdown" }
-    ).catch(() => {});
-  } catch (err) {
-    logger.error({ err }, "Female lifetime grant broadcast failed");
+  // ── Stop broadcast opt-out ──────────────────────────────────────────────
+  if (query.data === "stop_broadcast") {
+    await bot.answerCallbackQuery(query.id, { text: "✅ Done! You won't receive these messages anymore." });
+    await db.update(usersTable)
+      .set({ broadcastOptOut: true, updatedAt: new Date() })
+      .where(eq(usersTable.id, userId));
+    await bot.sendMessage(chatId, "🚫 *You've been unsubscribed from match alerts.*\n\nYou won't receive these messages anymore.\n\n_Type /start anytime to continue using the bot._", { parse_mode: "Markdown" });
+    return;
   }
-})();
 
-// ── One-time deals broadcast (triggered by STARTUP_BROADCAST_DEALS=true env var) ──
-// Set STARTUP_BROADCAST_DEALS=true in Railway env vars, redeploy once, then remove it.
-(async () => {
-  if (process.env.STARTUP_BROADCAST_DEALS !== "true") return;
-
-  // Wait 15s for bot to fully initialise before blasting messages
-  await new Promise(r => setTimeout(r, 15_000));
-
-  const DEALS_MSG =
-    "Hey! 👋\n\n" +
-    "Ek useful cheez share karna tha — ek channel hai @dealsatyourdoo jahan daily discount deals post hoti hain.\n\n" +
-    "Electronics, fashion, daily essentials — kaafi baar 50-70% tak ka discount milta hai. Agar deals dhundhte ho toh worth checking out hai.\n\n" +
-    "Join karo: @dealsatyourdoo\n\n" +
-    "Bas itna hi, enjoy chatting! 😊";
-
-  try {
-    const allUsers = await db.select({ id: usersTable.id }).from(usersTable);
-    logger.info({ count: allUsers.length }, "Deals broadcast: starting");
-
-    let sent = 0, failed = 0;
-    for (const u of allUsers) {
-      let retries = 3;
-      while (retries-- > 0) {
-        try {
-          await bot.sendMessage(u.id, DEALS_MSG);
-          sent++;
-          break;
-        } catch (e: any) {
-          const retryAfter = e?.response?.body?.parameters?.retry_after;
-          if (retryAfter) {
-            await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-          } else {
-            failed++;
-            break;
-          }
-        }
-      }
-      await new Promise(r => setTimeout(r, 50));
+  // ── Edit Profile inline button ──────────────────────────────────────────
+  if (query.data === "edit_profile") {
+    await bot.answerCallbackQuery(query.id);
+    const user = await getUser(userId);
+    if (!user) { await bot.sendMessage(chatId, "Profile not found. Type /start to begin."); return; }
+    if ((user.state as string) === "chatting") {
+      await bot.sendMessage(chatId, "Stop your current chat first before editing your profile.");
+      return;
     }
-
-    logger.info({ sent, failed }, "Deals broadcast: complete");
-    bot.sendMessage(ADMIN_ID,
-      `✅ *Deals broadcast done!*\n📤 Sent: ${sent} | ❌ Failed: ${failed}\n\n⚠️ Remove STARTUP_BROADCAST_DEALS from Railway env vars now.`,
-      { parse_mode: "Markdown" }
-    ).catch(() => {});
-  } catch (err) {
-    logger.error({ err }, "Deals broadcast failed");
+    await startEditProfile(chatId, userId);
+    return;
   }
-})();
+
+  await bot.answerCallbackQuery(query.id);
+});
+
+// ── Admin: /grantpremium <user_id> [days] — manually activate premium ─────────
+
+bot.onText(/\/grantpremium(?:\s+(\d+))?(?:\s+(\d+))?/, async (msg, match) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+  const targetId = match?.[1] ? Number(match[1]) : null;
+  const days = match?.[2] ? Number(match[2]) : 30; // default 30 days
+
+  if (!targetId) {
+    await bot.sendMessage(chatId,
+      "⚠️ Usage: <code>/grantpremium 123456789 [days]</code>\n\nDays defaults to 30 if not specified.\nGet user ID from /users.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const user = await getUser(targetId);
+  if (!user) {
+    await bot.sendMessage(chatId, `❌ User <code>${targetId}</code> not found.`, { parse_mode: "HTML" });
+    return;
+  }
+
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + days);
+  const planKey = days <= 14 ? "twoweek" : days <= 30 ? "month" : "year";
+
+  await db.update(usersTable)
+    .set({ hasPaid: true, premiumPlan: planKey, premiumExpiresAt: expiresAt, updatedAt: new Date() })
+    .where(eq(usersTable.id, targetId));
+
+  logger.info({ adminId: ADMIN_ID, targetId, days }, "Admin granted premium");
+
+  await bot.sendMessage(chatId,
+    `✅ *Premium granted!*\n\nUser: <b>${escHtml(user.name ?? user.firstName ?? "Unknown")}</b> (<code>${targetId}</code>)\nPlan: ${planKey}\nExpires: ${escHtml(expiresAt.toDateString())}`,
+    { parse_mode: "HTML" }
+  );
+
+  // Notify the user
+  bot.sendMessage(targetId,
+    `🎉 *Premium Activated!*\n\nTumhara payment verify ho gaya! Welcome to Premium 💎\n\nAb tum unlimited real matches kar sakte ho — koi timer nahi, koi limit nahi! 💕\n\n_Expires: ${escHtml(expiresAt.toDateString())}_\n\nTap 💘 Find Match to start!`,
+    { parse_mode: "Markdown" }
+  ).catch(() => {});
+
+  const updated = await getUser(targetId);
+  if (updated) {
+    sendMain(targetId, updated).catch(() => {});
+  }
+});
+
+logger.info(POLLING_ENABLED ? "Telegram bot polling started" : "Telegram bot loaded (polling disabled — Railway handles polling)");
