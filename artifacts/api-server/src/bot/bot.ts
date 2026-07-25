@@ -114,9 +114,9 @@ const FAKE_CHAT_ID = 0; // sentinel: chattingWith=0 means fake chat
 const FREE_CHAT_DURATION_MS = 30 * 1000;
 type PremiumPlanKey = "week" | "month" | "year";
 const PREMIUM_PLANS: Record<PremiumPlanKey, { label: string; stars: number; days: number }> = {
-  week: { label: "1 Week Premium", stars: 100, days: 7 },
-  month: { label: "1 Month Premium", stars: 150, days: 30 },
-  year: { label: "1 Year Premium", stars: 1500, days: 365 },
+  week: { label: "2 Week Premium", stars: 150, days: 14 },
+  month: { label: "1 Month Premium", stars: 250, days: 30 },
+  year: { label: "Lifetime Premium", stars: 1000, days: 36500 },
 };
 
 function premiumExpiry(plan: PremiumPlanKey): Date {
@@ -1172,18 +1172,18 @@ async function sendPayGate(chatId: number, prefix?: string, matchName?: string) 
     `👫 Real users se direct matching\n` +
     `⚡ Payment ke baad instant activation\n\n` +
     `⭐ *Telegram Stars plans:*\n` +
-    `• 100 Stars — 1 week\n` +
-    `• 150 Stars — 1 month\n` +
-    `• 1500 Stars — 1 year\n\n` +
+    `• 150 Stars — 2 weeks\n` +
+    `• 250 Stars — 1 month\n` +
+    `• 1000 Stars — Lifetime ♾️\n\n` +
     `Neeche plan choose karo. Payment Telegram ke andar hoga aur Premium turant active ho jayega.\n\n` +
     `⚠️ Agar app close kar diya toh yeh match miss ho sakta hai.`,
     {
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "100 ⭐ — 1 Week", callback_data: "pay_week" }],
-          [{ text: "150 ⭐ — 1 Month", callback_data: "pay_month" }],
-          [{ text: "1500 ⭐ — 1 Year", callback_data: "pay_year" }],
+          [{ text: "150 ⭐ — 2 Weeks", callback_data: "pay_week" }],
+          [{ text: "250 ⭐ — 1 Month", callback_data: "pay_month" }],
+          [{ text: "1000 ⭐ — Lifetime ♾️", callback_data: "pay_year" }],
         ],
       },
     }
