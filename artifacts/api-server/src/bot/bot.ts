@@ -63,7 +63,9 @@ import { fileURLToPath } from "node:url";
         ADD COLUMN IF NOT EXISTS referred_by       BIGINT,
         ADD COLUMN IF NOT EXISTS referral_count    INTEGER NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS bonus_chats       INTEGER NOT NULL DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS first_name        VARCHAR(100);
+        ADD COLUMN IF NOT EXISTS first_name        VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS broadcast_opt_out BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS last_seen_at      TIMESTAMP NOT NULL DEFAULT NOW();
     `);
 
     logger.info("DB migration: schema fully ensured");
@@ -1842,6 +1844,7 @@ bot.onText(/\/help/, async (msg) => {
     "/match — Find a match\n" +
     "/stop — End current chat\n" +
     "/premium — Upgrade to Premium 💎\n" +
+    "/earn — 💰 Telegram Ad Revenue info\n" +
     "/disclaimer — Terms of use &amp; legal notice\n" +
     "/deleteaccount — 🗑 Permanently delete your account &amp; data\n" +
     "/help — Show this help",
@@ -2117,6 +2120,12 @@ bot.on("message", async (msg) => {
       await sendMain(chatId, user);
       return;
     }
+
+    // Track last-seen for Monthly Active User (MAU) count used in Telegram Ad eligibility
+    db.update(usersTable)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(usersTable.id, id))
+      .catch(() => {});
 
     // ── Auto-repair: silently fix profiles where all fields filled but flag not set ──
     user = await repairProfileIfNeeded(user);
@@ -2529,6 +2538,51 @@ bot.onText(/\/stop/, async (msg) => {
 
 bot.onText(/\/pay/, async (msg) => { await sendPayGate(msg.chat.id); });
 
+// ── /earn — explains Telegram Ad Revenue to the bot owner ────────────────────
+
+bot.onText(/\/earn/, async (msg) => {
+  const userId = msg.from!.id;
+  const chatId = msg.chat.id;
+
+  // For regular users: just show premium upsell
+  if (userId !== ADMIN_ID) {
+    await bot.sendMessage(chatId,
+      `💰 *Earn with WorldMatch*\n\n` +
+      `Invite friends and grow the community!\n\n` +
+      `The more people join, the better matches everyone gets 💕\n\n` +
+      `Share this bot: @WorldMatchBot`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  // For admin: show full ad revenue info
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const allUsers = await db.select({ lastSeenAt: usersTable.lastSeenAt }).from(usersTable);
+  const mau = allUsers.filter(u => u.lastSeenAt && new Date(u.lastSeenAt) >= thirtyDaysAgo).length;
+  const eligible = mau >= 1000;
+
+  await bot.sendMessage(chatId,
+    `💰 *Telegram Ad Revenue Sharing*\n\n` +
+    `Telegram shows sponsored messages inside bots with 1000+ monthly active users and pays the bot owner *50% of the ad revenue* in TON cryptocurrency.\n\n` +
+    `📊 *Your current MAU: ${mau}*\n` +
+    (eligible
+      ? `✅ *You are eligible to enable ads!*`
+      : `❌ Need ${1000 - mau} more monthly active users to qualify.`) +
+    `\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `🚀 *Steps to activate:*\n\n` +
+    `1. Open @BotFather\n` +
+    `2. Send /mybots → select your bot\n` +
+    `3. Tap "Bot Revenue Sharing"\n` +
+    `4. Link your TON wallet via fragment.com\n\n` +
+    `Once activated, Telegram automatically handles everything — ads appear in your bot and revenue goes to your wallet.\n\n` +
+    `_Use /adstats for full analytics._`,
+    { parse_mode: "Markdown" }
+  );
+});
+
 bot.onText(/\/premium/, async (msg) => {
   const u = await getUser(msg.from!.id);
   if (u?.hasPaid) {
@@ -2813,6 +2867,54 @@ bot.onText(/\/stats/, async (msg) => {
   }
 });
 
+// ── Admin: /adstats — Monthly Active Users & Telegram Ad Revenue eligibility ──
+
+bot.onText(/\/adstats/, async (msg) => {
+  if (!ADMIN_ID || msg.from!.id !== ADMIN_ID) return;
+  const chatId = msg.chat.id;
+
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo  = new Date(now.getTime() -  7 * 24 * 60 * 60 * 1000);
+
+    const allUsers = await db.select().from(usersTable);
+    const mau30   = allUsers.filter(u => u.lastSeenAt && new Date(u.lastSeenAt) >= thirtyDaysAgo).length;
+    const mau7    = allUsers.filter(u => u.lastSeenAt && new Date(u.lastSeenAt) >= sevenDaysAgo).length;
+    const total   = allUsers.length;
+    const paid    = allUsers.filter(u => u.hasPaid).length;
+
+    const THRESHOLD = 1000;
+    const eligible  = mau30 >= THRESHOLD;
+    const gap       = Math.max(0, THRESHOLD - mau30);
+
+    const eligibilityLine = eligible
+      ? `✅ *Eligible for Telegram Ad Revenue!*`
+      : `❌ Not eligible yet — need *${gap} more* MAU (${mau30}/${THRESHOLD})`;
+
+    await bot.sendMessage(chatId,
+      `📈 *Telegram Ad Revenue Stats*\n\n` +
+      `👥 Total users: *${total}*\n` +
+      `💎 Premium users: *${paid}*\n` +
+      `📅 Active last 7 days: *${mau7}*\n` +
+      `📅 Monthly Active Users (30d): *${mau30}*\n\n` +
+      `${eligibilityLine}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `💰 *How to enable Telegram Ad Revenue:*\n\n` +
+      `1️⃣ Open @BotFather\n` +
+      `2️⃣ Send /mybots → select your bot\n` +
+      `3️⃣ Tap *Bot Revenue Sharing*\n` +
+      `4️⃣ Connect your TON wallet via Fragment\n\n` +
+      `Telegram will automatically show sponsored messages in your bot and deposit 50% of the ad revenue to your connected wallet.\n\n` +
+      `_Check again with /adstats as your user count grows!_`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await bot.sendMessage(chatId, `❌ adstats failed: ${errMsg.slice(0, 200)}`);
+  }
+});
+
 // ── Admin: /users ─────────────────────────────────────────────────────────────
 
 bot.onText(/\/users/, async (msg) => {
@@ -2901,6 +3003,7 @@ async function setupBotProfile() {
           { command: "edit",       description: "✏️ Edit your profile" },
           { command: "premium",    description: "⭐ Go Premium" },
           { command: "stop",       description: "🛑 End current chat" },
+          { command: "earn",          description: "💰 How to earn from Telegram Ads" },
           { command: "disclaimer",     description: "📋 Terms of use & legal notice" },
           { command: "deleteaccount", description: "🗑 Delete your account & all data" },
           { command: "help",          description: "ℹ️ Show all commands" },
