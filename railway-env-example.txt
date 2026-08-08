@@ -1,13 +1,8 @@
-Copy these variable NAMES into Railway.
-Get the VALUES from Replit → Secrets tab (lock icon on left sidebar).
+Copy these variable names into your deployment environment.
 
-TELEGRAM_BOT_TOKEN       → copy value from Replit secrets
-ADMIN_TELEGRAM_ID        → 8273572245
-DATABASE_URL             → copy value from Replit secrets
-PGHOST                   → copy value from Replit secrets
-PGPORT                   → copy value from Replit secrets
-PGDATABASE               → copy value from Replit secrets
-PGUSER                   → copy value from Replit secrets
-PGPASSWORD               → copy value from Replit secrets
-SESSION_SECRET           → copy value from Replit secrets
+TELEGRAM_BOT_TOKEN       → Telegram bot token from @BotFather
+ADMIN_TELEGRAM_ID        → numeric Telegram ID that receives safety/admin alerts
+DATABASE_URL             → PostgreSQL connection string
+SESSION_SECRET           → deployment secret if your platform requires it
+BOT_POLLING_ENABLED      → true
 NODE_ENV                 → production
