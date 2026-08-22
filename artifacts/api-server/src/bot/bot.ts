@@ -202,7 +202,7 @@ async function sendMain(chatId: number, user: any, text?: string) {
 const DISCLAIMER = `
 <b>IMPORTANT: READ BEFORE USING</b>
 
-This bot is an anonymous text-chat service for adults. It is <b>not a dating bot</b>, does not arrange dates or relationships, and does not guarantee any specific gender match. Gender is self-declared and may be inaccurate.
+This bot is an anonymous chat service for adults. It helps people meet others for conversations, but gender is self-declared and may be inaccurate.
 
 <b>18+ only</b>
 You must be at least 18 years old. No minors are allowed. Do not use this service if you are under 18. We may suspend accounts and report unlawful conduct where required.
@@ -220,7 +220,7 @@ const PRIVACY = `
 <b>Effective date:</b> ${POLICY_VERSION}
 
 <b>1. Who this is for</b>
-This bot provides anonymous text chat for adults. It is not a dating service and does not guarantee identity, gender, matching, safety, or outcomes.
+This bot provides anonymous text chat for adults and does not guarantee identity, gender, matching, safety, or outcomes.
 
 <b>2. Data we process</b>
 We may process your Telegram user ID, username, first name, age confirmation, self-declared gender, optional profile fields, consent records, chat state, payment status, reports, and safety/abuse events. We do not permit or store media sharing through this bot. Chat messages are relayed through Telegram and may be processed by Telegram under its own policies.
@@ -361,7 +361,7 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
     await bot.sendMessage(chatId, "That chat was taken just now. Please tap 💘 Find a Match again.", { reply_markup: mainKeyboard(user) });
     return;
   }
-  const safety = "⚠️ Safety first: this is anonymous human text chat, not dating. Gender is not verified. Never share Instagram, personal Telegram, phone, OTPs, money, passwords, or photos. Report anything suspicious.";
+  const safety = "⚠️ Safety first: this is anonymous human chat. Gender is not verified. Never share Instagram, personal Telegram, phone, OTPs, money, passwords, or photos. Report anything suspicious.";
   const chatKeyboard = { keyboard: [[{ text: BUTTONS.stop }, { text: BUTTONS.report }]], resize_keyboard: true };
   await bot.sendMessage(chatId, "💘 You are connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard });
   await bot.sendMessage(chatId, safety);
