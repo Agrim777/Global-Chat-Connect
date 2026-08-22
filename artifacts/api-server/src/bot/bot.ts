@@ -13,6 +13,8 @@ const ONLINE_WINDOW_MS = 2 * 60 * 1000; // users seen in the last two minutes ar
 const bot = new TelegramBot(TOKEN, { polling: false });
 export { bot };
 
+const editField = new Map<number, "name" | "age" | "bio" | "country">();
+
 const PREMIUM_PLANS = {
   twoweek: { label: "2 Week Access", stars: 150, days: 14 },
   month: { label: "1 Month Access", stars: 250, days: 30 },
@@ -28,6 +30,11 @@ const BUTTONS = {
   stop: "🛑 End Chat",
   report: "🚩 Report User",
   help: "🛡️ Safety Help",
+  edit: "✏️ Edit Profile",
+  delete: "🗑️ Delete Account",
+  adminFemale: "👩 Match Female",
+  adminMale: "👨 Match Male",
+  adminPanel: "🛠️ Admin Panel",
 } as const;
 
 const SCAM_PATTERNS = [
@@ -175,8 +182,16 @@ async function notifyFemaleJoin(user: any) {
 }
 
 function mainKeyboard(user: any): TelegramBot.ReplyKeyboardMarkup {
-  const rows: TelegramBot.KeyboardButton[][] = [[{ text: BUTTONS.match }], [{ text: BUTTONS.profile }, { text: BUTTONS.help }]];
+  const rows: TelegramBot.KeyboardButton[][] = [
+    [{ text: BUTTONS.match }],
+    [{ text: BUTTONS.profile }, { text: BUTTONS.edit }],
+    [{ text: BUTTONS.help }, { text: BUTTONS.delete }],
+  ];
   if (user.gender !== "female" && !isPaidAndActive(user)) rows.push([{ text: BUTTONS.premium }]);
+  if (user.id === ADMIN_ID) {
+    rows.push([{ text: BUTTONS.adminFemale }, { text: BUTTONS.adminMale }]);
+    rows.push([{ text: BUTTONS.adminPanel }]);
+  }
   return { keyboard: rows, resize_keyboard: true };
 }
 
@@ -240,9 +255,10 @@ async function sendCompliance(chatId: number) {
 }
 
 async function sendPolicyReminder(chatId: number) {
-  await bot.sendMessage(chatId, "🛡️ <b>Safety & privacy reminder</b>", { parse_mode: "HTML" });
-  await bot.sendMessage(chatId, DISCLAIMER, { parse_mode: "HTML", disable_web_page_preview: true });
-  await bot.sendMessage(chatId, PRIVACY, { parse_mode: "HTML", disable_web_page_preview: true });
+  await bot.sendMessage(chatId,
+    "🛡️ <b>Safety reminder</b>\n\nNever share personal details, money, OTPs, photos, or move chats to Instagram, Signal, WhatsApp, or private DMs. Use /privacy and /disclaimer anytime to read the full notices.",
+    { parse_mode: "HTML", disable_web_page_preview: true },
+  );
 }
 
 async function sendScamWarning(senderId: number, recipientId?: number, originalText?: string) {
@@ -290,14 +306,16 @@ async function disconnect(userId: number, reason: string) {
   await sendMain(userId, await getUser(userId), reason).catch(() => {});
 }
 
-async function findMatch(userId: number, chatId: number) {
+async function findMatch(userId: number, chatId: number, desiredGender?: "male" | "female") {
+  const isAdmin = userId === ADMIN_ID;
   await upsertUser(userId, { isActive: true });
   const user = await getUser(userId);
-  if (!user?.isProfileComplete || !user.termsAccepted || !user.ageVerified) {
+  if (!user) { await bot.sendMessage(chatId, "Please use /start first."); return; }
+  if (!isAdmin && (!user.isProfileComplete || !user.termsAccepted || !user.ageVerified)) {
     await sendCompliance(chatId);
     return;
   }
-  if (!isPaidAndActive(user)) {
+  if (!isAdmin && !isPaidAndActive(user)) {
     await sendPremium(chatId);
     return;
   }
@@ -311,7 +329,8 @@ async function findMatch(userId: number, chatId: number) {
   ));
   const available = candidates.filter((candidate: any) => {
     if (!isRecentlyOnline(candidate)) return false;
-    if (!candidate.gender || !isPaidAndActive(candidate)) return false;
+    if (!candidate.gender || (!isAdmin && !isPaidAndActive(candidate))) return false;
+    if (desiredGender && candidate.gender !== desiredGender) return false;
     if (candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== user.gender) return false;
     if (user.lookingFor && user.lookingFor !== "any" && user.lookingFor !== candidate.gender) return false;
     return true;
@@ -353,14 +372,19 @@ async function reportUser(reporterId: number, reportedId: number, reason = "User
 
 async function startProfile(chatId: number, id: number) {
   await upsertUser(id, { state: "setup_name", isActive: true });
-  await bot.sendMessage(chatId, "Create your anonymous profile. Only your chosen display name, age, gender, and optional fields are used for matching. Do not use a real surname or share contact details.\n\nWhat name should other users see?");
+  await bot.sendMessage(chatId, "👋 Welcome! Let’s create your anonymous dating profile.\n\n✨ What’s your name?\n(Use a first name or nickname — never share your surname or contact details.)");
 }
 
 async function deleteAccount(chatId: number, id: number) {
   const user = await getUser(id);
-  if (user?.chattingWith) await disconnect(id, "Your account was deleted and the chat ended.");
+  const partnerId = user?.chattingWith;
+  if (partnerId && partnerId !== 0) {
+    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, id)));
+    await sendMain(partnerId, await getUser(partnerId), "The other user deleted their account. The chat has ended.").catch(() => {});
+  }
   await db.delete(usersTable).where(eq(usersTable.id, id));
-  await bot.sendMessage(chatId, "Your account data has been deleted from the active user table. Safety, fraud-prevention, payment, and legal records may be retained where required. Use /start to create a new account.");
+  editField.delete(id);
+  await bot.sendMessage(chatId, "✅ Your account has been deleted. Active profile data was removed. Safety, fraud-prevention, payment, and legal records may be retained where required. Use /start to create a new account.");
 }
 
 bot.onText(/^\/start(?:\s+.*)?$/i, async (msg) => {
@@ -380,6 +404,29 @@ bot.onText(/^\/start(?:\s+.*)?$/i, async (msg) => {
 bot.onText(/^\/(?:disclaimer|terms)$/i, (msg) => bot.sendMessage(msg.chat.id, DISCLAIMER, { parse_mode: "HTML" }));
 bot.onText(/^\/privacy$/i, (msg) => bot.sendMessage(msg.chat.id, PRIVACY, { parse_mode: "HTML" }));
 bot.onText(/^\/help$/i, (msg) => bot.sendMessage(msg.chat.id, "Commands:\n/start — consent and profile\n/profile — view your profile\n/match — find anonymous human text chat\n/premium — male paid access\n/report — report your current chat partner\n/stop — end chat\n/privacy — privacy policy\n/disclaimer — terms and safety disclaimer\n/deleteaccount — delete active account data"));
+
+async function showEditMenu(chatId: number) {
+  await bot.sendMessage(chatId, "✏️ <b>Edit Profile</b>\n\nYou can update your name, age, bio, or country. Gender is permanently locked for safety and cannot be edited.", {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [
+      [{ text: "📝 Change Name", callback_data: "edit_name" }, { text: "🎂 Change Age", callback_data: "edit_age" }],
+      [{ text: "📖 Change Bio", callback_data: "edit_bio" }, { text: "🌍 Change Country", callback_data: "edit_country" }],
+      [{ text: "🔒 Gender (locked)", callback_data: "edit_gender_locked" }],
+    ] },
+  });
+}
+
+bot.onText(/^\/edit$/i, async (msg) => {
+  if (msg.from?.id) await showEditMenu(msg.chat.id);
+});
+
+bot.onText(/^\/deleteaccount$/i, async (msg) => {
+  if (!msg.from?.id) return;
+  await bot.sendMessage(msg.chat.id, "⚠️ <b>Delete your account?</b>\n\nYour active profile will be removed and any current chat will end. This cannot be undone.", {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [[{ text: "✅ Yes, delete my account", callback_data: "delete_account_confirm" }], [{ text: "↩️ Keep my account", callback_data: "delete_account_cancel" }]] },
+  });
+});
 
 bot.onText(/^\/profile$/i, async (msg) => {
   const id = msg.from?.id; if (!id) return;
@@ -405,10 +452,6 @@ bot.onText(/^\/report(?:\s+(.+))?$/i, async (msg, match) => {
   await bot.sendMessage(msg.chat.id, `🚩 Report received. The other user will not be told who reported them. Current report count against this account: ${count}. The chat is being ended for safety.`);
   await disconnect(id, "The chat ended after your report. Please do not share personal information.");
 });
-bot.onText(/^\/deleteaccount$/i, async (msg) => {
-  if (msg.from?.id) await deleteAccount(msg.chat.id, msg.from.id);
-});
-
 bot.on("callback_query", async (query) => {
   const id = query.from?.id;
   const chatId = query.message?.chat.id;
@@ -416,6 +459,15 @@ bot.on("callback_query", async (query) => {
   if (!id || !chatId) return;
   await bot.answerCallbackQuery(query.id).catch(() => {});
   if (data === "show_privacy") { await bot.sendMessage(chatId, PRIVACY, { parse_mode: "HTML" }); return; }
+  if (data === "delete_account_cancel") { await bot.sendMessage(chatId, "Cancelled — your account is safe. 😊"); return; }
+  if (data === "delete_account_confirm") { await deleteAccount(chatId, id); return; }
+  if (data === "edit_gender_locked") { await bot.sendMessage(chatId, "🔒 Gender is locked permanently after signup and cannot be edited."); return; }
+  if (["name", "age", "bio", "country"].some((field) => data === "edit_" + field)) {
+    const field = data.replace("edit_", "") as "name" | "age" | "bio" | "country";
+    editField.set(id, field);
+    await bot.sendMessage(chatId, field === "name" ? "📝 Type your new display name:" : field === "age" ? "🎂 Type your new age (18+):" : field === "bio" ? "📖 Type your new short bio:" : "🌍 Type your country:");
+    return;
+  }
   if (data === "decline_policy") { await bot.sendMessage(chatId, "You cannot use this bot without agreeing to the 18+ requirement, terms, and Privacy Policy. You may return with /start later."); return; }
   if (data === "accept_policy") {
     await upsertUser(id, { termsAccepted: true, privacyAccepted: true, ageVerified: true, termsAcceptedAt: new Date(), complianceVersion: POLICY_VERSION });
@@ -461,23 +513,53 @@ bot.on("message", async (msg) => {
 
   if (isMediaMessage(msg)) { await sendMediaBlocked(msg.chat.id); if (user.state === "chatting" && user.chattingWith) await sendAdmin(`🛡️ Media attempt blocked. Sender: <code>${id}</code>, recipient: <code>${user.chattingWith}</code>`); return; }
   const text = (msg.text || "").trim();
+  const pendingEdit = editField.get(id);
+  if (pendingEdit) {
+    if (pendingEdit === "name") {
+      if (text.length < 2 || text.length > 40 || !/^[\p{L}\s'_-]+$/u.test(text)) { await bot.sendMessage(msg.chat.id, "Please enter a display name using 2–40 letters."); return; }
+      await upsertUser(id, { name: text, state: "idle" });
+    } else if (pendingEdit === "age") {
+      const age = Number(text);
+      if (!Number.isInteger(age) || age < 18 || age > 120) { await bot.sendMessage(msg.chat.id, "Please enter a valid age from 18 to 120."); return; }
+      await upsertUser(id, { age, state: "idle", ageVerified: true });
+    } else if (pendingEdit === "bio") {
+      if (text.length > 300) { await bot.sendMessage(msg.chat.id, "Your bio must be 300 characters or fewer."); return; }
+      await upsertUser(id, { bio: text, state: "idle" });
+    } else {
+      if (text.length < 2 || text.length > 100) { await bot.sendMessage(msg.chat.id, "Please enter a country name."); return; }
+      await upsertUser(id, { country: text, state: "idle" });
+    }
+    editField.delete(id);
+    const refreshed = await getUser(id);
+    if (refreshed) await sendMain(msg.chat.id, refreshed, "✅ Profile updated successfully! 😊");
+    return;
+  }
+
   if (user.state === "setup_name") {
     if (text.length < 2 || text.length > 40 || !/^[\p{L}\s'_-]+$/u.test(text)) { await bot.sendMessage(msg.chat.id, "Please enter a display name using 2–40 letters. Do not use a surname or contact details."); return; }
     await upsertUser(id, { name: text, state: "setup_age" });
-    await bot.sendMessage(msg.chat.id, "How old are you? Enter a number. You must be 18 or older."); return;
+    await bot.sendMessage(msg.chat.id, "🎂 Nice to meet you! How old are you?\n\n🔞 Enter your age — you must be 18 or older."); return;
   }
   if (user.state === "setup_age") {
     const age = Number(text);
     if (!Number.isInteger(age) || age < 18 || age > 120) { await bot.sendMessage(msg.chat.id, "Only adults aged 18 or older may use this bot. Enter a valid age."); return; }
     await upsertUser(id, { age, ageVerified: true, state: "setup_gender" });
-    await bot.sendMessage(msg.chat.id, "Choose your gender. This choice is locked permanently after you submit it.", { reply_markup: { keyboard: [[{ text: "Male" }, { text: "Female" }]], resize_keyboard: true, one_time_keyboard: true } }); return;
+    await bot.sendMessage(msg.chat.id, "💫 What’s your gender?\n\n🔒 This choice is locked after signup.", { reply_markup: { keyboard: [[{ text: "👨 Male" }, { text: "👩 Female" }]], resize_keyboard: true, one_time_keyboard: true } }); return;
   }
   if (user.state === "setup_gender") {
-    const gender = text.toLowerCase() === "male" ? "male" : text.toLowerCase() === "female" ? "female" : null;
+    const genderText = text.toLowerCase().replace(/^[^a-z]+/, "").trim();
+    const gender = genderText === "male" ? "male" : genderText === "female" ? "female" : null;
     if (!gender) { await bot.sendMessage(msg.chat.id, "Please choose Male or Female. The choice cannot be changed after signup."); return; }
-    await upsertUser(id, { gender, genderLocked: true, lookingFor: "any", isProfileComplete: true, state: "idle" });
+    const lookingFor = gender === "female" ? "male" : "female";
+    await upsertUser(id, { gender, genderLocked: true, lookingFor, isProfileComplete: true, state: "idle" });
     const updated = await getUser(id);
-    if (updated) { await notifyFemaleJoin(updated); await sendMain(msg.chat.id, updated, `Profile created. Gender is locked. ${gender === "female" ? "Your access is free." : "Male accounts need paid access before matching."}`); }
+    if (updated) {
+      await notifyFemaleJoin(updated);
+      const welcome = gender === "female"
+        ? "🎉 Profile ready! Female access is free, and you’ll be connected with male users only. Stay safe 💛"
+        : "🎉 Profile ready! Male accounts need Paid Access before matching. You’ll be connected with female users. ⭐";
+      await sendMain(msg.chat.id, updated, welcome);
+    }
     return;
   }
   if (!user.termsAccepted || !user.ageVerified || !user.privacyAccepted) { await sendCompliance(msg.chat.id); return; }
@@ -489,9 +571,14 @@ bot.on("message", async (msg) => {
     if (!recipientId || recipientId === 0) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
     const recipient = await getUser(recipientId);
     if (!recipient || recipient.state !== "chatting" || recipient.chattingWith !== id || !isPaidAndActive(recipient)) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
-    await bot.sendMessage(recipientId, `💬 <b>${escHtml(displayName(user))}</b>\n${escHtml(text)}`, { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: BUTTONS.report, callback_data: `report_user:${id}` }]] } });
+    await bot.sendMessage(recipientId, `💬 <b>${escHtml(displayName(user))}</b>\n${escHtml(text)}`, { parse_mode: "HTML" });
     return;
   }
+  if (text === BUTTONS.edit) { await showEditMenu(msg.chat.id); return; }
+  if (text === BUTTONS.delete) { await bot.sendMessage(msg.chat.id, "⚠️ Delete your account? Use the confirmation below.", { reply_markup: { inline_keyboard: [[{ text: "✅ Yes, delete my account", callback_data: "delete_account_confirm" }], [{ text: "↩️ Keep my account", callback_data: "delete_account_cancel" }]] } }); return; }
+  if (text === BUTTONS.adminFemale && id === ADMIN_ID) { await findMatch(id, msg.chat.id, "female"); return; }
+  if (text === BUTTONS.adminMale && id === ADMIN_ID) { await findMatch(id, msg.chat.id, "male"); return; }
+  if (text === BUTTONS.adminPanel && id === ADMIN_ID) { await bot.sendMessage(msg.chat.id, "🛠️ <b>Admin controls</b>\n\n/ban ID reason\n/unban ID\n/grantlifetime ID\n/stats\n\nYou can match female or male users with the admin buttons above.", { parse_mode: "HTML", reply_markup: mainKeyboard(user) }); return; }
   if (text === BUTTONS.match) { await findMatch(id, msg.chat.id); return; }
   if (text === BUTTONS.premium) { await sendPremium(msg.chat.id); return; }
   if (text === BUTTONS.profile) { await bot.sendMessage(msg.chat.id, "Use /profile to view your profile. Gender cannot be changed after signup."); return; }
@@ -513,6 +600,23 @@ bot.onText(/^\/ban\s+(\d+)\s*(.*)$/i, async (msg, match) => {
   await db.update(usersTable).set({ isBanned: true, isActive: false, state: "idle", chattingWith: null }).where(eq(usersTable.id, targetId));
   await bot.sendMessage(msg.chat.id, `Banned <code>${targetId}</code>.`, { parse_mode: "HTML" });
   await bot.sendMessage(targetId, "Your account has been suspended for a safety violation.").catch(() => {});
+});
+
+bot.onText(/^\/unban\s+(\d+)$/i, async (msg, match) => {
+  if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
+  const targetId = Number(match?.[1]);
+  await db.delete(bannedUsersTable).where(eq(bannedUsersTable.id, targetId));
+  await db.update(usersTable).set({ isBanned: false, isActive: true, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
+  await bot.sendMessage(msg.chat.id, `✅ Unbanned <code>${targetId}</code>.`, { parse_mode: "HTML" });
+  await bot.sendMessage(targetId, "✅ Your account has been restored. Use /start to continue.").catch(() => {});
+});
+
+bot.onText(/^\/grantlifetime\s+(\d+)$/i, async (msg, match) => {
+  if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
+  const targetId = Number(match?.[1]);
+  await activatePremium(targetId, "lifetime");
+  await bot.sendMessage(msg.chat.id, `👑 Lifetime Paid Access granted to <code>${targetId}</code>.`, { parse_mode: "HTML" });
+  await bot.sendMessage(targetId, "👑 An admin granted you Lifetime Paid Access. You can now find anonymous matches.").catch(() => {});
 });
 
 bot.on("polling_error", (err: Error & { code?: string }) => {
