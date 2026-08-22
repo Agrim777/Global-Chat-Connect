@@ -273,7 +273,7 @@ async function sendMediaBlocked(chatId: number) {
 }
 
 async function sendPremium(chatId: number) {
-  await bot.sendMessage(chatId, `⭐ <b>Paid access for male accounts</b>\n\nFemale accounts can use anonymous text chat free. Male accounts need Telegram Stars access before they can be matched. Payment does not guarantee a specific gender, person, response, or outcome.`, { parse_mode: "HTML" });
+  await bot.sendMessage(chatId, `⭐ <b>Paid access required</b>\n\nComplete a Telegram Stars purchase to unlock anonymous human matching. Payment does not guarantee a specific gender, person, response, or outcome.`, { parse_mode: "HTML" });
   for (const [key, plan] of Object.entries(PREMIUM_PLANS) as [PremiumPlanKey, (typeof PREMIUM_PLANS)[PremiumPlanKey]][]) {
     await bot.sendInvoice(chatId, plan.label, `Anonymous human text-chat access: ${plan.label}.`, `access:${key}`, "", "XTR", [{ label: plan.label, amount: plan.stars }], {
       reply_markup: { inline_keyboard: [[{ text: `Pay ${plan.stars} ⭐`, pay: true }]] },
@@ -513,7 +513,8 @@ bot.on("message", async (msg) => {
     return;
   }
   const expiry = await activatePremium(id, plan);
-  await bot.sendMessage(msg.chat.id, `✅ Paid access activated. Plan: ${PREMIUM_PLANS[plan].label}. ${expiry ? `Expires: ${expiry.toDateString()}` : "Lifetime access."}\n\nPayment does not guarantee a specific gender, person, response, or outcome. Never share personal information.`);
+  await sendAdmin(`💰 <b>Premium purchase received</b>\nUser: <code>${id}</code>\nPlan: <b>${escHtml(PREMIUM_PLANS[plan].label)}</b>\nAmount: <b>${payment.total_amount} ⭐</b>`);
+  await bot.sendMessage(msg.chat.id, `✅ Paid access activated. Plan: ${PREMIUM_PLANS[plan].label}. ${expiry ? `Expires: ${expiry.toDateString()}` : "Lifetime access."}\n\nYou can now find anonymous human matches. Please stay safe and never share personal information.`);
   const user = await getUser(id); if (user) await sendMain(msg.chat.id, user);
 });
 
@@ -573,6 +574,7 @@ bot.on("message", async (msg) => {
         ? "🎉 Profile ready! Female access is free, and you’ll be connected with male users only. Stay safe 💛"
         : "🎉 Profile ready! Male accounts need Paid Access before matching. You’ll be connected with female users. ⭐";
       await sendMain(msg.chat.id, updated, welcome);
+      if (gender === "male" && id !== ADMIN_ID) await sendPremium(msg.chat.id);
     }
     return;
   }
