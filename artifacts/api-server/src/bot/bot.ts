@@ -377,9 +377,8 @@ async function reportUser(reporterId: number, reportedId: number, reason = "User
   );
   const countResult = await pool.query("SELECT COUNT(*)::int AS count FROM user_reports WHERE reported_id = $1", [reportedId]);
   const count = Number(countResult.rows[0]?.count ?? 0);
-  if (result.rowCount) {
-    await sendAdmin(`🚩 <b>User report received</b>\nReported: <code>${reportedId}</code>\nReporter: <code>${reporterId}</code>\nReports: <b>${count}</b>\nReason: ${escHtml(reason.slice(0, 500))}${count >= MAX_REPORTS_BEFORE_ALERT ? "\n\n🚨 Multiple reports — review and consider suspension/ban." : ""}`);
-  }
+  // Reports are stored for admin review through /stats and database tools,
+  // but individual reports are not pushed to the admin chat.
   return count;
 }
 
