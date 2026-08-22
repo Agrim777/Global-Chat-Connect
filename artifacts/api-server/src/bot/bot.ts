@@ -331,8 +331,8 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
     if (!isRecentlyOnline(candidate)) return false;
     if (!candidate.gender || (!isAdmin && !isPaidAndActive(candidate))) return false;
     if (desiredGender && candidate.gender !== desiredGender) return false;
-    if (candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== user.gender) return false;
-    if (user.lookingFor && user.lookingFor !== "any" && user.lookingFor !== candidate.gender) return false;
+    if (!isAdmin && candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== user.gender) return false;
+    if (!isAdmin && user.lookingFor && user.lookingFor !== "any" && user.lookingFor !== candidate.gender) return false;
     return true;
   });
   const partner = available[0];
@@ -390,7 +390,7 @@ async function deleteAccount(chatId: number, id: number) {
 bot.onText(/^\/start(?:\s+.*)?$/i, async (msg) => {
   const id = msg.from?.id;
   if (!id) return;
-  if (await isBanned(id)) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
+  if (await isBanned(id) && id !== ADMIN_ID) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
   const user = await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null, isActive: true });
   await sendPolicyReminder(msg.chat.id);
   if (!user?.termsAccepted || !user.ageVerified || !user.privacyAccepted || user.complianceVersion !== POLICY_VERSION) {
@@ -506,7 +506,7 @@ bot.on("successful_payment", async (msg) => {
 bot.on("message", async (msg) => {
   const id = msg.from?.id;
   if (!id || msg.text?.startsWith("/")) return;
-  if (await isBanned(id)) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
+  if (await isBanned(id) && id !== ADMIN_ID) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
   const user = await getUser(id);
   if (!user) { await bot.sendMessage(msg.chat.id, "Use /start first."); return; }
   await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null, isActive: true });
