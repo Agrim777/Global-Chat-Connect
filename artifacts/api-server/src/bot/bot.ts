@@ -196,13 +196,13 @@ function mainKeyboard(user: any): TelegramBot.ReplyKeyboardMarkup {
 }
 
 async function sendMain(chatId: number, user: any, text?: string) {
-  await bot.sendMessage(chatId, text || `Welcome, ${displayName(user)}. This is an anonymous text-chat service between human users.`, { reply_markup: mainKeyboard(user) });
+  await bot.sendMessage(chatId, text || `💘 Welcome, ${displayName(user)}! Find someone interesting for an anonymous conversation. Stay respectful and stay safe. 😊`, { reply_markup: mainKeyboard(user) });
 }
 
 const DISCLAIMER = `
 <b>IMPORTANT: READ BEFORE USING</b>
 
-This bot is an anonymous chat service for adults. It helps people meet others for conversations, but gender is self-declared and may be inaccurate.
+This bot is an anonymous chat service for adults. It is not a dating bot and does not arrange dates or relationships. It helps people meet others for conversations, but gender is self-declared and may be inaccurate.
 
 <b>18+ only</b>
 You must be at least 18 years old. No minors are allowed. Do not use this service if you are under 18. We may suspend accounts and report unlawful conduct where required.
@@ -220,7 +220,7 @@ const PRIVACY = `
 <b>Effective date:</b> ${POLICY_VERSION}
 
 <b>1. Who this is for</b>
-This bot provides anonymous text chat for adults and does not guarantee identity, gender, matching, safety, or outcomes.
+This bot provides anonymous text chat for adults. It is not a dating service and does not guarantee identity, gender, matching, safety, or outcomes.
 
 <b>2. Data we process</b>
 We may process your Telegram user ID, username, first name, age confirmation, self-declared gender, optional profile fields, consent records, chat state, payment status, reports, and safety/abuse events. We do not permit or store media sharing through this bot. Chat messages are relayed through Telegram and may be processed by Telegram under its own policies.
@@ -275,7 +275,7 @@ async function sendMediaBlocked(chatId: number) {
 async function sendPremium(chatId: number) {
   await bot.sendMessage(chatId, `⭐ <b>Paid access required</b>\n\nComplete a Telegram Stars purchase to unlock anonymous human matching. Payment does not guarantee a specific gender, person, response, or outcome.`, { parse_mode: "HTML" });
   for (const [key, plan] of Object.entries(PREMIUM_PLANS) as [PremiumPlanKey, (typeof PREMIUM_PLANS)[PremiumPlanKey]][]) {
-    await bot.sendInvoice(chatId, plan.label, `Anonymous human text-chat access: ${plan.label}.`, `access:${key}`, "", "XTR", [{ label: plan.label, amount: plan.stars }], {
+    await bot.sendInvoice(chatId, plan.label, `Anonymous dating-chat access: ${plan.label}.`, `access:${key}`, "", "XTR", [{ label: plan.label, amount: plan.stars }], {
       reply_markup: { inline_keyboard: [[{ text: `Pay ${plan.stars} ⭐`, pay: true }]] },
     });
   }
@@ -350,7 +350,7 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   });
   const partner = available[0];
   if (!partner) {
-    await bot.sendMessage(chatId, "No eligible anonymous chat is available right now. Please try again later. We never invent or guarantee a match.", { reply_markup: mainKeyboard(user) });
+    await bot.sendMessage(chatId, "💭 No match is online right now. Please try again soon — we only connect real active users. 😊", { reply_markup: mainKeyboard(user) });
     return;
   }
   const claimed = await db.update(usersTable).set({ state: "chatting", chattingWith: partner.id, updatedAt: new Date() }).where(and(eq(usersTable.id, userId), eq(usersTable.state, "idle"))).returning({ id: usersTable.id });
@@ -365,7 +365,7 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   const chatKeyboard = { keyboard: [[{ text: BUTTONS.stop }, { text: BUTTONS.report }]], resize_keyboard: true };
   await bot.sendMessage(chatId, "💘 You are connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard });
   await bot.sendMessage(chatId, safety);
-  await bot.sendMessage(partner.id, "✅ Anonymous chat connected. Say hello — text only.", { reply_markup: chatKeyboard });
+  await bot.sendMessage(partner.id, "💘 Match connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard });
   await bot.sendMessage(partner.id, safety);
 }
 
