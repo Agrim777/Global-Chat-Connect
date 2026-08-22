@@ -208,7 +208,7 @@ This bot is an anonymous text-chat service for adults. It is <b>not a dating bot
 You must be at least 18 years old. No minors are allowed. Do not use this service if you are under 18. We may suspend accounts and report unlawful conduct where required.
 
 <b>Safety and scam warning</b>
-Never share Instagram, Telegram handles, phone numbers, OTPs, passwords, payment details, address, workplace, private photos, or other personal information. A scammer may claim to be a girl, ask you to move to Instagram/DM, and use manipulated or morphed images to harass or extort people. Treat every gender claim and every request to move off-platform as unverified. The bot blocks media and suspicious social-contact requests for safety.
+Never share Instagram, Telegram handles, phone numbers, OTPs, passwords, payment details, address, workplace, private photos, or other personal information. A scammer may claim to be a girl, ask you to move to Instagram/DM, and use manipulated or morphed images to harass or extort people. Treat every gender claim and every request to move off-platform as unverified. The bot shows a safety warning when social-contact details appear; media sharing remains blocked for safety.
 
 <b>Human-only chat</b>
 There is no free AI chat, fake persona, or automated person pretending to be a user. Availability depends on real users. We do not guarantee a specific gender or conversation outcome.
@@ -226,7 +226,7 @@ This bot provides anonymous text chat for adults. It is not a dating service and
 We may process your Telegram user ID, username, first name, age confirmation, self-declared gender, optional profile fields, consent records, chat state, payment status, reports, and safety/abuse events. We do not permit or store media sharing through this bot. Chat messages are relayed through Telegram and may be processed by Telegram under its own policies.
 
 <b>3. Why we process it</b>
-To create and operate your account, enforce the 18+ requirement, match available users, process Telegram Stars access, prevent abuse and scams, handle reports, protect users, and respond to lawful requests.
+To create and operate your account, enforce the 18+ requirement, match available users, process Telegram Stars access, warn about scams, handle reports, protect users, and respond to lawful requests.
 
 <b>4. Sharing and retention</b>
 We do not sell personal data. Data may be shared with Telegram as needed to operate the bot, with service providers that host the bot/database, or with authorities where legally required. We retain account, consent, payment, and safety records only as long as reasonably necessary for operation, safety, disputes, legal obligations, or fraud prevention.
@@ -262,7 +262,7 @@ async function sendPolicyReminder(chatId: number) {
 }
 
 async function sendScamWarning(senderId: number, recipientId?: number, originalText?: string) {
-  const warning = `🚨 <b>SAFETY ALERT — MESSAGE BLOCKED</b>\n\nMoving to Instagram, Signal, WhatsApp, Snapchat, personal Telegram DMs, or any other app can expose you to scams, fake identities, harassment, or extortion. Never share photos, OTPs, money, passwords, phone numbers, usernames, or location.\n\nThe same warning was sent to both people for protection. Report and end the chat if anyone pressures you.\n\nThis bot does not verify identity or gender.`;
+  const warning = `⚠️ <b>SAFETY REMINDER — SHARE AT YOUR OWN RISK</b>\n\nYou mentioned Instagram, Signal, WhatsApp, Snapchat, personal Telegram DMs, or another app. You may continue chatting here, but sharing contact details can expose you to scams, fake identities, harassment, or extortion.\n\nNever share photos, OTPs, money, passwords, phone numbers, usernames, or location. This reminder was shown to both people. Report and end the chat if anyone pressures you.\n\nThis bot does not verify identity or gender.`;
   await bot.sendMessage(senderId, warning, { parse_mode: "HTML" }).catch(() => {});
   if (recipientId) await bot.sendMessage(recipientId, warning, { parse_mode: "HTML" }).catch(() => {});
   await sendAdmin(`⚠️ <b>Social-contact request blocked</b>\nSender: <code>${senderId}</code>\nRecipient: <code>${recipientId ?? "—"}</code>\nText: ${escHtml((originalText || "").slice(0, 240))}`);
@@ -580,7 +580,7 @@ bot.on("message", async (msg) => {
   if (user.state === "chatting") {
     if (text === BUTTONS.stop) { await disconnect(id, "The anonymous chat ended."); return; }
     if (text === BUTTONS.report) { const partner = user.chattingWith; if (partner) { await reportUser(id, partner, "Reported with chat button"); await bot.sendMessage(msg.chat.id, "🚩 Report received. The chat is ending for safety."); await disconnect(id, "The chat ended after your report."); } return; }
-    if (isScamContactRequest(text)) { await sendScamWarning(id, user.chattingWith || undefined, text); return; }
+    if (isScamContactRequest(text)) { await sendScamWarning(id, user.chattingWith || undefined, text); }
     const recipientId = user.chattingWith;
     if (!recipientId || recipientId === 0) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
     const recipient = await getUser(recipientId);
