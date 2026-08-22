@@ -385,7 +385,7 @@ async function reportUser(reporterId: number, reportedId: number, reason = "User
 
 async function startProfile(chatId: number, id: number) {
   await upsertUser(id, { state: "setup_name", isActive: true });
-  await bot.sendMessage(chatId, "👋 Welcome! Let’s create your anonymous dating profile.\n\n✨ What’s your name?\n(Use a first name or nickname — never share your surname or contact details.)");
+  await bot.sendMessage(chatId, "👋 Welcome! Let’s create your anonymous chatting profile.\n\n✨ What’s your name?\n(Use a first name or nickname — never share your surname or contact details.)");
 }
 
 async function deleteAccount(chatId: number, id: number) {
