@@ -9,6 +9,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
 const POLICY_VERSION = "2026-08-08";
 const MAX_REPORTS_BEFORE_ALERT = 3;
+const ONLINE_WINDOW_MS = 2 * 60 * 1000; // users seen in the last two minutes are considered online
 const bot = new TelegramBot(TOKEN, { polling: false });
 export { bot };
 
@@ -20,13 +21,13 @@ const PREMIUM_PLANS = {
 type PremiumPlanKey = keyof typeof PREMIUM_PLANS;
 
 const BUTTONS = {
-  start: "Create Profile",
-  match: "Find Anonymous Chat",
-  profile: "My Profile",
-  premium: "Paid Access",
-  stop: "Stop Chat",
-  report: "Report User",
-  help: "Safety Help",
+  start: "✨ Create Profile",
+  match: "💘 Find a Match",
+  profile: "👤 My Profile",
+  premium: "⭐ Unlock Premium",
+  stop: "🛑 End Chat",
+  report: "🚩 Report User",
+  help: "🛡️ Safety Help",
 } as const;
 
 const SCAM_PATTERNS = [
@@ -36,6 +37,9 @@ const SCAM_PATTERNS = [
   /\bdm\s*(?:me|on)\b.*\b(?:instagram|insta|ig)\b/i,
   /\b(?:telegram|contact)\s*(?:username|id|handle)\b/i,
   /\b(?:send|share|give)\s*(?:me\s*)?(?:your\s*)?(?:insta|instagram|ig)\b/i,
+  /\b(?:signal|whatsapp|what\s*sapp|snapchat|snap|discord|messenger)\b/i,
+  /\b(?:move|take|talk|chat|connect|message)\b.*\b(?:off[- ]?app|off[- ]?platform|outside|another app|privately)\b/i,
+  /\b(?:send|share|give)\s+(?:me\s*)?(?:your\s*)?(?:number|phone|contact|handle|username|id)\b/i,
   /@[_a-z0-9]{4,}/i,
 ];
 
@@ -67,6 +71,11 @@ function isPaidAndActive(user: any): boolean {
   if (!user.hasPaid) return false;
   if (user.premiumPlan === "lifetime") return true;
   return Boolean(user.premiumExpiresAt && new Date(user.premiumExpiresAt) > new Date());
+}
+
+function isRecentlyOnline(user: any): boolean {
+  if (!user?.lastSeenAt) return false;
+  return Date.now() - new Date(user.lastSeenAt).getTime() <= ONLINE_WINDOW_MS;
 }
 
 async function ensureSchema() {
@@ -230,8 +239,14 @@ async function sendCompliance(chatId: number) {
   });
 }
 
+async function sendPolicyReminder(chatId: number) {
+  await bot.sendMessage(chatId, "🛡️ <b>Safety & privacy reminder</b>", { parse_mode: "HTML" });
+  await bot.sendMessage(chatId, DISCLAIMER, { parse_mode: "HTML", disable_web_page_preview: true });
+  await bot.sendMessage(chatId, PRIVACY, { parse_mode: "HTML", disable_web_page_preview: true });
+}
+
 async function sendScamWarning(senderId: number, recipientId?: number, originalText?: string) {
-  const warning = `⚠️ <b>SCAM WARNING — MESSAGE BLOCKED</b>\n\nNever move an anonymous chat to Instagram, personal Telegram DMs, phone, or another app. Fake profiles may ask for a handle and use morphed/manipulated photos to harass, threaten, or extort people. Do not share photos, OTPs, money, passwords, or personal details. Report the user and stop the chat if they pressure you.\n\nThis bot is not a dating service and does not verify gender or identity.`;
+  const warning = `🚨 <b>SAFETY ALERT — MESSAGE BLOCKED</b>\n\nMoving to Instagram, Signal, WhatsApp, Snapchat, personal Telegram DMs, or any other app can expose you to scams, fake identities, harassment, or extortion. Never share photos, OTPs, money, passwords, phone numbers, usernames, or location.\n\nThe same warning was sent to both people for protection. Report and end the chat if anyone pressures you.\n\nThis bot does not verify identity or gender.`;
   await bot.sendMessage(senderId, warning, { parse_mode: "HTML" }).catch(() => {});
   if (recipientId) await bot.sendMessage(recipientId, warning, { parse_mode: "HTML" }).catch(() => {});
   await sendAdmin(`⚠️ <b>Social-contact request blocked</b>\nSender: <code>${senderId}</code>\nRecipient: <code>${recipientId ?? "—"}</code>\nText: ${escHtml((originalText || "").slice(0, 240))}`);
@@ -276,6 +291,7 @@ async function disconnect(userId: number, reason: string) {
 }
 
 async function findMatch(userId: number, chatId: number) {
+  await upsertUser(userId, { isActive: true });
   const user = await getUser(userId);
   if (!user?.isProfileComplete || !user.termsAccepted || !user.ageVerified) {
     await sendCompliance(chatId);
@@ -294,6 +310,7 @@ async function findMatch(userId: number, chatId: number) {
     ne(usersTable.id, userId),
   ));
   const available = candidates.filter((candidate: any) => {
+    if (!isRecentlyOnline(candidate)) return false;
     if (!candidate.gender || !isPaidAndActive(candidate)) return false;
     if (candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== user.gender) return false;
     if (user.lookingFor && user.lookingFor !== "any" && user.lookingFor !== candidate.gender) return false;
@@ -307,14 +324,14 @@ async function findMatch(userId: number, chatId: number) {
   const claimed = await db.update(usersTable).set({ state: "chatting", chattingWith: partner.id, updatedAt: new Date() }).where(and(eq(usersTable.id, userId), eq(usersTable.state, "idle"))).returning({ id: usersTable.id });
   const claimedPartner = await db.update(usersTable).set({ state: "chatting", chattingWith: userId, updatedAt: new Date() }).where(and(eq(usersTable.id, partner.id), eq(usersTable.state, "idle"))).returning({ id: usersTable.id });
   if (!claimed.length || !claimedPartner.length) {
-    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, userId));
-    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, partner.id));
-    await bot.sendMessage(chatId, "That chat was taken just now. Please tap Find Anonymous Chat again.", { reply_markup: mainKeyboard(user) });
+    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(and(eq(usersTable.id, userId), eq(usersTable.chattingWith, partner.id)));
+    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(and(eq(usersTable.id, partner.id), eq(usersTable.chattingWith, userId)));
+    await bot.sendMessage(chatId, "That chat was taken just now. Please tap 💘 Find a Match again.", { reply_markup: mainKeyboard(user) });
     return;
   }
   const safety = "⚠️ Safety first: this is anonymous human text chat, not dating. Gender is not verified. Never share Instagram, personal Telegram, phone, OTPs, money, passwords, or photos. Report anything suspicious.";
   const chatKeyboard = { keyboard: [[{ text: BUTTONS.stop }, { text: BUTTONS.report }]], resize_keyboard: true };
-  await bot.sendMessage(chatId, "✅ Anonymous chat connected. Say hello — text only.", { reply_markup: chatKeyboard });
+  await bot.sendMessage(chatId, "💘 You are connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard });
   await bot.sendMessage(chatId, safety);
   await bot.sendMessage(partner.id, "✅ Anonymous chat connected. Say hello — text only.", { reply_markup: chatKeyboard });
   await bot.sendMessage(partner.id, safety);
@@ -351,6 +368,7 @@ bot.onText(/^\/start(?:\s+.*)?$/i, async (msg) => {
   if (!id) return;
   if (await isBanned(id)) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
   const user = await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null, isActive: true });
+  await sendPolicyReminder(msg.chat.id);
   if (!user?.termsAccepted || !user.ageVerified || !user.privacyAccepted || user.complianceVersion !== POLICY_VERSION) {
     await sendCompliance(msg.chat.id);
     return;
@@ -439,7 +457,7 @@ bot.on("message", async (msg) => {
   if (await isBanned(id)) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
   const user = await getUser(id);
   if (!user) { await bot.sendMessage(msg.chat.id, "Use /start first."); return; }
-  await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null });
+  await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null, isActive: true });
 
   if (isMediaMessage(msg)) { await sendMediaBlocked(msg.chat.id); if (user.state === "chatting" && user.chattingWith) await sendAdmin(`🛡️ Media attempt blocked. Sender: <code>${id}</code>, recipient: <code>${user.chattingWith}</code>`); return; }
   const text = (msg.text || "").trim();
