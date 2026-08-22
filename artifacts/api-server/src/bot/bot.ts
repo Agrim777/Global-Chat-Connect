@@ -502,7 +502,8 @@ bot.on("pre_checkout_query", async (query) => {
   await bot.answerPreCheckoutQuery(query.id, valid, valid ? undefined : { error_message: "This payment is invalid or expired." }).catch((err) => logger.warn({ err }, "Pre-checkout response failed"));
 });
 
-bot.on("successful_payment", async (msg) => {
+bot.on("message", async (msg) => {
+  if (!msg.successful_payment) return;
   const id = msg.from?.id;
   const payment = msg.successful_payment;
   if (!id || !payment || payment.currency !== "XTR") return;
@@ -518,7 +519,7 @@ bot.on("successful_payment", async (msg) => {
 
 bot.on("message", async (msg) => {
   const id = msg.from?.id;
-  if (!id || msg.text?.startsWith("/")) return;
+  if (!id || msg.text?.startsWith("/") || msg.successful_payment) return;
   if (await isBanned(id) && id !== ADMIN_ID) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
   const user = await getUser(id);
   if (!user) { await bot.sendMessage(msg.chat.id, "Use /start first."); return; }
