@@ -328,12 +328,25 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
     ne(usersTable.id, userId),
   ));
   const available = candidates.filter((candidate: any) => {
-    if (!isRecentlyOnline(candidate)) return false;
     if (!candidate.gender || (!isAdmin && !isPaidAndActive(candidate))) return false;
     if (desiredGender && candidate.gender !== desiredGender) return false;
-    if (!isAdmin && candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== user.gender) return false;
-    if (!isAdmin && user.lookingFor && user.lookingFor !== "any" && user.lookingFor !== candidate.gender) return false;
+
+    // Female users connect only to male users. Male users can connect to either gender.
+    if (!isAdmin && user.gender === "female" && candidate.gender !== "male") return false;
+
+    // A female candidate is available to male users only when she is looking for men.
+    // Male-to-male matching remains allowed, as requested for male accounts.
+    if (!isAdmin && user.gender === "male" && candidate.gender === "female" &&
+        candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== "male") return false;
     return true;
+  });
+
+  // Prefer users who are online now. If none are online, use the most recently seen
+  // active profiles as a fallback so the queue does not become unnecessarily empty.
+  available.sort((a: any, b: any) => {
+    const onlineDiff = Number(isRecentlyOnline(b)) - Number(isRecentlyOnline(a));
+    if (onlineDiff !== 0) return onlineDiff;
+    return new Date(b.lastSeenAt || 0).getTime() - new Date(a.lastSeenAt || 0).getTime();
   });
   const partner = available[0];
   if (!partner) {
