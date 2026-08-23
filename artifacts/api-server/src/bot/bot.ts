@@ -320,37 +320,51 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   }
 
   let partnerId: number | null = null;
+  const client = await pool.connect();
   try {
-    await db.transaction(async (tx) => {
-      const filters = [
-        "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
-        "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
-        "u.state = 'idle'", "u.gender IS NOT NULL",
-      ];
-      if (!isAdmin) {
-        filters.push("(u.gender = 'female' OR (u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
-        if (desiredGender) filters.push(`u.gender = '${desiredGender}'`);
-        if (user.gender === "female") filters.push("u.gender = 'male'");
-        if (user.gender === "male") filters.push("(u.gender = 'male' OR (u.gender = 'female' AND (u.looking_for IS NULL OR u.looking_for IN ('any', 'male'))))");
-      } else if (desiredGender) {
-        filters.push(`u.gender = '${desiredGender}'`);
-      }
-      const result = await tx.execute(sql.raw(`SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, u.last_seen_at DESC FOR UPDATE SKIP LOCKED LIMIT 1`));
-      const row = (result as any).rows?.[0];
-      if (!row) return;
-      const candidateId = Number(row.id);
-      const claimed = await tx.execute(sql.raw(`UPDATE users SET state = 'chatting', chatting_with = ${candidateId}, updated_at = NOW() WHERE id = ${userId} AND state = 'idle' RETURNING id`));
-      const claimedPartner = await tx.execute(sql.raw(`UPDATE users SET state = 'chatting', chatting_with = ${userId}, updated_at = NOW() WHERE id = ${candidateId} AND state = 'idle' RETURNING id`));
-      if ((claimed as any).rows?.length && (claimedPartner as any).rows?.length) partnerId = candidateId;
+    await client.query("BEGIN");
+    const params: unknown[] = [userId];
+    const filters = [
+      "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
+      "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
+      "u.state = 'idle'", "u.gender IS NOT NULL",
+    ];
+    if (!isAdmin) {
+      filters.push("(u.gender = 'female' OR (u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
+      if (desiredGender) { params.push(desiredGender); filters.push(`u.gender = $${params.length}`); }
+      if (user.gender === "female") filters.push("u.gender = 'male'");
+      if (user.gender === "male") filters.push("(u.gender = 'male' OR (u.gender = 'female' AND (u.looking_for IS NULL OR u.looking_for IN ('any', 'male'))))");
+    } else if (desiredGender) {
+      params.push(desiredGender); filters.push(`u.gender = $${params.length}`);
+    }
+    const result = await client.query(
+      `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, u.last_seen_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED`,
+      params,
+    );
+    const candidateId = result.rows[0] ? Number(result.rows[0].id) : null;
+    if (candidateId) {
+      const claimed = await client.query(
+        "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id",
+        [userId, candidateId],
+      );
+      const claimedPartner = await client.query(
+        "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id",
+        [candidateId, userId],
+      );
+      if (claimed.rowCount && claimedPartner.rowCount) partnerId = candidateId;
       else {
-        await tx.execute(sql.raw(`UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = ${userId} AND chatting_with = ${candidateId}`));
-        await tx.execute(sql.raw(`UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = ${candidateId} AND chatting_with = ${userId}`));
+        await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", [userId, candidateId]);
+        await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", [candidateId, userId]);
       }
-    });
+    }
+    await client.query("COMMIT");
   } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
     logger.error({ err, userId }, "Match lookup failed");
     await bot.sendMessage(chatId, "Match service is busy right now. Please tap Find a Match again.", { reply_markup: mainKeyboard(user) });
     return;
+  } finally {
+    client.release();
   }
   if (!partnerId) {
     await bot.sendMessage(chatId, "💭 No match is free right now. Try again in a moment — new people are joining. 😊", { reply_markup: mainKeyboard(user) });
