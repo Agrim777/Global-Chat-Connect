@@ -7,7 +7,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
-const POLICY_VERSION = "2026-08-08";
+const POLICY_VERSION = "2026-08-23";
 const MAX_REPORTS_BEFORE_ALERT = 3;
 let activeOfferExpiresAt: Date | null = null;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000; // users seen in the last two minutes are considered online
@@ -340,7 +340,7 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
       params.push(desiredGender); filters.push(`u.gender = $${params.length}`);
     }
     const result = await client.query(
-      `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, u.last_seen_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED`,
+      `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, (u.last_seen_at >= NOW() - INTERVAL '24 hours') DESC, u.last_seen_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED`,
       params,
     );
     const candidateId = result.rows[0] ? Number(result.rows[0].id) : null;
@@ -373,9 +373,12 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
     return;
   }
   const chatKeyboard = { keyboard: [[{ text: BUTTONS.stop }, { text: BUTTONS.report }]], resize_keyboard: true };
+  const partner = await getUser(partnerId);
+  const myName = displayName(user);
+  const partnerName = displayName(partner);
   await Promise.all([
-    bot.sendMessage(chatId, "💘 Match connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard }),
-    bot.sendMessage(partnerId, "💘 Match connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard }),
+    bot.sendMessage(chatId, `💘 Connected with <b>${escHtml(partnerName)}</b>! Say hello and keep it respectful — text only. 😊`, { parse_mode: "HTML", reply_markup: chatKeyboard }),
+    bot.sendMessage(partnerId, `💘 Connected with <b>${escHtml(myName)}</b>! Say hello and keep it respectful — text only. 😊`, { parse_mode: "HTML", reply_markup: chatKeyboard }),
   ]);
 }
 async function reportUser(reporterId: number, reportedId: number, reason = "User report") {
@@ -413,11 +416,11 @@ bot.onText(/^\/start(?:\s+.*)?$/i, async (msg) => {
   if (!id) return;
   if (await isBanned(id) && id !== ADMIN_ID) { await bot.sendMessage(msg.chat.id, "This account is not allowed to use the bot."); return; }
   const user = await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null, isActive: true });
-  await sendPolicyReminder(msg.chat.id);
   if (!user?.termsAccepted || !user.ageVerified || !user.privacyAccepted || user.complianceVersion !== POLICY_VERSION) {
     await sendCompliance(msg.chat.id);
     return;
   }
+  await sendPolicyReminder(msg.chat.id);
   if (!user.isProfileComplete) await startProfile(msg.chat.id, id);
   else await sendMain(msg.chat.id, user, "Safety reminder: never move chats to Instagram or personal DMs. Use text only and report suspicious users.");
 });
@@ -600,7 +603,7 @@ bot.on("message", async (msg) => {
     const recipientId = user.chattingWith;
     if (!recipientId || recipientId === 0) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
     const recipient = await getUser(recipientId);
-    if (!recipient || recipient.state !== "chatting" || recipient.chattingWith !== id || !isPaidAndActive(recipient)) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
+    if (!recipient || recipient.state !== "chatting" || recipient.chattingWith !== id) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
     await bot.sendMessage(recipientId, `💬 <b>${escHtml(displayName(user))}</b>\n${escHtml(text)}`, { parse_mode: "HTML" });
     return;
   }
