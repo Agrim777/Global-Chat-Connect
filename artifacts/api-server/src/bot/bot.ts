@@ -17,7 +17,7 @@ export { bot };
 const editField = new Map<number, "name" | "age" | "bio" | "country">();
 
 const PREMIUM_PLANS = {
-  twoweek: { label: "2 Week Access", stars: 10, days: 14 },
+  twoweek: { label: "2 Week Access", stars: 150, days: 14 },
   month: { label: "1 Month Access", stars: 250, days: 30 },
   lifetime: { label: "Lifetime Access", stars: 1000, days: null },
 } as const;
