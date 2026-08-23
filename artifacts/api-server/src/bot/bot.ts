@@ -323,6 +323,8 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // Release abandoned or half-created chats so the queue cannot fill with stuck users.
+    await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE state = 'chatting' AND (chatting_with IS NULL OR chatting_with = 0 OR last_seen_at < NOW() - INTERVAL '10 minutes')");
     const params: unknown[] = [userId];
     const filters = [
       "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
