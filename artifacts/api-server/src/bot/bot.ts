@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, pool, usersTable, bannedUsersTable } from "@workspace/db";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, gte, ne } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -9,6 +9,7 @@ if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
 const POLICY_VERSION = "2026-08-08";
 const MAX_REPORTS_BEFORE_ALERT = 3;
+let activeOfferExpiresAt: Date | null = null;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000; // users seen in the last two minutes are considered online
 const bot = new TelegramBot(TOKEN, { polling: false });
 export { bot };
@@ -16,7 +17,7 @@ export { bot };
 const editField = new Map<number, "name" | "age" | "bio" | "country">();
 
 const PREMIUM_PLANS = {
-  twoweek: { label: "2 Week Access", stars: 150, days: 14 },
+  twoweek: { label: "2 Week Access", stars: 10, days: 14 },
   month: { label: "1 Month Access", stars: 250, days: 30 },
   lifetime: { label: "Lifetime Access", stars: 1000, days: null },
 } as const;
@@ -29,7 +30,6 @@ const BUTTONS = {
   premium: "⭐ Unlock Premium",
   stop: "🛑 End Chat",
   report: "🚩 Report User",
-  help: "🛡️ Safety Help",
   edit: "✏️ Edit Profile",
   delete: "🗑️ Delete Account",
   adminFemale: "👩 Match Female",
@@ -185,7 +185,7 @@ function mainKeyboard(user: any): TelegramBot.ReplyKeyboardMarkup {
   const rows: TelegramBot.KeyboardButton[][] = [
     [{ text: BUTTONS.match }],
     [{ text: BUTTONS.profile }, { text: BUTTONS.edit }],
-    [{ text: BUTTONS.help }, { text: BUTTONS.delete }],
+    [{ text: BUTTONS.delete }],
   ];
   if (user.gender !== "female" && !isPaidAndActive(user)) rows.push([{ text: BUTTONS.premium }]);
   if (user.id === ADMIN_ID) {
@@ -262,10 +262,9 @@ async function sendPolicyReminder(chatId: number) {
 }
 
 async function sendScamWarning(senderId: number, recipientId?: number, originalText?: string) {
-  const warning = `⚠️ <b>SAFETY REMINDER — SHARE AT YOUR OWN RISK</b>\n\nYou mentioned Instagram, Signal, WhatsApp, Snapchat, personal Telegram DMs, or another app. You may continue chatting here, but sharing contact details can expose you to scams, fake identities, harassment, or extortion.\n\nNever share photos, OTPs, money, passwords, phone numbers, usernames, or location. This reminder was shown to both people. Report and end the chat if anyone pressures you.\n\nThis bot does not verify identity or gender.`;
-  await bot.sendMessage(senderId, warning, { parse_mode: "HTML" }).catch(() => {});
-  if (recipientId) await bot.sendMessage(recipientId, warning, { parse_mode: "HTML" }).catch(() => {});
-  await sendAdmin(`⚠️ <b>Social-contact request blocked</b>\nSender: <code>${senderId}</code>\nRecipient: <code>${recipientId ?? "—"}</code>\nText: ${escHtml((originalText || "").slice(0, 240))}`);
+  const warning = "⚠️ Contact info detected. Don’t share personal photos or contact details. Share at your own risk.";
+  await bot.sendMessage(senderId, warning).catch(() => {});
+  if (recipientId) await bot.sendMessage(recipientId, warning).catch(() => {});
 }
 
 async function sendMediaBlocked(chatId: number) {
@@ -319,56 +318,54 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
     await sendPremium(chatId);
     return;
   }
-  const candidates = await db.select().from(usersTable).where(and(
-    eq(usersTable.isProfileComplete, true),
-    eq(usersTable.isActive, true),
-    eq(usersTable.termsAccepted, true),
-    eq(usersTable.ageVerified, true),
-    eq(usersTable.state, "idle"),
-    ne(usersTable.id, userId),
-  ));
-  const available = candidates.filter((candidate: any) => {
-    if (!candidate.gender || (!isAdmin && !isPaidAndActive(candidate))) return false;
-    if (desiredGender && candidate.gender !== desiredGender) return false;
 
-    // Female users connect only to male users. Male users can connect to either gender.
-    if (!isAdmin && user.gender === "female" && candidate.gender !== "male") return false;
-
-    // A female candidate is available to male users only when she is looking for men.
-    // Male-to-male matching remains allowed, as requested for male accounts.
-    if (!isAdmin && user.gender === "male" && candidate.gender === "female" &&
-        candidate.lookingFor && candidate.lookingFor !== "any" && candidate.lookingFor !== "male") return false;
-    return true;
-  });
-
-  // Prefer users who are online now. If none are online, use the most recently seen
-  // active profiles as a fallback so the queue does not become unnecessarily empty.
-  available.sort((a: any, b: any) => {
-    const onlineDiff = Number(isRecentlyOnline(b)) - Number(isRecentlyOnline(a));
-    if (onlineDiff !== 0) return onlineDiff;
-    return new Date(b.lastSeenAt || 0).getTime() - new Date(a.lastSeenAt || 0).getTime();
-  });
-  const partner = available[0];
-  if (!partner) {
-    await bot.sendMessage(chatId, "💭 No match is online right now. Please try again soon — we only connect real active users. 😊", { reply_markup: mainKeyboard(user) });
+  let partnerId: number | null = null;
+  try {
+    await db.transaction(async (tx) => {
+      const params: unknown[] = [userId];
+      const filters = [
+        "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
+        "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
+        "u.state = 'idle'", "u.gender IS NOT NULL",
+      ];
+      if (!isAdmin) {
+        filters.push("(u.gender = 'female' OR (u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
+        if (desiredGender) { params.push(desiredGender); filters.push(`u.gender = $${params.length}`); }
+        if (user.gender === "female") filters.push("u.gender = 'male'");
+        if (user.gender === "male") filters.push("(u.gender = 'male' OR (u.gender = 'female' AND (u.looking_for IS NULL OR u.looking_for IN ('any', 'male'))))");
+      } else if (desiredGender) {
+        params.push(desiredGender); filters.push(`u.gender = $${params.length}`);
+      }
+      const result = await tx.execute({
+        sql: `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, u.last_seen_at DESC FOR UPDATE SKIP LOCKED LIMIT 1`,
+        params,
+      } as any);
+      const row = (result as any).rows?.[0];
+      if (!row) return;
+      const candidateId = Number(row.id);
+      const claimed = await tx.execute({ sql: "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id", params: [userId, candidateId] } as any);
+      const claimedPartner = await tx.execute({ sql: "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id", params: [candidateId, userId] } as any);
+      if ((claimed as any).rows?.length && (claimedPartner as any).rows?.length) partnerId = candidateId;
+      else {
+        await tx.execute({ sql: "UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", params: [userId, candidateId] } as any);
+        await tx.execute({ sql: "UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", params: [candidateId, userId] } as any);
+      }
+    });
+  } catch (err) {
+    logger.error({ err, userId }, "Match lookup failed");
+    await bot.sendMessage(chatId, "Match service is busy right now. Please tap Find a Match again.", { reply_markup: mainKeyboard(user) });
     return;
   }
-  const claimed = await db.update(usersTable).set({ state: "chatting", chattingWith: partner.id, updatedAt: new Date() }).where(and(eq(usersTable.id, userId), eq(usersTable.state, "idle"))).returning({ id: usersTable.id });
-  const claimedPartner = await db.update(usersTable).set({ state: "chatting", chattingWith: userId, updatedAt: new Date() }).where(and(eq(usersTable.id, partner.id), eq(usersTable.state, "idle"))).returning({ id: usersTable.id });
-  if (!claimed.length || !claimedPartner.length) {
-    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(and(eq(usersTable.id, userId), eq(usersTable.chattingWith, partner.id)));
-    await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(and(eq(usersTable.id, partner.id), eq(usersTable.chattingWith, userId)));
-    await bot.sendMessage(chatId, "That chat was taken just now. Please tap 💘 Find a Match again.", { reply_markup: mainKeyboard(user) });
+  if (!partnerId) {
+    await bot.sendMessage(chatId, "💭 No match is free right now. Try again in a moment — new people are joining. 😊", { reply_markup: mainKeyboard(user) });
     return;
   }
-  const safety = "⚠️ Safety first: this is anonymous human chat. Gender is not verified. Never share Instagram, personal Telegram, phone, OTPs, money, passwords, or photos. Report anything suspicious.";
   const chatKeyboard = { keyboard: [[{ text: BUTTONS.stop }, { text: BUTTONS.report }]], resize_keyboard: true };
-  await bot.sendMessage(chatId, "💘 You are connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard });
-  await bot.sendMessage(chatId, safety);
-  await bot.sendMessage(partner.id, "💘 Match connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard });
-  await bot.sendMessage(partner.id, safety);
+  await Promise.all([
+    bot.sendMessage(chatId, "💘 Match connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard }),
+    bot.sendMessage(partnerId, "💘 Match connected! Say hello and keep it respectful — text only. 😊", { reply_markup: chatKeyboard }),
+  ]);
 }
-
 async function reportUser(reporterId: number, reportedId: number, reason = "User report") {
   if (!reportedId || reporterId === reportedId) return 0;
   const result = await pool.query(
@@ -497,7 +494,9 @@ bot.on("callback_query", async (query) => {
 });
 
 bot.on("pre_checkout_query", async (query) => {
-  const valid = /^access:(twoweek|month|lifetime)$/.test(query.invoice_payload) && query.currency === "XTR";
+  const validAccess = /^access:(twoweek|month|lifetime)$/.test(query.invoice_payload);
+  const validOffer = query.invoice_payload === "offer:lifetime48" && Boolean(activeOfferExpiresAt && activeOfferExpiresAt > new Date());
+  const valid = query.currency === "XTR" && (validAccess || validOffer);
   await bot.answerPreCheckoutQuery(query.id, valid, valid ? undefined : { error_message: "This payment is invalid or expired." }).catch((err) => logger.warn({ err }, "Pre-checkout response failed"));
 });
 
@@ -507,12 +506,16 @@ bot.on("message", async (msg) => {
   const payment = msg.successful_payment;
   if (!id || !payment || payment.currency !== "XTR") return;
   const plan = payment.invoice_payload.match(/^access:(twoweek|month|lifetime)$/)?.[1] as PremiumPlanKey | undefined;
-  if (!plan || payment.total_amount !== PREMIUM_PLANS[plan].stars) {
+  const isOffer = payment.invoice_payload === "offer:lifetime48" && Boolean(activeOfferExpiresAt && activeOfferExpiresAt > new Date());
+  const expectedStars = isOffer ? 250 : plan ? PREMIUM_PLANS[plan].stars : -1;
+  if ((!plan && !isOffer) || payment.total_amount !== expectedStars) {
     await sendAdmin(`⚠️ Invalid Telegram Stars payment payload from <code>${id}</code>.`);
     return;
   }
-  const expiry = await activatePremium(id, plan);
-  await sendAdmin(`💰 <b>Premium purchase received</b>\nUser: <code>${id}</code>\nPlan: <b>${escHtml(PREMIUM_PLANS[plan].label)}</b>\nAmount: <b>${payment.total_amount} ⭐</b>`);
+  const activatedPlan = isOffer ? "lifetime" : plan!;
+  const expiry = await activatePremium(id, activatedPlan);
+  const planLabel = isOffer ? "Lifetime Offer" : PREMIUM_PLANS[activatedPlan].label;
+  await sendAdmin(`💰 <b>Premium purchase received</b>\nUser: <code>${id}</code>\nPlan: <b>${escHtml(planLabel)}</b>\nAmount: <b>${payment.total_amount} ⭐</b>`);
   await bot.sendMessage(msg.chat.id, `✅ Paid access activated. Plan: ${PREMIUM_PLANS[plan].label}. ${expiry ? `Expires: ${expiry.toDateString()}` : "Lifetime access."}\n\nYou can now find anonymous human matches. Please stay safe and never share personal information.`);
   const user = await getUser(id); if (user) await sendMain(msg.chat.id, user);
 });
@@ -597,9 +600,26 @@ bot.on("message", async (msg) => {
   if (text === BUTTONS.match) { await findMatch(id, msg.chat.id); return; }
   if (text === BUTTONS.premium) { await sendPremium(msg.chat.id); return; }
   if (text === BUTTONS.profile) { await bot.sendMessage(msg.chat.id, "Use /profile to view your profile. Gender cannot be changed after signup."); return; }
-  if (text === BUTTONS.help) { await bot.sendMessage(msg.chat.id, "Safety help: never share Instagram, personal Telegram handles, phone numbers, OTPs, money, passwords, or media. Use /report or the Report User button, then /stop."); return; }
+  if (text === BUTTONS.help) { return; }
   if (text === BUTTONS.start) { await startProfile(msg.chat.id, id); return; }
-  await sendMain(msg.chat.id, user, "Use the menu buttons or /help. This bot only supports anonymous text chat between adults.");
+  await sendMain(msg.chat.id, user, "Use the menu buttons to find a match, edit your profile, or manage your account.");
+});
+
+bot.onText(/^\/broadcastoffer$/i, async (msg) => {
+  if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
+  activeOfferExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  const activeSince = new Date(Date.now() - ONLINE_WINDOW_MS);
+  const activeUsers = await db.select({ id: usersTable.id }).from(usersTable).where(and(eq(usersTable.isActive, true), eq(usersTable.isBanned, false), gte(usersTable.lastSeenAt, activeSince)));
+  let sent = 0;
+  for (const target of activeUsers) {
+    if (target.id === ADMIN_ID) continue;
+    try {
+      await bot.sendMessage(target.id, "🔥 Limited-time offer! Get Lifetime Premium for only 250 ⭐ — valid for 48 hours.");
+      await bot.sendInvoice(target.id, "Lifetime Premium — Special Offer", "Lifetime access for 250 Stars. Offer valid for 48 hours.", "offer:lifetime48", "", "XTR", [{ label: "Lifetime Premium Offer", amount: 250 }], { reply_markup: { inline_keyboard: [[{ text: "Get Lifetime for 250 ⭐", pay: true }]] } });
+      sent++;
+    } catch { /* blocked users and unavailable chats are skipped */ }
+  }
+  await bot.sendMessage(msg.chat.id, `✅ Offer sent to ${sent} active users. Valid for 48 hours.`);
 });
 
 bot.onText(/^\/stats$/i, async (msg) => {
