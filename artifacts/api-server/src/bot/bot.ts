@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, pool, usersTable, bannedUsersTable } from "@workspace/db";
-import { and, eq, gte, ne } from "drizzle-orm";
+import { and, eq, gte, ne, sql } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -322,7 +322,6 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   let partnerId: number | null = null;
   try {
     await db.transaction(async (tx) => {
-      const params: unknown[] = [userId];
       const filters = [
         "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
         "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
@@ -330,25 +329,22 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
       ];
       if (!isAdmin) {
         filters.push("(u.gender = 'female' OR (u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
-        if (desiredGender) { params.push(desiredGender); filters.push(`u.gender = $${params.length}`); }
+        if (desiredGender) filters.push(`u.gender = '${desiredGender}'`);
         if (user.gender === "female") filters.push("u.gender = 'male'");
         if (user.gender === "male") filters.push("(u.gender = 'male' OR (u.gender = 'female' AND (u.looking_for IS NULL OR u.looking_for IN ('any', 'male'))))");
       } else if (desiredGender) {
-        params.push(desiredGender); filters.push(`u.gender = $${params.length}`);
+        filters.push(`u.gender = '${desiredGender}'`);
       }
-      const result = await tx.execute({
-        sql: `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, u.last_seen_at DESC FOR UPDATE SKIP LOCKED LIMIT 1`,
-        params,
-      } as any);
+      const result = await tx.execute(sql.raw(`SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, u.last_seen_at DESC FOR UPDATE SKIP LOCKED LIMIT 1`));
       const row = (result as any).rows?.[0];
       if (!row) return;
       const candidateId = Number(row.id);
-      const claimed = await tx.execute({ sql: "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id", params: [userId, candidateId] } as any);
-      const claimedPartner = await tx.execute({ sql: "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id", params: [candidateId, userId] } as any);
+      const claimed = await tx.execute(sql.raw(`UPDATE users SET state = 'chatting', chatting_with = ${candidateId}, updated_at = NOW() WHERE id = ${userId} AND state = 'idle' RETURNING id`));
+      const claimedPartner = await tx.execute(sql.raw(`UPDATE users SET state = 'chatting', chatting_with = ${userId}, updated_at = NOW() WHERE id = ${candidateId} AND state = 'idle' RETURNING id`));
       if ((claimed as any).rows?.length && (claimedPartner as any).rows?.length) partnerId = candidateId;
       else {
-        await tx.execute({ sql: "UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", params: [userId, candidateId] } as any);
-        await tx.execute({ sql: "UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", params: [candidateId, userId] } as any);
+        await tx.execute(sql.raw(`UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = ${userId} AND chatting_with = ${candidateId}`));
+        await tx.execute(sql.raw(`UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = ${candidateId} AND chatting_with = ${userId}`));
       }
     });
   } catch (err) {
