@@ -134,6 +134,13 @@ async function ensureSchema() {
       created_at TIMESTAMP NOT NULL DEFAULT NOW(),
       UNIQUE (reporter_id, reported_id)
     );
+    CREATE TABLE IF NOT EXISTS premium_payments (
+      telegram_charge_id VARCHAR(255) PRIMARY KEY,
+      user_id BIGINT NOT NULL,
+      invoice_payload VARCHAR(255) NOT NULL,
+      amount INTEGER NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
   `);
   logger.info("Safety schema ensured");
 }
@@ -456,7 +463,7 @@ bot.onText(/^\/profile$/i, async (msg) => {
   const id = msg.from?.id; if (!id) return;
   const user = await getUser(id);
   if (!user) { await bot.sendMessage(msg.chat.id, "Use /start first."); return; }
-  await bot.sendMessage(msg.chat.id, `<b>Your profile</b>\nName: ${escHtml(user.name)}\nAge: ${escHtml(user.age)}\nGender: ${escHtml(user.gender)} (locked after signup)\nStatus: ${user.gender === "female" ? "Free access" : isPaidAndActive(user) ? `Paid access: ${escHtml(user.premiumPlan)}` : "Payment required"}\n\nGender cannot be changed after profile creation.`, { parse_mode: "HTML" });
+  await bot.sendMessage(msg.chat.id, `<b>Your profile</b>\nName: ${escHtml(user.name)}\nAge: ${escHtml(user.age)}\nGender: ${escHtml(user.gender)} (locked after signup)\nStatus: ${user.gender === "female" ? "Free access" : isPaidAndActive(user) ? `Paid access: ${escHtml(user.premiumPlan)}` : "Payment required"}\n\nGender cannot be changed after your account is created.`, { parse_mode: "HTML" });
 });
 
 bot.onText(/^\/(?:match|find)$/i, async (msg) => {
@@ -524,14 +531,22 @@ bot.on("message", async (msg) => {
   const isOffer = payment.invoice_payload === "offer:lifetime48" && Boolean(activeOfferExpiresAt && activeOfferExpiresAt > new Date());
   const expectedStars = isOffer ? 250 : plan ? PREMIUM_PLANS[plan].stars : -1;
   if ((!plan && !isOffer) || payment.total_amount !== expectedStars) {
-    await sendAdmin(`⚠️ Invalid Telegram Stars payment payload from <code>${id}</code>.`);
+    logger.warn({ userId: id, payload: payment.invoice_payload, amount: payment.total_amount }, "Invalid Telegram Stars payment payload");
+    return;
+  }
+  const paymentRecorded = await pool.query(
+    "INSERT INTO premium_payments (telegram_charge_id, user_id, invoice_payload, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (telegram_charge_id) DO NOTHING RETURNING telegram_charge_id",
+    [payment.telegram_payment_charge_id, id, payment.invoice_payload, payment.total_amount],
+  );
+  if (!paymentRecorded.rowCount) {
+    logger.info({ userId: id }, "Duplicate Telegram payment ignored");
     return;
   }
   const activatedPlan = isOffer ? "lifetime" : plan!;
   const expiry = await activatePremium(id, activatedPlan);
   const planLabel = isOffer ? "Lifetime Offer" : PREMIUM_PLANS[activatedPlan].label;
   await sendAdmin(`💰 <b>Premium purchase received</b>\nUser: <code>${id}</code>\nPlan: <b>${escHtml(planLabel)}</b>\nAmount: <b>${payment.total_amount} ⭐</b>`);
-  await bot.sendMessage(msg.chat.id, `✅ Paid access activated. Plan: ${PREMIUM_PLANS[plan].label}. ${expiry ? `Expires: ${expiry.toDateString()}` : "Lifetime access."}\n\nYou can now find anonymous human matches. Please stay safe and never share personal information.`);
+  await bot.sendMessage(msg.chat.id, `✅ Paid access activated. Plan: ${escHtml(planLabel)}. ${expiry ? `Expires: ${expiry.toDateString()}` : "Lifetime access."}\n\nYou can now start matching. ⭐`);
   const user = await getUser(id); if (user) await sendMain(msg.chat.id, user);
 });
 
@@ -543,7 +558,7 @@ bot.on("message", async (msg) => {
   if (!user) { await bot.sendMessage(msg.chat.id, "Use /start first."); return; }
   await upsertUser(id, { telegramUsername: msg.from?.username ?? null, firstName: msg.from?.first_name ?? null, isActive: true });
 
-  if (isMediaMessage(msg)) { await sendMediaBlocked(msg.chat.id); if (user.state === "chatting" && user.chattingWith) await sendAdmin(`🛡️ Media attempt blocked. Sender: <code>${id}</code>, recipient: <code>${user.chattingWith}</code>`); return; }
+  if (isMediaMessage(msg)) { await sendMediaBlocked(msg.chat.id); return; }
   const text = (msg.text || "").trim();
   const pendingEdit = editField.get(id);
   if (pendingEdit) {
@@ -581,7 +596,7 @@ bot.on("message", async (msg) => {
   if (user.state === "setup_gender") {
     const genderText = text.toLowerCase().replace(/^[^a-z]+/, "").trim();
     const gender = genderText === "male" ? "male" : genderText === "female" ? "female" : null;
-    if (!gender) { await bot.sendMessage(msg.chat.id, "Please choose Male or Female. The choice cannot be changed after signup."); return; }
+    if (!gender) { await bot.sendMessage(msg.chat.id, "Please choose Male or Female. Gender cannot be changed after your account is created."); return; }
     const lookingFor = gender === "female" ? "male" : "female";
     await upsertUser(id, { gender, genderLocked: true, lookingFor, isProfileComplete: true, state: "idle" });
     const updated = await getUser(id);
@@ -589,7 +604,7 @@ bot.on("message", async (msg) => {
       await notifyFemaleJoin(updated);
       const welcome = gender === "female"
         ? "🎉 Profile ready! Female access is free, and you’ll be connected with male users only. Stay safe 💛"
-        : "🎉 Profile ready! Male accounts need Paid Access before matching. You’ll be connected with female users. ⭐";
+        : "🎉 Buy Premium and start matching with your loved ones! ⭐";
       await sendMain(msg.chat.id, updated, welcome);
       if (gender === "male" && id !== ADMIN_ID) await sendPremium(msg.chat.id);
     }
