@@ -1,0 +1,1 @@
+- [Workspace dependency installs](workspace-dependency-installs.md) — when the package installer cannot target a workspace package, use the existing frozen lockfile install as the safe fallback.

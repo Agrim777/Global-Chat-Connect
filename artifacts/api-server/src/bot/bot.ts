@@ -11,6 +11,7 @@ const POLICY_VERSION = "2026-08-23";
 const MAX_REPORTS_BEFORE_ALERT = 3;
 let activeOfferExpiresAt: Date | null = null;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000; // users seen in the last two minutes are considered online
+const MATCH_ACTIVE_WINDOW_MINUTES = 10;
 const bot = new TelegramBot(TOKEN, { polling: false });
 export { bot };
 
@@ -149,10 +150,20 @@ async function ensureSchema() {
       amount INTEGER NOT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS match_history (
+      user_a BIGINT NOT NULL,
+      user_b BIGINT NOT NULL,
+      matched_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_a, user_b),
+      CHECK (user_a < user_b)
+    );
+    CREATE INDEX IF NOT EXISTS match_history_recent_idx ON match_history (matched_at DESC);
   `);
   logger.info("Safety schema ensured");
 }
-void ensureSchema().catch((err) => logger.error({ err }, "Safety schema migration failed"));
+const schemaReady = ensureSchema().catch((err) => {
+  logger.error({ err }, "Safety schema migration failed");
+});
 
 async function getUser(id: number) {
   const [user] = await db.select().from(usersTable).where(eq(usersTable.id, id));
@@ -324,6 +335,7 @@ async function disconnect(userId: number, reason: string) {
 async function findMatch(userId: number, chatId: number, desiredGender?: "male" | "female") {
   const isAdmin = userId === ADMIN_ID;
   logger.info({ userId, desiredGender: desiredGender || "compatible" }, "Match requested");
+  await schemaReady;
   await upsertUser(userId, { isActive: true });
   const user = await getUser(userId);
   if (!user) { await bot.sendMessage(chatId, "Please use /start first."); return; }
@@ -347,6 +359,12 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
       "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
       "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
       "u.state = 'idle'", "u.gender IS NOT NULL",
+      `u.last_seen_at >= NOW() - INTERVAL '${MATCH_ACTIVE_WINDOW_MINUTES} minutes'`,
+      `NOT EXISTS (
+        SELECT 1 FROM match_history mh
+        WHERE mh.user_a = LEAST(u.id, $1)
+          AND mh.user_b = GREATEST(u.id, $1)
+      )`,
     ];
     if (!isAdmin) {
       filters.push("(u.gender = 'female' OR (u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
@@ -370,7 +388,17 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
         "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id",
         [candidateId, userId],
       );
-      if (claimed.rowCount && claimedPartner.rowCount) partnerId = candidateId;
+      if (claimed.rowCount && claimedPartner.rowCount) {
+        partnerId = candidateId;
+        await client.query(
+          "INSERT INTO match_history (user_a, user_b) VALUES ($1, $2) ON CONFLICT (user_a, user_b) DO NOTHING",
+          [Math.min(userId, candidateId), Math.max(userId, candidateId)],
+        );
+        await client.query(
+          "UPDATE users SET chat_count = chat_count + 1, updated_at = NOW() WHERE id IN ($1, $2)",
+          [userId, candidateId],
+        );
+      }
       else {
         await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", [userId, candidateId]);
         await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE id = $1 AND chatting_with = $2", [candidateId, userId]);
@@ -562,11 +590,13 @@ bot.on("message", async (msg) => {
     logger.info({ userId: id }, "Duplicate Telegram payment ignored");
     return;
   }
+  logger.info({ userId: id, payload: payment.invoice_payload, amount: payment.total_amount }, "Telegram Stars payment recorded");
   const activatedPlan = isOffer ? "lifetime" : plan!;
   const expiry = await activatePremium(id, activatedPlan);
   const planLabel = isOffer ? "Lifetime Offer" : PREMIUM_PLANS[activatedPlan].label;
   await sendAdmin(`💰 <b>Premium purchase received</b>\nUser: <code>${id}</code>\nPlan: <b>${escHtml(planLabel)}</b>\nAmount: <b>${payment.total_amount} ⭐</b>`);
   await bot.sendMessage(msg.chat.id, `✅ Paid access activated. Plan: ${escHtml(planLabel)}. ${expiry ? `Expires: ${expiry.toDateString()}` : "Lifetime access."}\n\nYou can now start matching. ⭐`);
+  logger.info({ userId: id, plan: activatedPlan, expiresAt: expiry }, "Premium access activated");
   const user = await getUser(id); if (user) await sendMain(msg.chat.id, user);
 });
 
