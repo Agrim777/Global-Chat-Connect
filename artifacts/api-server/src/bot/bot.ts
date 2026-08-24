@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, pool, usersTable, bannedUsersTable } from "@workspace/db";
-import { and, eq, gte, ne, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -148,6 +148,11 @@ async function ensureSchema() {
       user_id BIGINT NOT NULL,
       invoice_payload VARCHAR(255) NOT NULL,
       amount INTEGER NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS special_offers (
+      offer_key VARCHAR(50) PRIMARY KEY,
+      expires_at TIMESTAMP NOT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS match_history (
@@ -306,6 +311,14 @@ async function sendPremium(chatId: number) {
   }
 }
 
+async function isLifetimeOfferActive(): Promise<boolean> {
+  const result = await pool.query(
+    "SELECT expires_at FROM special_offers WHERE offer_key = 'lifetime48' LIMIT 1",
+  );
+  const expiresAt = result.rows[0]?.expires_at;
+  return Boolean(expiresAt && new Date(expiresAt) > new Date());
+}
+
 function planExpiry(plan: PremiumPlanKey): Date | null {
   if (plan === "lifetime") return null;
   const date = new Date();
@@ -367,10 +380,11 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
       )`,
     ];
     if (!isAdmin) {
-      filters.push("(u.gender = 'female' OR (u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
+      // Female users have free access; male users must have active paid access.
+      filters.push("(u.gender = 'female' OR (u.gender = 'male' AND u.has_paid = TRUE AND (u.premium_plan = 'lifetime' OR u.premium_expires_at > NOW())))");
       if (desiredGender) { params.push(desiredGender); filters.push(`u.gender = $${params.length}`); }
       if (user.gender === "female") filters.push("u.gender = 'male'");
-      if (user.gender === "male") filters.push("(u.gender = 'male' OR (u.gender = 'female' AND (u.looking_for IS NULL OR u.looking_for IN ('any', 'male'))))");
+      // A male can match any eligible gender; a female can match males only.
     } else if (desiredGender) {
       params.push(desiredGender); filters.push(`u.gender = $${params.length}`);
     }
@@ -564,8 +578,9 @@ bot.on("callback_query", async (query) => {
 });
 
 bot.on("pre_checkout_query", async (query) => {
+  await schemaReady;
   const validAccess = /^access:(twoweek|month|lifetime)$/.test(query.invoice_payload);
-  const validOffer = query.invoice_payload === "offer:lifetime48" && Boolean(activeOfferExpiresAt && activeOfferExpiresAt > new Date());
+  const validOffer = query.invoice_payload === "offer:lifetime48" && await isLifetimeOfferActive();
   const valid = query.currency === "XTR" && (validAccess || validOffer);
   await bot.answerPreCheckoutQuery(query.id, valid, valid ? undefined : { error_message: "This payment is invalid or expired." }).catch((err) => logger.warn({ err }, "Pre-checkout response failed"));
 });
@@ -575,8 +590,9 @@ bot.on("message", async (msg) => {
   const id = msg.from?.id;
   const payment = msg.successful_payment;
   if (!id || !payment || payment.currency !== "XTR") return;
+  await schemaReady;
   const plan = payment.invoice_payload.match(/^access:(twoweek|month|lifetime)$/)?.[1] as PremiumPlanKey | undefined;
-  const isOffer = payment.invoice_payload === "offer:lifetime48" && Boolean(activeOfferExpiresAt && activeOfferExpiresAt > new Date());
+  const isOffer = payment.invoice_payload === "offer:lifetime48" && await isLifetimeOfferActive();
   const expectedStars = isOffer ? 250 : plan ? PREMIUM_PLANS[plan].stars : -1;
   if ((!plan && !isOffer) || payment.total_amount !== expectedStars) {
     logger.warn({ userId: id, payload: payment.invoice_payload, amount: payment.total_amount }, "Invalid Telegram Stars payment payload");
@@ -702,18 +718,31 @@ bot.on("message", async (msg) => {
 bot.onText(/^\/broadcastoffer$/i, async (msg) => {
   if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
   activeOfferExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
-  const activeSince = new Date(Date.now() - ONLINE_WINDOW_MS);
-  const activeUsers = await db.select({ id: usersTable.id }).from(usersTable).where(and(eq(usersTable.isActive, true), eq(usersTable.isBanned, false), gte(usersTable.lastSeenAt, activeSince)));
+  await schemaReady;
+  await pool.query(
+    `INSERT INTO special_offers (offer_key, expires_at)
+     VALUES ('lifetime48', $1)
+     ON CONFLICT (offer_key) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
+    [activeOfferExpiresAt],
+  );
+  // Send to every non-banned account, including users who have been inactive.
+  // Telegram rejects blocked/deleted chats; those users are skipped below.
+  const allUsers = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.isBanned, false));
   let sent = 0;
-  for (const target of activeUsers) {
+  let skipped = 0;
+  for (const target of allUsers) {
     if (target.id === ADMIN_ID) continue;
     try {
       await bot.sendMessage(target.id, "🔥 Limited-time offer! Get Lifetime Premium for only 250 ⭐ — valid for 48 hours.");
       await bot.sendInvoice(target.id, "Lifetime Premium — Special Offer", "Lifetime access for 250 Stars. Offer valid for 48 hours.", "offer:lifetime48", "", "XTR", [{ label: "Lifetime Premium Offer", amount: 250 }], { reply_markup: { inline_keyboard: [[{ text: "Get Lifetime for 250 ⭐", pay: true }]] } });
       sent++;
-    } catch { /* blocked users and unavailable chats are skipped */ }
+    } catch (err) {
+      skipped++;
+      logger.warn({ userId: target.id, err }, "Broadcast offer skipped unavailable Telegram chat");
+    }
   }
-  await bot.sendMessage(msg.chat.id, `✅ Offer sent to ${sent} active users. Valid for 48 hours.`);
+  logger.info({ sent, skipped, totalUsers: allUsers.length - 1 }, "Broadcast offer completed");
+  await bot.sendMessage(msg.chat.id, `✅ Offer sent to ${sent} users. ${skipped} unavailable or blocked users were skipped. Valid for 48 hours.`);
 });
 
 bot.onText(/^\/stats$/i, async (msg) => {
