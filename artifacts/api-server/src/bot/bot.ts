@@ -100,6 +100,21 @@ function isBlockedTelegramChatError(err: unknown): boolean {
     description.includes("user not found");
 }
 
+function telegramErrorCode(err: unknown): number {
+  const error = err as { code?: string | number; response?: { body?: { error_code?: number } } };
+  return Number(error?.response?.body?.error_code ?? error?.code ?? 0);
+}
+
+function telegramRetryAfter(err: unknown): number | null {
+  const error = err as { response?: { body?: { parameters?: { retry_after?: number } } } };
+  const retryAfter = error?.response?.body?.parameters?.retry_after;
+  return Number.isFinite(retryAfter) ? Number(retryAfter) : null;
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function isPaidAndActive(user: any): boolean {
   if (user.gender === "female") return true;
   if (!user.hasPaid) return false;
@@ -759,6 +774,7 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   let sent = 0;
   let skipped = 0;
   let blocked = 0;
+  let stoppedForFloodLimit = false;
   const failureExamples: string[] = [];
   try {
   await bot.sendMessage(msg.chat.id, "🚀 Broadcast started.\n\nSending the 48-hour Lifetime Premium offer to all non-banned users. I’ll send the complete delivery report when finished.").catch(() => {});
@@ -775,11 +791,20 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   const allUsers = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.isBanned, false));
   for (const target of allUsers) {
     if (target.id === ADMIN_ID) continue;
+    // Keep well below Telegram's broadcast limits: each user receives two API calls.
+    if (sent + skipped > 0) await wait(350);
     try {
       await bot.sendMessage(target.id, "🔥 Limited-time offer! Get Lifetime Premium for only 250 ⭐ — valid for 48 hours.");
       await bot.sendInvoice(target.id, "Lifetime Premium — Special Offer", "Lifetime access for 250 Stars. Offer valid for 48 hours.", "offer:lifetime48", "", "XTR", [{ label: "Lifetime Premium Offer", amount: 250 }], { reply_markup: { inline_keyboard: [[{ text: "Get Lifetime for 250 ⭐", pay: true }]] } });
       sent++;
     } catch (err) {
+      if (telegramErrorCode(err) === 429) {
+        stoppedForFloodLimit = true;
+        const retryAfter = telegramRetryAfter(err);
+        failureExamples.push(`Telegram flood limit reached${retryAfter ? `; retry after ${retryAfter}s` : ""}`);
+        logger.error({ err, retryAfter }, "Broadcast stopped by Telegram flood limit");
+        break;
+      }
       skipped++;
       if (isBlockedTelegramChatError(err)) blocked++;
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -793,7 +818,8 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   const details = failureExamples.length
     ? `\n\nFirst failures:\n${failureExamples.map((item) => `• ${item}`).join("\n")}`
     : "";
-  await bot.sendMessage(msg.chat.id, `✅ Offer broadcast completed.\n\n📨 Received: ${sent}\n🚫 Blocked/deleted chats: ${blocked}\n⚠️ Other skipped/failed: ${Math.max(0, skipped - blocked)}\n👥 Eligible accounts: ${eligibleUsers}\n⏱️ Time taken: ${durationSeconds} seconds\n\nOffer valid for 48 hours.${details}`);
+  const status = stoppedForFloodLimit ? "⚠️ Broadcast stopped early to protect the bot from Telegram rate limits." : "✅ Offer broadcast completed.";
+  await bot.sendMessage(msg.chat.id, `${status}\n\n📨 Received: ${sent}\n🚫 Blocked/deleted chats: ${blocked}\n⚠️ Other skipped/failed: ${Math.max(0, skipped - blocked)}\n👥 Eligible accounts: ${eligibleUsers}\n⏱️ Time taken: ${durationSeconds} seconds\n\nOffer valid for 48 hours.${details}`);
   } catch (err) {
     const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
     logger.error({ err, durationSeconds }, "Broadcast offer failed");
