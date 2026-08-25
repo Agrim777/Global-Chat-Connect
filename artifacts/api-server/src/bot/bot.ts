@@ -89,6 +89,17 @@ function isMediaMessage(msg: TelegramBot.Message): boolean {
   );
 }
 
+function isBlockedTelegramChatError(err: unknown): boolean {
+  const error = err as { code?: string | number; response?: { body?: { error_code?: number; description?: string } } };
+  const errorCode = error?.response?.body?.error_code ?? error?.code;
+  const description = String(error?.response?.body?.description ?? (err instanceof Error ? err.message : err)).toLowerCase();
+  return Number(errorCode) === 403 ||
+    description.includes("bot was blocked") ||
+    description.includes("user is deactivated") ||
+    description.includes("chat not found") ||
+    description.includes("user not found");
+}
+
 function isPaidAndActive(user: any): boolean {
   if (user.gender === "female") return true;
   if (!user.hasPaid) return false;
@@ -744,10 +755,13 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
     return;
   }
   broadcastOfferRunning = true;
+  const startedAt = Date.now();
   let sent = 0;
   let skipped = 0;
+  let blocked = 0;
   const failureExamples: string[] = [];
   try {
+  await bot.sendMessage(msg.chat.id, "🚀 Broadcast started.\n\nSending the 48-hour Lifetime Premium offer to all non-banned users. I’ll send the complete delivery report when finished.").catch(() => {});
   activeOfferExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
   await schemaReady;
   await pool.query(
@@ -767,20 +781,23 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
       sent++;
     } catch (err) {
       skipped++;
+      if (isBlockedTelegramChatError(err)) blocked++;
       const errorMessage = err instanceof Error ? err.message : String(err);
       if (failureExamples.length < 5) failureExamples.push(`${target.id}: ${errorMessage.slice(0, 120)}`);
       logger.warn({ userId: target.id, err }, "Broadcast offer skipped unavailable Telegram chat");
     }
   }
   const eligibleUsers = allUsers.filter((target) => target.id !== ADMIN_ID).length;
-  logger.info({ sent, skipped, eligibleUsers, expiresAt: activeOfferExpiresAt }, "Broadcast offer completed");
+  const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  logger.info({ sent, skipped, blocked, eligibleUsers, durationSeconds, expiresAt: activeOfferExpiresAt }, "Broadcast offer completed");
   const details = failureExamples.length
     ? `\n\nFirst failures:\n${failureExamples.map((item) => `• ${item}`).join("\n")}`
     : "";
-  await bot.sendMessage(msg.chat.id, `✅ Offer broadcast completed.\n\nDelivered: ${sent}\nSkipped/failed: ${skipped}\nEligible accounts: ${eligibleUsers}\nValid for 48 hours.${details}`);
+  await bot.sendMessage(msg.chat.id, `✅ Offer broadcast completed.\n\n📨 Received: ${sent}\n🚫 Blocked/deleted chats: ${blocked}\n⚠️ Other skipped/failed: ${Math.max(0, skipped - blocked)}\n👥 Eligible accounts: ${eligibleUsers}\n⏱️ Time taken: ${durationSeconds} seconds\n\nOffer valid for 48 hours.${details}`);
   } catch (err) {
-    logger.error({ err }, "Broadcast offer failed");
-    await bot.sendMessage(msg.chat.id, "❌ Broadcast could not complete because of a server or database error. Check the Railway logs and try again.").catch(() => {});
+    const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    logger.error({ err, durationSeconds }, "Broadcast offer failed");
+    await bot.sendMessage(msg.chat.id, `❌ Broadcast stopped because of a server or database error after ${durationSeconds} seconds. Check the Railway logs and try again.`).catch(() => {});
   } finally {
     broadcastOfferRunning = false;
   }
