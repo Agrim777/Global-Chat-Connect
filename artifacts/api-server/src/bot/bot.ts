@@ -31,6 +31,7 @@ const BUTTONS = {
   premium: "⭐ Unlock Premium",
   stop: "🛑 End Chat",
   report: "🚩 Report User",
+  deals: "🔥 Amazon Deals",
   edit: "✏️ Edit Profile",
   delete: "🗑️ Delete Account",
   adminFemale: "👩 Match Female",
@@ -39,6 +40,8 @@ const BUTTONS = {
 } as const;
 
 const SCAM_PATTERNS = [
+  /(?:https?:\/\/|www\.)\S+/i,
+  /\b(?:t\.me|telegram\.me|bit\.ly|tinyurl\.com|amzn\.to)\b/i,
   /\binstagram\b/i,
   /\binsta\b/i,
   /\big\s*(?:id|handle|username)\b/i,
@@ -48,6 +51,9 @@ const SCAM_PATTERNS = [
   /\b(?:signal|whatsapp|what\s*sapp|snapchat|snap|discord|messenger)\b/i,
   /\b(?:move|take|talk|chat|connect|message)\b.*\b(?:off[- ]?app|off[- ]?platform|outside|another app|privately)\b/i,
   /\b(?:send|share|give)\s+(?:me\s*)?(?:your\s*)?(?:number|phone|contact|handle|username|id)\b/i,
+  /\b(?:dm|direct message|private message|pm|inbox)\b.*\b(?:me|personally|private|privately)\b/i,
+  /\b(?:message|text|contact|talk|chat)\s+me\s+(?:personally|privately|in private)\b/i,
+  /\b(?:dm|pm|inbox)\s+me\b/i,
   /@[_a-z0-9]{4,}/i,
 ];
 
@@ -122,6 +128,7 @@ async function ensureSchema() {
     );
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS match_ready BOOLEAN NOT NULL DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS terms_accepted BOOLEAN NOT NULL DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP,
       ADD COLUMN IF NOT EXISTS age_verified BOOLEAN NOT NULL DEFAULT FALSE,
@@ -215,6 +222,7 @@ async function notifyFemaleJoin(user: any) {
 function mainKeyboard(user: any): TelegramBot.ReplyKeyboardMarkup {
   const rows: TelegramBot.KeyboardButton[][] = [
     [{ text: BUTTONS.match }],
+    [{ text: BUTTONS.deals }],
     [{ text: BUTTONS.profile }, { text: BUTTONS.edit }],
     [{ text: BUTTONS.delete }],
   ];
@@ -293,13 +301,21 @@ async function sendPolicyReminder(chatId: number) {
 }
 
 async function sendScamWarning(senderId: number, recipientId?: number, originalText?: string) {
-  const warning = "⚠️ Contact info detected. Don’t share personal photos or contact details. Share at your own risk.";
+  const warning = "⚠️ Safety warning: links, personal DMs, contact details, and requests to move off this bot are not allowed. Your message was blocked. Never share personal photos, phone numbers, usernames, OTPs, money, or private information.";
   await bot.sendMessage(senderId, warning).catch(() => {});
   if (recipientId) await bot.sendMessage(recipientId, warning).catch(() => {});
 }
 
 async function sendMediaBlocked(chatId: number) {
   await bot.sendMessage(chatId, `🛡️ <b>Media sharing blocked</b>\n\nPhotos, videos, files, voice notes, contacts, and locations are not allowed. This rule exists for girls' safety and to reduce fake-photo, morphing, harassment, and extortion risks. Please use text only.`, { parse_mode: "HTML" });
+}
+
+async function sendDeals(chatId: number) {
+  await bot.sendMessage(chatId, "🔥 <b>Amazing Amazon deals</b>\n\nOpen our deals channel for the latest offers. Stay safe: shop only through trusted Telegram and Amazon pages.", {
+    parse_mode: "HTML",
+    disable_web_page_preview: false,
+    reply_markup: { inline_keyboard: [[{ text: "🔥 Open @dealsatyourdoo", url: "https://t.me/dealsatyourdoo" }]] },
+  });
 }
 
 async function sendPremium(chatId: number) {
@@ -338,8 +354,10 @@ async function disconnect(userId: number, reason: string) {
   const partnerId = user.chattingWith;
   logger.info({ userId, partnerId: partnerId || null, reason }, "Chat ended");
   await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, userId));
+  await pool.query("UPDATE users SET match_ready = FALSE WHERE id = $1", [userId]);
   if (partnerId && partnerId !== 0) {
     await db.update(usersTable).set({ state: "idle", chattingWith: null, updatedAt: new Date() }).where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, userId)));
+    await pool.query("UPDATE users SET match_ready = FALSE WHERE id = $1", [partnerId]);
     await sendMain(partnerId, await getUser(partnerId), `The anonymous chat ended. ${reason}`).catch(() => {});
   }
   await sendMain(userId, await getUser(userId), reason).catch(() => {});
@@ -365,13 +383,14 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("UPDATE users SET match_ready = TRUE, is_active = TRUE, updated_at = NOW() WHERE id = $1", [userId]);
     // Release abandoned or half-created chats so the queue cannot fill with stuck users.
-    await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, updated_at = NOW() WHERE state = 'chatting' AND (chatting_with IS NULL OR chatting_with = 0 OR last_seen_at < NOW() - INTERVAL '10 minutes')");
+    await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, match_ready = FALSE, updated_at = NOW() WHERE state = 'chatting' AND (chatting_with IS NULL OR chatting_with = 0 OR last_seen_at < NOW() - INTERVAL '10 minutes')");
     const params: unknown[] = [userId];
     const filters = [
       "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
       "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
-      "u.state = 'idle'", "u.gender IS NOT NULL",
+      "u.state = 'idle'", "u.match_ready = TRUE", "u.gender IS NOT NULL",
       `u.last_seen_at >= NOW() - INTERVAL '${MATCH_ACTIVE_WINDOW_MINUTES} minutes'`,
       `NOT EXISTS (
         SELECT 1 FROM match_history mh
@@ -395,11 +414,11 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
     const candidateId = result.rows[0] ? Number(result.rows[0].id) : null;
     if (candidateId) {
       const claimed = await client.query(
-        "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id",
+        "UPDATE users SET state = 'chatting', chatting_with = $2, match_ready = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'idle' AND match_ready = TRUE RETURNING id",
         [userId, candidateId],
       );
       const claimedPartner = await client.query(
-        "UPDATE users SET state = 'chatting', chatting_with = $2, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id",
+        "UPDATE users SET state = 'chatting', chatting_with = $2, match_ready = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'idle' AND match_ready = TRUE RETURNING id",
         [candidateId, userId],
       );
       if (claimed.rowCount && claimedPartner.rowCount) {
@@ -693,6 +712,7 @@ bot.on("message", async (msg) => {
       return;
     }
     if (isScamContactRequest(text)) { await sendScamWarning(id, user.chattingWith || undefined, text); }
+    if (isScamContactRequest(text)) return;
     const recipientId = user.chattingWith;
     if (!recipientId || recipientId === 0) { await disconnect(id, "The chat ended because the partner is no longer available."); return; }
     const recipient = await getUser(recipientId);
@@ -709,6 +729,7 @@ bot.on("message", async (msg) => {
   if (action === "admin panel" && id === ADMIN_ID) { await bot.sendMessage(msg.chat.id, "🛠️ <b>Admin controls</b>\n\n/ban ID reason\n/unban ID\n/grantlifetime ID\n/stats\n\nYou can match female or male users with the admin buttons above.", { parse_mode: "HTML", reply_markup: mainKeyboard(user) }); return; }
   if (action === "find a match" || action === "find match" || action === "match") { await findMatch(id, msg.chat.id); return; }
   if (action === "unlock premium") { await sendPremium(msg.chat.id); return; }
+  if (action === "amazon deals" || action === "deals") { await sendDeals(msg.chat.id); return; }
   if (action === "my profile") { await bot.sendMessage(msg.chat.id, "Use /profile to view your profile. Gender cannot be changed after signup."); return; }
   if (action === "help") { return; }
   if (action === "create profile") { await startProfile(msg.chat.id, id); return; }
