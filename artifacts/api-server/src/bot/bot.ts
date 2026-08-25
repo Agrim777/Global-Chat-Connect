@@ -10,6 +10,7 @@ const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
 const POLICY_VERSION = "2026-08-23";
 const MAX_REPORTS_BEFORE_ALERT = 3;
 let activeOfferExpiresAt: Date | null = null;
+let broadcastOfferRunning = false;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000; // users seen in the last two minutes are considered online
 const MATCH_ACTIVE_WINDOW_MINUTES = 10;
 const bot = new TelegramBot(TOKEN, { polling: false });
@@ -736,8 +737,17 @@ bot.on("message", async (msg) => {
   await sendMain(msg.chat.id, user, "Use the menu buttons to find a match, edit your profile, or manage your account.");
 });
 
-bot.onText(/^\/broadcastoffer$/i, async (msg) => {
+bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
+  if (broadcastOfferRunning) {
+    await bot.sendMessage(msg.chat.id, "⏳ A broadcast is already running. Please wait for its delivery summary.").catch(() => {});
+    return;
+  }
+  broadcastOfferRunning = true;
+  let sent = 0;
+  let skipped = 0;
+  const failureExamples: string[] = [];
+  try {
   activeOfferExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
   await schemaReady;
   await pool.query(
@@ -749,8 +759,6 @@ bot.onText(/^\/broadcastoffer$/i, async (msg) => {
   // Send to every non-banned account, including users who have been inactive.
   // Telegram rejects blocked/deleted chats; those users are skipped below.
   const allUsers = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.isBanned, false));
-  let sent = 0;
-  let skipped = 0;
   for (const target of allUsers) {
     if (target.id === ADMIN_ID) continue;
     try {
@@ -759,11 +767,23 @@ bot.onText(/^\/broadcastoffer$/i, async (msg) => {
       sent++;
     } catch (err) {
       skipped++;
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (failureExamples.length < 5) failureExamples.push(`${target.id}: ${errorMessage.slice(0, 120)}`);
       logger.warn({ userId: target.id, err }, "Broadcast offer skipped unavailable Telegram chat");
     }
   }
-  logger.info({ sent, skipped, totalUsers: allUsers.length - 1 }, "Broadcast offer completed");
-  await bot.sendMessage(msg.chat.id, `✅ Offer sent to ${sent} users. ${skipped} unavailable or blocked users were skipped. Valid for 48 hours.`);
+  const eligibleUsers = allUsers.filter((target) => target.id !== ADMIN_ID).length;
+  logger.info({ sent, skipped, eligibleUsers, expiresAt: activeOfferExpiresAt }, "Broadcast offer completed");
+  const details = failureExamples.length
+    ? `\n\nFirst failures:\n${failureExamples.map((item) => `• ${item}`).join("\n")}`
+    : "";
+  await bot.sendMessage(msg.chat.id, `✅ Offer broadcast completed.\n\nDelivered: ${sent}\nSkipped/failed: ${skipped}\nEligible accounts: ${eligibleUsers}\nValid for 48 hours.${details}`);
+  } catch (err) {
+    logger.error({ err }, "Broadcast offer failed");
+    await bot.sendMessage(msg.chat.id, "❌ Broadcast could not complete because of a server or database error. Check the Railway logs and try again.").catch(() => {});
+  } finally {
+    broadcastOfferRunning = false;
+  }
 });
 
 bot.onText(/^\/stats$/i, async (msg) => {
