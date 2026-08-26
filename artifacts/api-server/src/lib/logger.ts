@@ -18,3 +18,11 @@ export const logger = pino({
         },
       }),
 });
+
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err }, "Uncaught exception");
+});
+
+process.on("unhandledRejection", (err) => {
+  logger.fatal({ err }, "Unhandled promise rejection");
+});

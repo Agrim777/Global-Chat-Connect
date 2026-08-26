@@ -6,7 +6,9 @@ import { logger } from "../lib/logger";
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
-const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "0");
+// Keep the requested admin account working even if Railway has not yet added
+// the optional environment variable. The variable still takes precedence.
+const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID ?? "8273572245");
 const POLICY_VERSION = "2026-08-23";
 const MAX_REPORTS_BEFORE_ALERT = 3;
 let activeOfferExpiresAt: Date | null = null;
@@ -116,6 +118,7 @@ function wait(milliseconds: number): Promise<void> {
 }
 
 function isPaidAndActive(user: any): boolean {
+  if (user?.id === ADMIN_ID) return true;
   if (user.gender === "female") return true;
   if (!user.hasPaid) return false;
   if (user.premiumPlan === "lifetime") return true;
@@ -150,6 +153,7 @@ async function ensureSchema() {
       gender_locked BOOLEAN NOT NULL DEFAULT FALSE, compliance_version VARCHAR(30),
       female_join_notified BOOLEAN NOT NULL DEFAULT FALSE,
       premium_plan VARCHAR(20), premium_expires_at TIMESTAMP,
+      broadcast_opt_out BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMP NOT NULL DEFAULT NOW(), updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
       last_seen_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
@@ -165,6 +169,7 @@ async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS female_join_notified BOOLEAN NOT NULL DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS premium_plan VARCHAR(20),
       ADD COLUMN IF NOT EXISTS premium_expires_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS broadcast_opt_out BOOLEAN NOT NULL DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP NOT NULL DEFAULT NOW();
     CREATE TABLE IF NOT EXISTS banned_users (
       id BIGINT PRIMARY KEY, banned_at TIMESTAMP NOT NULL DEFAULT NOW(), banned_by BIGINT, reason TEXT
@@ -197,11 +202,18 @@ async function ensureSchema() {
       CHECK (user_a < user_b)
     );
     CREATE INDEX IF NOT EXISTS match_history_recent_idx ON match_history (matched_at DESC);
+    CREATE TABLE IF NOT EXISTS lifetime_gifts (
+      user_id BIGINT PRIMARY KEY,
+      paid_through TIMESTAMP NOT NULL,
+      gifted_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
   `);
   logger.info("Safety schema ensured");
 }
-const schemaReady = ensureSchema().catch((err) => {
+const schemaReady = ensureSchema();
+schemaReady.catch((err) => {
   logger.error({ err }, "Safety schema migration failed");
+  console.error("[BOT_SCHEMA_ERROR]", err);
 });
 
 async function getUser(id: number) {
@@ -217,6 +229,12 @@ async function getUser(id: number) {
 async function isBanned(id: number): Promise<boolean> {
   const [ban] = await db.select({ id: bannedUsersTable.id }).from(bannedUsersTable).where(eq(bannedUsersTable.id, id));
   return Boolean(ban);
+}
+
+async function rejectBanned(id: number, chatId: number): Promise<boolean> {
+  if (id === ADMIN_ID || !(await isBanned(id))) return false;
+  await bot.sendMessage(chatId, "This account is not allowed to use the bot.").catch(() => {});
+  return true;
 }
 
 async function upsertUser(id: number, data: Partial<typeof usersTable.$inferInsert>) {
@@ -253,7 +271,9 @@ function mainKeyboard(user: any): TelegramBot.ReplyKeyboardMarkup {
     [{ text: BUTTONS.profile }, { text: BUTTONS.edit }],
     [{ text: BUTTONS.delete }],
   ];
-  if (user.gender !== "female" && !isPaidAndActive(user)) rows.push([{ text: BUTTONS.premium }]);
+  if (user.id !== ADMIN_ID && user.gender !== "female" && !isPaidAndActive(user)) {
+    rows.push([{ text: BUTTONS.premium }]);
+  }
   if (user.id === ADMIN_ID) {
     rows.push([{ text: BUTTONS.adminFemale }, { text: BUTTONS.adminMale }]);
     rows.push([{ text: BUTTONS.adminPanel }]);
@@ -346,6 +366,10 @@ async function sendDeals(chatId: number) {
 }
 
 async function sendPremium(chatId: number) {
+  if (chatId === ADMIN_ID) {
+    await bot.sendMessage(chatId, "👑 Admin access is free. You do not need Premium.");
+    return;
+  }
   await bot.sendMessage(chatId, `⭐ <b>Paid access required</b>\n\nComplete a Telegram Stars purchase to unlock anonymous human matching. Payment does not guarantee a specific gender, person, response, or outcome.`, { parse_mode: "HTML" });
   for (const [key, plan] of Object.entries(PREMIUM_PLANS) as [PremiumPlanKey, (typeof PREMIUM_PLANS)[PremiumPlanKey]][]) {
     await bot.sendInvoice(chatId, plan.label, `Anonymous dating-chat access: ${plan.label}.`, `access:${key}`, "", "XTR", [{ label: plan.label, amount: plan.stars }], {
@@ -375,6 +399,56 @@ async function activatePremium(userId: number, plan: PremiumPlanKey) {
   return expiry;
 }
 
+async function giftRecentPayersLifetimeAccess(): Promise<void> {
+  await schemaReady;
+  const result = await pool.query(`
+    SELECT p.user_id, MAX(p.created_at) AS paid_through
+    FROM premium_payments p
+    LEFT JOIN banned_users b ON b.id = p.user_id
+    WHERE p.created_at >= NOW() - INTERVAL '1 month'
+      AND b.id IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM lifetime_gifts g WHERE g.user_id = p.user_id
+      )
+    GROUP BY p.user_id
+    ORDER BY MAX(p.created_at) DESC
+  `);
+
+  let gifted = 0;
+  let skipped = 0;
+  for (const row of result.rows) {
+    const userId = Number(row.user_id);
+    const paidThrough = new Date(row.paid_through);
+    try {
+      const ledger = await pool.query(
+        `INSERT INTO lifetime_gifts (user_id, paid_through)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO NOTHING
+         RETURNING user_id`,
+        [userId, paidThrough],
+      );
+      if (!ledger.rowCount) continue;
+
+      await db.update(usersTable)
+        .set({ hasPaid: true, premiumPlan: "lifetime", premiumExpiresAt: null, updatedAt: new Date() })
+        .where(eq(usersTable.id, userId));
+
+      await bot.sendMessage(
+        userId,
+        "🎁 <b>A gift for you!</b>\n\nBecause you purchased Premium within the last month, we have upgraded your account to <b>Lifetime Premium</b> completely free.\n\nEnjoy unlimited matching — thank you for being with us! 💛",
+        { parse_mode: "HTML" },
+      );
+      gifted++;
+      logger.info({ userId, paidThrough }, "Lifetime Premium gift delivered to recent payer");
+    } catch (err) {
+      skipped++;
+      logger.warn({ err, userId }, "Lifetime Premium gift could not be delivered");
+    }
+    await wait(250);
+  }
+  logger.info({ eligible: result.rows.length, gifted, skipped }, "Recent payer lifetime gift run completed");
+}
+
 async function disconnect(userId: number, reason: string) {
   const user = await getUser(userId);
   if (!user) return;
@@ -394,6 +468,10 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   const isAdmin = userId === ADMIN_ID;
   logger.info({ userId, desiredGender: desiredGender || "compatible" }, "Match requested");
   await schemaReady;
+  if (!isAdmin && await isBanned(userId)) {
+    await bot.sendMessage(chatId, "This account is not allowed to use the bot.");
+    return;
+  }
   await upsertUser(userId, { isActive: true });
   const user = await getUser(userId);
   if (!user) { await bot.sendMessage(chatId, "Please use /start first."); return; }
@@ -411,19 +489,14 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   try {
     await client.query("BEGIN");
     await client.query("UPDATE users SET match_ready = TRUE, is_active = TRUE, updated_at = NOW() WHERE id = $1", [userId]);
-    // Release abandoned or half-created chats so the queue cannot fill with stuck users.
-    await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, match_ready = FALSE, updated_at = NOW() WHERE state = 'chatting' AND (chatting_with IS NULL OR chatting_with = 0 OR last_seen_at < NOW() - INTERVAL '10 minutes')");
+    // Release only malformed chats. A matched user may be offline temporarily;
+    // keep that chat alive so they can receive the match notification and reply later.
+    await client.query("UPDATE users SET state = 'idle', chatting_with = NULL, match_ready = FALSE, updated_at = NOW() WHERE state = 'chatting' AND (chatting_with IS NULL OR chatting_with = 0)");
     const params: unknown[] = [userId];
     const filters = [
       "u.id <> $1", "u.is_profile_complete = TRUE", "u.is_active = TRUE",
       "u.is_banned = FALSE", "u.terms_accepted = TRUE", "u.age_verified = TRUE",
-      "u.state = 'idle'", "u.match_ready = TRUE", "u.gender IS NOT NULL",
-      `u.last_seen_at >= NOW() - INTERVAL '${MATCH_ACTIVE_WINDOW_MINUTES} minutes'`,
-      `NOT EXISTS (
-        SELECT 1 FROM match_history mh
-        WHERE mh.user_a = LEAST(u.id, $1)
-          AND mh.user_b = GREATEST(u.id, $1)
-      )`,
+      "u.state = 'idle'", "u.gender IS NOT NULL",
     ];
     if (!isAdmin) {
       // Female users have free access; male users must have active paid access.
@@ -435,7 +508,7 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
       params.push(desiredGender); filters.push(`u.gender = $${params.length}`);
     }
     const result = await client.query(
-      `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY (u.last_seen_at >= NOW() - INTERVAL '2 minutes') DESC, (u.last_seen_at >= NOW() - INTERVAL '24 hours') DESC, u.last_seen_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED`,
+      `SELECT u.id FROM users u WHERE ${filters.join(" AND ")} ORDER BY u.last_seen_at DESC, u.id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`,
       params,
     );
     const candidateId = result.rows[0] ? Number(result.rows[0].id) : null;
@@ -445,7 +518,7 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
         [userId, candidateId],
       );
       const claimedPartner = await client.query(
-        "UPDATE users SET state = 'chatting', chatting_with = $2, match_ready = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'idle' AND match_ready = TRUE RETURNING id",
+        "UPDATE users SET state = 'chatting', chatting_with = $2, match_ready = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'idle' RETURNING id",
         [candidateId, userId],
       );
       if (claimed.rowCount && claimedPartner.rowCount) {
@@ -487,10 +560,14 @@ async function findMatch(userId: number, chatId: number, desiredGender?: "male" 
   const partner = await getUser(partnerId);
   const myName = displayName(user);
   const partnerName = displayName(partner);
-  await Promise.all([
-    bot.sendMessage(chatId, `💘 Connected with <b>${escHtml(partnerName)}</b>! Say hello and keep it respectful — text only. 😊`, { parse_mode: "HTML", reply_markup: chatKeyboard }),
-    bot.sendMessage(partnerId, `💘 Connected with <b>${escHtml(myName)}</b>! Say hello and keep it respectful — text only. 😊`, { parse_mode: "HTML", reply_markup: chatKeyboard }),
+  const [myNotification, partnerNotification] = await Promise.allSettled([
+    bot.sendMessage(chatId, `🔔 <b>Match notification</b>\n\n💘 You are connected with <b>${escHtml(partnerName)}</b>! Say hello and keep it respectful — text only. 😊`, { parse_mode: "HTML", reply_markup: chatKeyboard }),
+    bot.sendMessage(partnerId, `🔔 <b>Match notification</b>\n\n💘 You are connected with <b>${escHtml(myName)}</b>! Say hello and keep it respectful — text only. 😊`, { parse_mode: "HTML", reply_markup: chatKeyboard }),
   ]);
+  if (myNotification.status === "rejected" || partnerNotification.status === "rejected") {
+    logger.warn({ userId, partnerId, myNotification: myNotification.status, partnerNotification: partnerNotification.status }, "Match notification failed; disconnecting match");
+    await disconnect(userId, "The match notification could not be delivered, so the chat was ended. Please try again.");
+  }
 }
 async function reportUser(reporterId: number, reportedId: number, reason = "User report") {
   if (!reportedId || reporterId === reportedId) return 0;
@@ -552,11 +629,12 @@ async function showEditMenu(chatId: number) {
 }
 
 bot.onText(/^\/edit$/i, async (msg) => {
-  if (msg.from?.id) await showEditMenu(msg.chat.id);
+  if (msg.from?.id && !(await rejectBanned(msg.from.id, msg.chat.id))) await showEditMenu(msg.chat.id);
 });
 
 bot.onText(/^\/deleteaccount$/i, async (msg) => {
   if (!msg.from?.id) return;
+  if (await rejectBanned(msg.from.id, msg.chat.id)) return;
   await bot.sendMessage(msg.chat.id, "⚠️ <b>Delete your account?</b>\n\nYour active profile will be removed and any current chat will end. This cannot be undone.", {
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: [[{ text: "✅ Yes, delete my account", callback_data: "delete_account_confirm" }], [{ text: "↩️ Keep my account", callback_data: "delete_account_cancel" }]] },
@@ -565,25 +643,29 @@ bot.onText(/^\/deleteaccount$/i, async (msg) => {
 
 bot.onText(/^\/profile$/i, async (msg) => {
   const id = msg.from?.id; if (!id) return;
+  if (await rejectBanned(id, msg.chat.id)) return;
   const user = await getUser(id);
   if (!user) { await bot.sendMessage(msg.chat.id, "Use /start first."); return; }
   await bot.sendMessage(msg.chat.id, `<b>Your profile</b>\nName: ${escHtml(user.name)}\nAge: ${escHtml(user.age)}\nGender: ${escHtml(user.gender)} (locked after signup)\nStatus: ${user.gender === "female" ? "Free access" : isPaidAndActive(user) ? `Paid access: ${escHtml(user.premiumPlan)}` : "Payment required"}\n\nGender cannot be changed after your account is created.`, { parse_mode: "HTML" });
 });
 
 bot.onText(/^\/(?:match|find)$/i, async (msg) => {
-  if (msg.from?.id) await findMatch(msg.from.id, msg.chat.id);
+  if (msg.from?.id && !(await rejectBanned(msg.from.id, msg.chat.id))) await findMatch(msg.from.id, msg.chat.id);
 });
 bot.onText(/^\/premium$/i, async (msg) => {
-  if (msg.from?.id) await sendPremium(msg.chat.id);
+  if (msg.from?.id && await rejectBanned(msg.from.id, msg.chat.id)) return;
+  if (msg.from?.id && msg.from.id !== ADMIN_ID) await sendPremium(msg.chat.id);
+  else if (msg.from?.id === ADMIN_ID) await bot.sendMessage(msg.chat.id, "👑 Admin access is free. You do not need Premium.");
 });
 bot.onText(/^\/stop$/i, async (msg) => {
-  if (msg.from?.id) await disconnect(msg.from.id, "The anonymous chat ended.");
+  if (msg.from?.id && !(await rejectBanned(msg.from.id, msg.chat.id))) await disconnect(msg.from.id, "The anonymous chat ended.");
 });
 bot.onText(/^\/(?:end|endchat|end_chat)$/i, async (msg) => {
-  if (msg.from?.id) await disconnect(msg.from.id, "The anonymous chat ended.");
+  if (msg.from?.id && !(await rejectBanned(msg.from.id, msg.chat.id))) await disconnect(msg.from.id, "The anonymous chat ended.");
 });
 bot.onText(/^\/report(?:\s+(.+))?$/i, async (msg, match) => {
   const id = msg.from?.id; if (!id) return;
+  if (await rejectBanned(id, msg.chat.id)) return;
   const user = await getUser(id);
   if (!user?.chattingWith) { await bot.sendMessage(msg.chat.id, "You are not currently chatting. Reports can be made while connected."); return; }
   const count = await reportUser(id, user.chattingWith, match?.[1] || "Reported from chat");
@@ -596,6 +678,7 @@ bot.on("callback_query", async (query) => {
   const data = query.data || "";
   if (!id || !chatId) return;
   await bot.answerCallbackQuery(query.id).catch(() => {});
+  if (await rejectBanned(id, chatId)) return;
   if (data === "show_privacy") { await bot.sendMessage(chatId, PRIVACY, { parse_mode: "HTML" }); return; }
   if (data === "end_chat") { await disconnect(id, "The anonymous chat ended."); return; }
   if (data === "delete_account_cancel") { await bot.sendMessage(chatId, "Cancelled — your account is safe. 😊"); return; }
@@ -636,6 +719,11 @@ bot.on("message", async (msg) => {
   const id = msg.from?.id;
   const payment = msg.successful_payment;
   if (!id || !payment || payment.currency !== "XTR") return;
+  if (id === ADMIN_ID) {
+    logger.warn({ userId: id }, "Admin payment ignored because admin access is free");
+    await bot.sendMessage(msg.chat.id, "👑 Admin access is free. No payment is required.");
+    return;
+  }
   await schemaReady;
   const plan = payment.invoice_payload.match(/^access:(twoweek|month|lifetime)$/)?.[1] as PremiumPlanKey | undefined;
   const isOffer = payment.invoice_payload === "offer:lifetime48" && await isLifetimeOfferActive();
@@ -751,11 +839,11 @@ bot.on("message", async (msg) => {
   const action = normalizeAction(text);
   if (action === "edit profile") { await showEditMenu(msg.chat.id); return; }
   if (action === "delete account") { await bot.sendMessage(msg.chat.id, "⚠️ Delete your account? Use the confirmation below.", { reply_markup: { inline_keyboard: [[{ text: "✅ Yes, delete my account", callback_data: "delete_account_confirm" }], [{ text: "↩️ Keep my account", callback_data: "delete_account_cancel" }]] } }); return; }
-  if (action === "match female" && id === ADMIN_ID) { await findMatch(id, msg.chat.id, "female"); return; }
-  if (action === "match male" && id === ADMIN_ID) { await findMatch(id, msg.chat.id, "male"); return; }
+  if ((action === "match female" || action === "match females") && id === ADMIN_ID) { await findMatch(id, msg.chat.id, "female"); return; }
+  if ((action === "match male" || action === "match males") && id === ADMIN_ID) { await findMatch(id, msg.chat.id, "male"); return; }
   if (action === "admin panel" && id === ADMIN_ID) { await bot.sendMessage(msg.chat.id, "🛠️ <b>Admin controls</b>\n\n/ban ID reason\n/unban ID\n/grantlifetime ID\n/stats\n\nYou can match female or male users with the admin buttons above.", { parse_mode: "HTML", reply_markup: mainKeyboard(user) }); return; }
-  if (action === "find a match" || action === "find match" || action === "match") { await findMatch(id, msg.chat.id); return; }
-  if (action === "unlock premium") { await sendPremium(msg.chat.id); return; }
+  if (action === "find a match" || action === "find match" || action === "match" || action === "find") { await findMatch(id, msg.chat.id); return; }
+  if (action === "unlock premium" || action === "go premium" || action === "premium") { await sendPremium(msg.chat.id); return; }
   if (action === "amazon deals" || action === "deals") { await sendDeals(msg.chat.id); return; }
   if (action === "my profile") { await bot.sendMessage(msg.chat.id, "Use /profile to view your profile. Gender cannot be changed after signup."); return; }
   if (action === "help") { return; }
@@ -763,7 +851,7 @@ bot.on("message", async (msg) => {
   await sendMain(msg.chat.id, user, "Use the menu buttons to find a match, edit your profile, or manage your account.");
 });
 
-bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
+bot.onText(/^\/(?:broadcastoffer|broadcast_offer|offer)(?:@\w+)?$/i, async (msg) => {
   if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
   if (broadcastOfferRunning) {
     await bot.sendMessage(msg.chat.id, "⏳ A broadcast is already running. Please wait for its delivery summary.").catch(() => {});
@@ -777,6 +865,7 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   let stoppedForFloodLimit = false;
   const failureExamples: string[] = [];
   try {
+  logger.info({ adminId: msg.from?.id, command: "broadcastoffer" }, "Broadcast offer requested");
   await bot.sendMessage(msg.chat.id, "🚀 Broadcast started.\n\nSending the 48-hour Lifetime Premium offer to all non-banned users. I’ll send the complete delivery report when finished.").catch(() => {});
   activeOfferExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
   await schemaReady;
@@ -788,7 +877,10 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   );
   // Send to every non-banned account, including users who have been inactive.
   // Telegram rejects blocked/deleted chats; those users are skipped below.
-  const allUsers = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.isBanned, false));
+   const allUsers = await db.select({ id: usersTable.id }).from(usersTable).where(and(
+     eq(usersTable.isBanned, false),
+     eq(usersTable.broadcastOptOut, false),
+   ));
   for (const target of allUsers) {
     if (target.id === ADMIN_ID) continue;
     // Keep well below Telegram's broadcast limits: each user receives two API calls.
@@ -812,7 +904,7 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
       logger.warn({ userId: target.id, err }, "Broadcast offer skipped unavailable Telegram chat");
     }
   }
-  const eligibleUsers = allUsers.filter((target) => target.id !== ADMIN_ID).length;
+   const eligibleUsers = allUsers.filter((target: { id: number }) => target.id !== ADMIN_ID).length;
   const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
   logger.info({ sent, skipped, blocked, eligibleUsers, durationSeconds, expiresAt: activeOfferExpiresAt }, "Broadcast offer completed");
   const details = failureExamples.length
@@ -829,6 +921,19 @@ bot.onText(/^\/broadcastoffer(?:@\w+)?$/i, async (msg) => {
   }
 });
 
+// Admin: manually retry the recent-payer lifetime gift run.
+bot.onText(/^\/giftrecentpayers$/i, async (msg) => {
+  if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
+  await bot.sendMessage(msg.chat.id, "🎁 Checking Premium payments from the last month and sending eligible Lifetime gifts...");
+  try {
+    await giftRecentPayersLifetimeAccess();
+    await bot.sendMessage(msg.chat.id, "✅ Recent-payer Lifetime gift check completed. See Railway logs for the delivery count.");
+  } catch (err) {
+    logger.error({ err }, "Manual recent payer lifetime gift run failed");
+    await bot.sendMessage(msg.chat.id, "❌ Lifetime gift check failed. Check the Railway logs for details.");
+  }
+});
+
 bot.onText(/^\/stats$/i, async (msg) => {
   if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
   const users = await db.select().from(usersTable);
@@ -838,8 +943,17 @@ bot.onText(/^\/stats$/i, async (msg) => {
 bot.onText(/^\/ban\s+(\d+)\s*(.*)$/i, async (msg, match) => {
   if (!ADMIN_ID || msg.from?.id !== ADMIN_ID) return;
   const targetId = Number(match?.[1]); const reason = match?.[2] || "Safety violation";
+  const target = await getUser(targetId);
+  if (target?.chattingWith && target.chattingWith !== 0) {
+    const partnerId = target.chattingWith;
+    const partner = await getUser(partnerId);
+    await db.update(usersTable)
+      .set({ state: "idle", chattingWith: null, updatedAt: new Date() })
+      .where(and(eq(usersTable.id, partnerId), eq(usersTable.chattingWith, targetId)));
+    if (partner) await sendMain(partnerId, partner, "The chat ended because the other account is no longer available.").catch(() => {});
+  }
   await db.insert(bannedUsersTable).values({ id: targetId, bannedBy: ADMIN_ID, reason }).onConflictDoNothing();
-  await db.update(usersTable).set({ isBanned: true, isActive: false, state: "idle", chattingWith: null }).where(eq(usersTable.id, targetId));
+  await db.update(usersTable).set({ isBanned: true, isActive: false, state: "idle", chattingWith: null, updatedAt: new Date() }).where(eq(usersTable.id, targetId));
   await bot.sendMessage(msg.chat.id, `Banned <code>${targetId}</code>.`, { parse_mode: "HTML" });
   await bot.sendMessage(targetId, "Your account has been suspended for a safety violation.").catch(() => {});
 });
@@ -870,6 +984,12 @@ bot.on("error", (err: Error) => {
 });
 
 const pollingEnabled = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.BOT_POLLING_ENABLED === "true");
+void schemaReady
+  .then(() => giftRecentPayersLifetimeAccess())
+  .catch((err) => {
+    logger.error({ err }, "Automatic recent payer lifetime gift run failed");
+    console.error("[BOT_GIFT_ERROR]", err);
+  });
 if (pollingEnabled) {
   void (async () => {
     for (let i = 0; i < 2; i++) {
