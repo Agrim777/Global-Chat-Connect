@@ -35,6 +35,7 @@ const BUTTONS = {
   stop: "🛑 End Chat",
   report: "🚩 Report User",
   deals: "🔥 Amazon Deals",
+  ebook: "📘 Ebook",
   edit: "✏️ Edit Profile",
   delete: "🗑️ Delete Account",
   adminFemale: "👩 Match Female",
@@ -267,7 +268,7 @@ async function notifyFemaleJoin(user: any) {
 function mainKeyboard(user: any): TelegramBot.ReplyKeyboardMarkup {
   const rows: TelegramBot.KeyboardButton[][] = [
     [{ text: BUTTONS.match }],
-    [{ text: BUTTONS.deals }],
+    [{ text: BUTTONS.ebook }],
     [{ text: BUTTONS.profile }, { text: BUTTONS.edit }],
     [{ text: BUTTONS.delete }],
   ];
@@ -362,6 +363,14 @@ async function sendDeals(chatId: number) {
     parse_mode: "HTML",
     disable_web_page_preview: false,
     reply_markup: { inline_keyboard: [[{ text: "🔥 Open @dealsatyourdoo", url: "https://t.me/dealsatyourdoo" }]] },
+  });
+}
+
+async function sendEbook(chatId: number) {
+  await bot.sendMessage(chatId, "📘 <b>Read the Ebook</b>\n\nBuild confidence and create a stronger life with this practical guide.", {
+    parse_mode: "HTML",
+    disable_web_page_preview: false,
+    reply_markup: { inline_keyboard: [[{ text: "📖 Open Ebook", url: "https://confidentlife.gumroad.com/l/wrxspb" }]] },
   });
 }
 
@@ -844,6 +853,7 @@ bot.on("message", async (msg) => {
   if (action === "admin panel" && id === ADMIN_ID) { await bot.sendMessage(msg.chat.id, "🛠️ <b>Admin controls</b>\n\n/ban ID reason\n/unban ID\n/grantlifetime ID\n/stats\n\nYou can match female or male users with the admin buttons above.", { parse_mode: "HTML", reply_markup: mainKeyboard(user) }); return; }
   if (action === "find a match" || action === "find match" || action === "match" || action === "find") { await findMatch(id, msg.chat.id); return; }
   if (action === "unlock premium" || action === "go premium" || action === "premium") { await sendPremium(msg.chat.id); return; }
+  if (action === "ebook") { await sendEbook(msg.chat.id); return; }
   if (action === "amazon deals" || action === "deals") { await sendDeals(msg.chat.id); return; }
   if (action === "my profile") { await bot.sendMessage(msg.chat.id, "Use /profile to view your profile. Gender cannot be changed after signup."); return; }
   if (action === "help") { return; }
