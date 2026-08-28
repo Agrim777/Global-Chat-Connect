@@ -853,7 +853,7 @@ bot.on("message", async (msg) => {
   if (action === "admin panel" && id === ADMIN_ID) { await bot.sendMessage(msg.chat.id, "🛠️ <b>Admin controls</b>\n\n/ban ID reason\n/unban ID\n/grantlifetime ID\n/stats\n\nYou can match female or male users with the admin buttons above.", { parse_mode: "HTML", reply_markup: mainKeyboard(user) }); return; }
   if (action === "find a match" || action === "find match" || action === "match" || action === "find") { await findMatch(id, msg.chat.id); return; }
   if (action === "unlock premium" || action === "go premium" || action === "premium") { await sendPremium(msg.chat.id); return; }
-  if (action === "ebook") { await sendEbook(msg.chat.id); return; }
+  if (action === "ebook" || action === "how to make a bot and earn") { await sendEbook(msg.chat.id); return; }
   if (action === "amazon deals" || action === "deals") { await sendDeals(msg.chat.id); return; }
   if (action === "my profile") { await bot.sendMessage(msg.chat.id, "Use /profile to view your profile. Gender cannot be changed after signup."); return; }
   if (action === "help") { return; }
